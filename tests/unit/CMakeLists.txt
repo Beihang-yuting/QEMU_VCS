@@ -1,0 +1,3 @@
+add_executable(test_ring_buffer test_ring_buffer.c)
+target_link_libraries(test_ring_buffer cosim_bridge_common)
+add_test(NAME test_ring_buffer COMMAND test_ring_buffer)
