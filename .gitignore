@@ -1,0 +1,46 @@
+# Build artifacts
+build/
+cmake-build-*/
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+compile_commands.json
+Makefile.cmake
+
+# Binary outputs
+*.o
+*.a
+*.so
+*.so.*
+*.dylib
+
+# VCS simulation artifacts
+simv
+simv.daidir/
+csrc/
+ucli.key
+vc_hdrs.h
+*.vpd
+*.fsdb
+*.vcd
+
+# SHM / socket runtime files
+/tmp/cosim*.sock
+cosim_trace.csv
+cosim_trace.json
+
+# Editor / IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Logs
+*.log
