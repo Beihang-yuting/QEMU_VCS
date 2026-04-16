@@ -22,3 +22,12 @@ add_test(NAME test_precise_mode COMMAND test_precise_mode)
 add_test(NAME test_cli_smoke
          COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/test_cli_smoke.sh)
 set_tests_properties(test_cli_smoke PROPERTIES TIMEOUT 10)
+
+# P3 ETH integration tests
+add_executable(test_eth_loopback test_eth_loopback.c)
+target_link_libraries(test_eth_loopback cosim_eth)
+add_test(NAME test_eth_loopback COMMAND test_eth_loopback)
+
+add_executable(test_link_drop test_link_drop.c)
+target_link_libraries(test_link_drop cosim_eth)
+add_test(NAME test_link_drop COMMAND test_link_drop)

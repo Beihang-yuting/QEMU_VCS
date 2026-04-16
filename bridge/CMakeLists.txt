@@ -31,3 +31,6 @@ target_include_directories(cosim_bridge_vcs PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/vcs
 )
 target_link_libraries(cosim_bridge_vcs PRIVATE cosim_bridge_common rt pthread)
+
+# P3: ETH layer (link model + eth_port + MAC)
+add_subdirectory(eth)
