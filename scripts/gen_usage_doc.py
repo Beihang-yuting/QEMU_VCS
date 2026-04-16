@@ -167,7 +167,7 @@ def build() -> None:
     meta = doc.add_paragraph()
     meta.alignment = WD_ALIGN_PARAGRAPH.CENTER
     for line in [
-        "版本：P2（DMA + 中断 + 精确模式）",
+        "版本：P3（双节点 ETH 互打 + 链路模型）",
         "日期：2026-04-16",
         "维护者：Beihang-yuting <2965455908@qq.com>",
         "仓库：https://github.com/Beihang-yuting/QEMU_VCS",
@@ -192,6 +192,9 @@ def build() -> None:
     add_bullet(doc, "双模式同步：快速模式（事务级）与精确模式（周期级锁步）")
     add_bullet(doc, "运行时模式切换、事务级追踪日志（CSV/JSON）")
     add_bullet(doc, "POSIX 共享内存 + Unix Domain Socket 低开销 IPC")
+    add_bullet(doc, "**双节点以太网互打**（P3）：ETH SHM 帧队列、9KB Jumbo、松耦合时间同步")
+    add_bullet(doc, "**链路模型**（P3）：丢包率、突发丢包、固定延迟、速率限、流控窗口")
+    add_bullet(doc, "**调试工具链**（P4）：cosim_cli REPL、trace_analyzer、launch_dual 编排")
 
     add_heading(doc, "1.2 系统架构", 2)
     add_para(doc,
@@ -271,10 +274,14 @@ def build() -> None:
              "# 运行全部单元+集成测试\n"
              "make test\n\n"
              "# 预期：9/9 测试通过")
-    add_para(doc, "测试项：")
-    add_bullet(doc, "单元：test_ring_buffer, test_shm_layout, test_dma_manager, test_trace_log")
-    add_bullet(doc, "集成：test_sock_sync, test_bridge_loopback, test_dma_roundtrip, "
+    add_para(doc, "测试项（共 17 个）：")
+    add_bullet(doc, "单元 P1/P2/P3：test_ring_buffer, test_shm_layout, test_dma_manager, "
+                   "test_trace_log, test_eth_shm, test_link_model")
+    add_bullet(doc, "集成 PCIe：test_sock_sync, test_bridge_loopback, test_dma_roundtrip, "
                    "test_msi_roundtrip, test_precise_mode")
+    add_bullet(doc, "集成 ETH（P3）：test_eth_loopback, test_link_drop, test_mac_stub_e2e, "
+                   "test_time_sync_loose")
+    add_bullet(doc, "工具（P4）：test_cli_smoke, test_launch_smoke")
 
     add_heading(doc, "4.3 集成到 QEMU 源码树", 2)
     add_para(doc, "自定义 PCIe RC 设备需要装入 QEMU 源码树后再编译 QEMU：")
@@ -481,9 +488,9 @@ def build() -> None:
               headers=["阶段", "交付内容", "状态"],
               rows=[
                   ["P1", "单节点 PCIe MMIO 通路、快速模式", "已完成，10 commits，test_bridge_loopback 通过"],
-                  ["P2", "DMA + MSI + 精确模式 + Trace", "已完成，10 commits，9/9 测试通过"],
-                  ["P3", "双节点 ETH 互打（bridge/eth + 双 VCS）", "未开始"],
-                  ["P4", "cosim_cli, trace_analyzer, GDB 集成, CI", "未开始"],
+                  ["P2", "DMA + MSI + 精确模式 + Trace", "已完成，10 commits，5 集成测试通过"],
+                  ["P3", "双节点 ETH 互打 + 链路模型 + launch_dual", "已完成，7 commits，4 集成测试通过"],
+                  ["P4", "cosim_cli, trace_analyzer, GDB 文档, CI, smoke", "已完成，6 commits，CI Run 全绿"],
               ])
 
     add_heading(doc, "9.2 推送到远程仓库", 2)
@@ -499,6 +506,129 @@ def build() -> None:
     add_bullet(doc, "P3：双节点以太网互打（bridge/eth + 链路模型）")
     add_bullet(doc, "P4：cosim_cli 调试控制台 + trace_analyzer 分析工具")
     add_bullet(doc, "CI：GitHub Actions 跑 make test；VCS 侧 smoke test 留为 manual trigger")
+
+    doc.add_page_break()
+
+    # ---------- 11. P3 双节点 ETH ----------
+    add_heading(doc, "11. 双节点 ETH 互打（P3）", 1)
+
+    add_para(doc,
+             "P3 增加了第二条共享内存通路（ETH SHM），允许两个 CoSim 节点（各自一对 "
+             "QEMU+VCS）通过一条软件以太网链路互通。链路模型支持丢包、突发丢包、固定延迟、"
+             "速率限和流控窗口；时间同步采用松耦合模式（每节点事件驱动，事件戳通过 SHM "
+             "barrier 单调推进）。")
+
+    add_heading(doc, "11.1 双节点架构", 2)
+    add_bullet(doc, "Node A：QEMU-A + VCS-A，通过 PCIe SHM 互联")
+    add_bullet(doc, "Node B：QEMU-B + VCS-B，通过 PCIe SHM 互联")
+    add_bullet(doc, "ETH SHM：A 与 B 节点之间的双向帧队列（A→B 和 B→A）")
+    add_bullet(doc, "MAC stub（mac_stub.{c,h}）：本地软件 MAC，无需真实 RTL 即可端到端")
+    add_bullet(doc, "DPI-C 接口（eth_mac_dpi.{c,h}）：真实 RTL MAC 上线后从此接入")
+
+    add_heading(doc, "11.2 启动双节点（launch_dual.py）", 2)
+    add_code(doc,
+             "# 冒烟（不需要真实 QEMU/VCS）\n"
+             "python3 scripts/launch_dual.py --launcher-cmd \"sleep 10\" --smoke\n\n"
+             "# 真实双节点（需要 run_cosim.sh 已配置好 QEMU 镜像）\n"
+             "python3 scripts/launch_dual.py \\\n"
+             "    --shm-pcie-a /cosim-pcie-a --sock-a /tmp/cosim-a.sock \\\n"
+             "    --shm-pcie-b /cosim-pcie-b --sock-b /tmp/cosim-b.sock \\\n"
+             "    --shm-eth   /cosim-eth0\n\n"
+             "# SSH 远程模式（节点 B 跑在另一台机器上）\n"
+             "python3 scripts/launch_dual.py --mode ssh --node-b-host bob@dev.lan")
+
+    add_heading(doc, "11.3 链路模型配置", 2)
+    add_table(doc,
+              headers=["字段", "类型", "示例", "说明"],
+              rows=[
+                  ["drop_rate_ppm",   "u32", "100000",  "每百万帧的进入丢包概率（10%）"],
+                  ["burst_drop_len",  "u16", "5",       "一旦触发，连续丢的帧数"],
+                  ["latency_ns",      "u64", "5000",    "每帧固定单向延迟（5us）"],
+                  ["rate_mbps",       "u32", "1000",    "线速率，0 = 无限"],
+                  ["fc_window",       "u32", "4",       "最大在飞帧数（流控），0 = 无限"],
+              ])
+    add_code(doc,
+             "/* C 侧示例：模拟 1Gbps 链路 + 10% 丢包 + 4 帧 FC 窗口 */\n"
+             "eth_port_t port = {0};\n"
+             "port.link.drop_rate_ppm  = 100000;\n"
+             "port.link.burst_drop_len = 1;\n"
+             "port.link.latency_ns     = 5000;\n"
+             "port.link.rate_mbps      = 1000;\n"
+             "port.link.fc_window      = 4;\n"
+             "eth_port_open(&port, \"/cosim-eth0\", ETH_ROLE_A, 1);")
+
+    add_heading(doc, "11.4 ETH API（eth_port.h）", 2)
+    add_table(doc,
+              headers=["函数", "说明"],
+              rows=[
+                  ["eth_port_open(port, name, role, create)",
+                   "打开 ETH 端口，绑定 SHM 与角色（A/B）"],
+                  ["eth_port_send(port, frame, now_ns)",
+                   "发帧；返回 0 / -1 ring full / -2 FC 阻塞 / -3 链路丢包"],
+                  ["eth_port_recv(port, out, timeout_ns)",
+                   "收帧；timeout=0 非阻塞，>0 阻塞超时"],
+                  ["eth_port_tx_complete(port)",
+                   "对端已消费 → 减 outstanding（FC 用）"],
+                  ["eth_port_close(port)",
+                   "关闭端口，owned_shm=1 时自动 unlink SHM"],
+                  ["eth_shm_advance_time(shm, role, ns)",
+                   "松耦合：发布本节点 sim 时间"],
+                  ["eth_shm_peer_time(shm, self_role)",
+                   "松耦合：读取对方节点最近时间"],
+              ])
+
+    add_heading(doc, "11.5 VCS RTL MAC 接入路径", 2)
+    add_para(doc, "当真实 MAC RTL 就绪时，按以下步骤替换 MAC stub：")
+    add_bullet(doc, "在 SystemVerilog 顶层 import \"DPI-C\" 声明 vcs_eth_mac_*_dpi 函数")
+    add_bullet(doc, "RTL MAC TX：MAC 输出帧后调 vcs_eth_mac_send_frame_dpi(data, len)")
+    add_bullet(doc, "RTL MAC RX 轮询：每周期或空闲调 vcs_eth_mac_poll_frame_dpi(buf, max_len)")
+    add_bullet(doc, "复位 / 关闭：vcs_eth_mac_close_dpi()")
+    add_bullet(doc, "链路参数运行时调整：vcs_eth_mac_configure_link_dpi(...)")
+
+    doc.add_page_break()
+
+    # ---------- 12. 调试工具（P4）----------
+    add_heading(doc, "12. 调试工具（P4）", 1)
+
+    add_heading(doc, "12.1 cosim_cli 交互式控制台", 2)
+    add_code(doc,
+             "# 启动（先 make bridge）\n"
+             "python3 scripts/cosim_cli.py --shm /cosim0 --sock /tmp/cosim.sock\n\n"
+             "# REPL 内常用命令\n"
+             "cosim> read 0x100\n"
+             "cosim> write 0x200 0xDEADBEEF 4\n"
+             "cosim> mode precise\n"
+             "cosim> advance 1000\n"
+             "cosim> trace on /tmp/trace.csv csv\n"
+             "cosim> status\n"
+             "cosim> quit")
+
+    add_heading(doc, "12.2 trace_analyzer 事务分析", 2)
+    add_code(doc,
+             "# 解析 CSV 或 JSON trace 文件\n"
+             "python3 scripts/trace_analyzer.py /tmp/trace.csv\n\n"
+             "# 输出包含：\n"
+             "#   - 事件分布（按 kind / type）\n"
+             "#   - tag 匹配统计 + 孤立 cpl 检测\n"
+             "#   - 延迟统计（min/mean/median/p95/p99）\n"
+             "#   - ASCII 直方图\n"
+             "#   - DMA 总字节、MSI 向量分布")
+
+    add_heading(doc, "12.3 GDB 调试", 2)
+    add_para(doc, "完整指南：docs/GDB-Debugging-Guide.md")
+    add_code(doc,
+             "# Guest 内核：\n"
+             "GDB=1 ./scripts/run_cosim.sh        # QEMU 在 :1234 等待\n"
+             "gdb vmlinux\n"
+             "(gdb) target remote :1234\n\n"
+             "# Bridge 库：\n"
+             "gdb build/tests/integration/test_dma_roundtrip\n"
+             "(gdb) break bridge_complete_dma")
+
+    add_heading(doc, "12.4 CI / actionlint", 2)
+    add_bullet(doc, ".github/workflows/ci.yml：每次 push/PR 自动 cmake build + ctest")
+    add_bullet(doc, "Lint job：shellcheck + python compile 检查")
+    add_bullet(doc, "本地校验：actionlint -no-color .github/workflows/ci.yml")
 
     doc.add_page_break()
 
