@@ -22,4 +22,11 @@ int bridge_send_tlp_and_wait(bridge_ctx_t *ctx, tlp_entry_t *req, cpl_entry_t *c
 int bridge_send_tlp_fire(bridge_ctx_t *ctx, tlp_entry_t *req);
 void bridge_destroy(bridge_ctx_t *ctx);
 
+/* P2: DMA completion (QEMU→VCS) */
+int bridge_complete_dma(bridge_ctx_t *ctx, uint32_t tag, uint32_t status);
+
+/* P2: Mode switch */
+int bridge_request_mode_switch(bridge_ctx_t *ctx, cosim_mode_t target_mode);
+cosim_mode_t bridge_get_mode(bridge_ctx_t *ctx);
+
 #endif

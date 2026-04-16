@@ -84,6 +84,25 @@ int bridge_send_tlp_fire(bridge_ctx_t *ctx, tlp_entry_t *req) {
     return bridge_send_tlp(ctx, req);
 }
 
+int bridge_complete_dma(bridge_ctx_t *ctx, uint32_t tag, uint32_t status) {
+    dma_cpl_t cpl = { .tag = tag, .status = status, .timestamp = 0 };
+    int ret = ring_buf_enqueue(&ctx->shm.dma_cpl_ring, &cpl);
+    if (ret < 0) return -1;
+    sync_msg_t msg = { .type = SYNC_MSG_DMA_CPL, .payload = tag };
+    return sock_sync_send(ctx->client_fd, &msg);
+}
+
+int bridge_request_mode_switch(bridge_ctx_t *ctx, cosim_mode_t target_mode) {
+    atomic_store(&ctx->shm.ctrl->target_mode, target_mode);
+    atomic_store(&ctx->shm.ctrl->mode_switch_pending, 1);
+    sync_msg_t msg = { .type = SYNC_MSG_MODE_SWITCH, .payload = target_mode };
+    return sock_sync_send(ctx->client_fd, &msg);
+}
+
+cosim_mode_t bridge_get_mode(bridge_ctx_t *ctx) {
+    return (cosim_mode_t)ctx->shm.ctrl->mode;
+}
+
 void bridge_destroy(bridge_ctx_t *ctx) {
     if (!ctx) return;
     sock_sync_close(ctx->client_fd);
