@@ -17,3 +17,7 @@ add_test(NAME test_trace_log COMMAND test_trace_log)
 add_executable(test_eth_shm test_eth_shm.c)
 target_link_libraries(test_eth_shm cosim_bridge_common)
 add_test(NAME test_eth_shm COMMAND test_eth_shm)
+
+add_executable(test_link_model test_link_model.c)
+target_link_libraries(test_link_model cosim_bridge_common)
+add_test(NAME test_link_model COMMAND test_link_model)

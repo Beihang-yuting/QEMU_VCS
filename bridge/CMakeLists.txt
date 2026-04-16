@@ -4,6 +4,7 @@ add_library(cosim_bridge_common STATIC
     common/dma_manager.c
     common/trace_log.c
     common/eth_shm.c
+    common/link_model.c
 )
 target_include_directories(cosim_bridge_common PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/common
