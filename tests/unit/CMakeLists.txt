@@ -1,3 +1,7 @@
 add_executable(test_ring_buffer test_ring_buffer.c)
 target_link_libraries(test_ring_buffer cosim_bridge_common)
 add_test(NAME test_ring_buffer COMMAND test_ring_buffer)
+
+add_executable(test_shm_layout test_shm_layout.c)
+target_link_libraries(test_shm_layout cosim_bridge_common)
+add_test(NAME test_shm_layout COMMAND test_shm_layout)
