@@ -13,3 +13,7 @@ add_test(NAME test_dma_manager COMMAND test_dma_manager)
 add_executable(test_trace_log test_trace_log.c)
 target_link_libraries(test_trace_log cosim_bridge_common)
 add_test(NAME test_trace_log COMMAND test_trace_log)
+
+add_executable(test_eth_shm test_eth_shm.c)
+target_link_libraries(test_eth_shm cosim_bridge_common)
+add_test(NAME test_eth_shm COMMAND test_eth_shm)
