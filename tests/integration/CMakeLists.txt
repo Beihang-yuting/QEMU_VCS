@@ -40,3 +40,8 @@ set_tests_properties(test_mac_stub_e2e PROPERTIES TIMEOUT 5)
 add_executable(test_time_sync_loose test_time_sync_loose.c)
 target_link_libraries(test_time_sync_loose cosim_eth)
 add_test(NAME test_time_sync_loose COMMAND test_time_sync_loose)
+
+# launch_dual.py smoke test (P3-T7)
+add_test(NAME test_launch_smoke
+         COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/test_launch_smoke.sh)
+set_tests_properties(test_launch_smoke PROPERTIES TIMEOUT 15)
