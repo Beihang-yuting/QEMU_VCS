@@ -1,6 +1,7 @@
 add_library(cosim_eth STATIC
     eth_port.c
     mac_stub.c
+    eth_mac_dpi.c
 )
 target_include_directories(cosim_eth PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}
