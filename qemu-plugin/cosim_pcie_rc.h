@@ -33,6 +33,9 @@ struct CosimPCIeRC {
 
     /* Bridge 上下文 — 使用 opaque 指针避免在 QEMU 编译环境中引入 bridge 头文件 */
     void *bridge_ctx;
+
+    /* P2: IRQ/DMA 轮询线程（opaque pointer 到 irq_poller_t） */
+    void *irq_poller;
 };
 
 #endif /* COSIM_PCIE_RC_H */
