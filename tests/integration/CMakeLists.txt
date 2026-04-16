@@ -17,3 +17,8 @@ add_test(NAME test_msi_roundtrip COMMAND test_msi_roundtrip)
 add_executable(test_precise_mode test_precise_mode.c)
 target_link_libraries(test_precise_mode cosim_bridge)
 add_test(NAME test_precise_mode COMMAND test_precise_mode)
+
+# cosim_cli ctypes-layer smoke test (P4-①)
+add_test(NAME test_cli_smoke
+         COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/test_cli_smoke.sh)
+set_tests_properties(test_cli_smoke PROPERTIES TIMEOUT 10)
