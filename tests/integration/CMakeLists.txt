@@ -1,1 +1,3 @@
-# placeholder - will be populated in Task 5
+add_executable(test_sock_sync test_sock_sync.c)
+target_link_libraries(test_sock_sync cosim_bridge)
+add_test(NAME test_sock_sync COMMAND test_sock_sync)
