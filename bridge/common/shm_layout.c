@@ -41,6 +41,30 @@ int cosim_shm_create(cosim_shm_t *shm, const char *name) {
     void *cpl_buf = (uint8_t *)base + COSIM_SHM_CPL_OFFSET;
     ring_buf_init(&shm->cpl_ring, cpl_buf, COSIM_SHM_CPL_SIZE, sizeof(cpl_entry_t));
 
+    /* DMA 请求队列 */
+    void *dma_req_buf = (uint8_t *)base + COSIM_SHM_DMA_REQ_OFFSET;
+    ring_buf_init(&shm->dma_req_ring, dma_req_buf, COSIM_SHM_DMA_REQ_SIZE,
+                   sizeof(dma_req_t));
+
+    /* DMA 完成队列 */
+    void *dma_cpl_buf = (uint8_t *)base + COSIM_SHM_DMA_CPL_OFFSET;
+    ring_buf_init(&shm->dma_cpl_ring, dma_cpl_buf, COSIM_SHM_DMA_CPL_SIZE,
+                   sizeof(dma_cpl_t));
+
+    /* MSI 事件队列 */
+    void *msi_buf = (uint8_t *)base + COSIM_SHM_MSI_OFFSET;
+    ring_buf_init(&shm->msi_ring, msi_buf, COSIM_SHM_MSI_SIZE,
+                   sizeof(msi_event_t));
+
+    /* DMA 数据区 */
+    shm->dma_buf = (uint8_t *)base + COSIM_SHM_DMA_BUF_OFFSET;
+    shm->dma_buf_size = COSIM_SHM_TOTAL_SIZE - COSIM_SHM_DMA_BUF_OFFSET;
+
+    /* 初始化 P2 控制区字段 */
+    atomic_store(&shm->ctrl->mode_switch_pending, 0);
+    atomic_store(&shm->ctrl->target_mode, COSIM_MODE_FAST);
+    atomic_store(&shm->ctrl->precise_cycles_pending, 0);
+
     return 0;
 }
 
@@ -71,6 +95,21 @@ int cosim_shm_open(cosim_shm_t *shm, const char *name) {
 
     void *cpl_buf = (uint8_t *)base + COSIM_SHM_CPL_OFFSET;
     ring_buf_attach(&shm->cpl_ring, cpl_buf, COSIM_SHM_CPL_SIZE, sizeof(cpl_entry_t));
+
+    void *dma_req_buf = (uint8_t *)base + COSIM_SHM_DMA_REQ_OFFSET;
+    ring_buf_attach(&shm->dma_req_ring, dma_req_buf, COSIM_SHM_DMA_REQ_SIZE,
+                     sizeof(dma_req_t));
+
+    void *dma_cpl_buf = (uint8_t *)base + COSIM_SHM_DMA_CPL_OFFSET;
+    ring_buf_attach(&shm->dma_cpl_ring, dma_cpl_buf, COSIM_SHM_DMA_CPL_SIZE,
+                     sizeof(dma_cpl_t));
+
+    void *msi_buf = (uint8_t *)base + COSIM_SHM_MSI_OFFSET;
+    ring_buf_attach(&shm->msi_ring, msi_buf, COSIM_SHM_MSI_SIZE,
+                     sizeof(msi_event_t));
+
+    shm->dma_buf = (uint8_t *)base + COSIM_SHM_DMA_BUF_OFFSET;
+    shm->dma_buf_size = COSIM_SHM_TOTAL_SIZE - COSIM_SHM_DMA_BUF_OFFSET;
 
     return 0;
 }

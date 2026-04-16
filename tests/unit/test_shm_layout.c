@@ -63,11 +63,57 @@ static void test_control_region(void) {
     printf("  PASS: test_control_region\n");
 }
 
+static void test_dma_queue(void) {
+    const char *name = "/cosim_test_shm_dma";
+    cosim_shm_t shm;
+    cosim_shm_create(&shm, name);
+
+    dma_req_t req_in = {
+        .tag = 42,
+        .direction = DMA_DIR_WRITE,
+        .host_addr = 0x7ff0000000,
+        .len = 1024,
+        .dma_offset = 0,
+        .timestamp = 0,
+    };
+
+    assert(ring_buf_enqueue(&shm.dma_req_ring, &req_in) == 0);
+
+    dma_req_t req_out;
+    assert(ring_buf_dequeue(&shm.dma_req_ring, &req_out) == 0);
+    assert(req_out.tag == 42);
+    assert(req_out.direction == DMA_DIR_WRITE);
+    assert(req_out.host_addr == 0x7ff0000000);
+    assert(req_out.len == 1024);
+
+    cosim_shm_destroy(&shm, name);
+    printf("  PASS: test_dma_queue\n");
+}
+
+static void test_msi_event(void) {
+    const char *name = "/cosim_test_shm_msi";
+    cosim_shm_t shm;
+    cosim_shm_create(&shm, name);
+
+    msi_event_t ev_in = { .vector = 3, .timestamp = 12345 };
+    assert(ring_buf_enqueue(&shm.msi_ring, &ev_in) == 0);
+
+    msi_event_t ev_out;
+    assert(ring_buf_dequeue(&shm.msi_ring, &ev_out) == 0);
+    assert(ev_out.vector == 3);
+    assert(ev_out.timestamp == 12345);
+
+    cosim_shm_destroy(&shm, name);
+    printf("  PASS: test_msi_event\n");
+}
+
 int main(void) {
     printf("=== shm_layout tests ===\n");
     test_create_and_open();
     test_request_queue();
     test_control_region();
+    test_dma_queue();
+    test_msi_event();
     printf("=== ALL PASSED ===\n");
     return 0;
 }
