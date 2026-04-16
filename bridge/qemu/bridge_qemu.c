@@ -45,6 +45,8 @@ int bridge_send_tlp(bridge_ctx_t *ctx, tlp_entry_t *req) {
         return -1;
     }
 
+    if (ctx->trace_enabled) trace_log_tlp(&ctx->trace, req);
+
     sync_msg_t msg = { .type = SYNC_MSG_TLP_READY, .payload = 0 };
     return sock_sync_send(ctx->client_fd, &msg);
 }
@@ -64,6 +66,8 @@ int bridge_wait_completion(bridge_ctx_t *ctx, uint8_t tag, cpl_entry_t *cpl) {
         fprintf(stderr, "bridge_wait_completion: completion queue empty\n");
         return -1;
     }
+
+    if (ctx->trace_enabled) trace_log_cpl(&ctx->trace, cpl);
 
     if (cpl->tag != tag) {
         fprintf(stderr, "bridge_wait_completion: tag mismatch (expected %d, got %d)\n",
@@ -90,6 +94,22 @@ int bridge_complete_dma(bridge_ctx_t *ctx, uint32_t tag, uint32_t status) {
     if (ret < 0) return -1;
     sync_msg_t msg = { .type = SYNC_MSG_DMA_CPL, .payload = tag };
     return sock_sync_send(ctx->client_fd, &msg);
+}
+
+int bridge_enable_trace(bridge_ctx_t *ctx, const char *path, trace_fmt_t fmt) {
+    if (!ctx) return -1;
+    if (ctx->trace_enabled) return 0;
+    if (trace_log_open(&ctx->trace, path, fmt) < 0) return -1;
+    ctx->trace_enabled = 1;
+    return 0;
+}
+
+void bridge_disable_trace(bridge_ctx_t *ctx) {
+    if (!ctx) return;
+    if (ctx->trace_enabled) {
+        trace_log_close(&ctx->trace);
+        ctx->trace_enabled = 0;
+    }
 }
 
 int bridge_request_mode_switch(bridge_ctx_t *ctx, cosim_mode_t target_mode) {
@@ -124,6 +144,10 @@ int bridge_advance_clock(bridge_ctx_t *ctx, uint64_t cycles) {
 
 void bridge_destroy(bridge_ctx_t *ctx) {
     if (!ctx) return;
+    if (ctx->trace_enabled) {
+        trace_log_close(&ctx->trace);
+        ctx->trace_enabled = 0;
+    }
     sock_sync_close(ctx->client_fd);
     sock_sync_close(ctx->listen_fd);
     cosim_shm_destroy(&ctx->shm, ctx->shm_name);
