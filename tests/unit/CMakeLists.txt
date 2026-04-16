@@ -9,3 +9,7 @@ add_test(NAME test_shm_layout COMMAND test_shm_layout)
 add_executable(test_dma_manager test_dma_manager.c)
 target_link_libraries(test_dma_manager cosim_bridge_common)
 add_test(NAME test_dma_manager COMMAND test_dma_manager)
+
+add_executable(test_trace_log test_trace_log.c)
+target_link_libraries(test_trace_log cosim_bridge_common)
+add_test(NAME test_trace_log COMMAND test_trace_log)
