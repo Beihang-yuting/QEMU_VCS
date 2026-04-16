@@ -33,4 +33,29 @@ package cosim_bridge_pkg;
         TLP_CPL   = 8'd4
     } tlp_type_e;
 
+    import "DPI-C" function int bridge_vcs_dma_request(
+        input int direction,
+        input longint unsigned host_addr,
+        input int unsigned data[16],
+        input int len,
+        output int out_tag
+    );
+
+    import "DPI-C" function int bridge_vcs_raise_msi(
+        input int vector
+    );
+
+    import "DPI-C" function int bridge_vcs_wait_clock_step(
+        output int cycles
+    );
+
+    import "DPI-C" function int bridge_vcs_clock_ack(
+        input int cycles
+    );
+
+    typedef enum int {
+        DMA_DIR_READ  = 0,
+        DMA_DIR_WRITE = 1
+    } dma_direction_e;
+
 endpackage

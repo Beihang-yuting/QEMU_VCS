@@ -92,6 +92,73 @@ int bridge_vcs_send_completion(int tag, const unsigned int *data, int len) {
     return sock_sync_send(g_sock_fd, &msg);
 }
 
+/* DPI-C: VCS initiates DMA request */
+int bridge_vcs_dma_request(int direction, unsigned long long host_addr,
+                            const unsigned int *data, int len,
+                            int *out_tag) {
+    static uint32_t next_tag = 1000;
+
+    /* Simple bump offset for DMA buffer — wraps if exceeds dma_buf_size */
+    static uint32_t bump_offset = 0;
+    uint32_t aligned_len = (len + 63) & ~63;
+    if (bump_offset + aligned_len > g_shm.dma_buf_size) {
+        bump_offset = 0;
+    }
+    uint32_t offset = bump_offset;
+    bump_offset += aligned_len;
+
+    /* Write data if WRITE direction */
+    if (direction == DMA_DIR_WRITE) {
+        memcpy((uint8_t *)g_shm.dma_buf + offset, data, len);
+    }
+
+    dma_req_t req = {
+        .tag = next_tag++,
+        .direction = (uint32_t)direction,
+        .host_addr = host_addr,
+        .len = (uint32_t)len,
+        .dma_offset = offset,
+        .timestamp = 0,
+    };
+
+    if (ring_buf_enqueue(&g_shm.dma_req_ring, &req) < 0) {
+        return -1;
+    }
+
+    *out_tag = (int)req.tag;
+    return 0;
+}
+
+/* DPI-C: VCS raises MSI interrupt */
+int bridge_vcs_raise_msi(int vector) {
+    msi_event_t ev = { .vector = (uint32_t)vector, .timestamp = 0 };
+    if (ring_buf_enqueue(&g_shm.msi_ring, &ev) < 0) {
+        fprintf(stderr, "[VCS Bridge] MSI queue full (vec=%d)\n", vector);
+        return -1;
+    }
+    return 0;
+}
+
+/* DPI-C: Precise mode — wait for QEMU's clock step request
+ * Returns: 0=normal clock step (cycles_out set), other=msg type for dispatch */
+int bridge_vcs_wait_clock_step(int *cycles_out) {
+    sync_msg_t msg;
+    int ret = sock_sync_recv(g_sock_fd, &msg);
+    if (ret < 0) return -1;
+    if (msg.type == SYNC_MSG_CLOCK_STEP) {
+        *cycles_out = (int)msg.payload;
+        return 0;
+    }
+    *cycles_out = 0;
+    return (int)msg.type;
+}
+
+/* DPI-C: Precise mode — ack N cycles advanced */
+int bridge_vcs_clock_ack(int cycles) {
+    sync_msg_t msg = { .type = SYNC_MSG_CLOCK_ACK, .payload = (uint32_t)cycles };
+    return sock_sync_send(g_sock_fd, &msg);
+}
+
 /* DPI-C: 关闭连接 */
 void bridge_vcs_cleanup(void) {
     if (g_initialized) {
