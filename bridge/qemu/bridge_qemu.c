@@ -103,6 +103,25 @@ cosim_mode_t bridge_get_mode(bridge_ctx_t *ctx) {
     return (cosim_mode_t)ctx->shm.ctrl->mode;
 }
 
+int bridge_advance_clock(bridge_ctx_t *ctx, uint64_t cycles) {
+    if (ctx->shm.ctrl->mode != COSIM_MODE_PRECISE) {
+        fprintf(stderr, "bridge_advance_clock: not in precise mode\n");
+        return -1;
+    }
+
+    sync_msg_t req = { .type = SYNC_MSG_CLOCK_STEP, .payload = (uint32_t)cycles };
+    if (sock_sync_send(ctx->client_fd, &req) < 0) return -1;
+
+    sync_msg_t ack;
+    if (sock_sync_recv(ctx->client_fd, &ack) < 0) return -1;
+    if (ack.type != SYNC_MSG_CLOCK_ACK) {
+        fprintf(stderr, "bridge_advance_clock: unexpected ack type %d\n", ack.type);
+        return -1;
+    }
+
+    return 0;
+}
+
 void bridge_destroy(bridge_ctx_t *ctx) {
     if (!ctx) return;
     sock_sync_close(ctx->client_fd);

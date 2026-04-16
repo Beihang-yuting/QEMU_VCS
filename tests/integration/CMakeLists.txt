@@ -13,3 +13,7 @@ add_test(NAME test_dma_roundtrip COMMAND test_dma_roundtrip)
 add_executable(test_msi_roundtrip test_msi_roundtrip.c)
 target_link_libraries(test_msi_roundtrip cosim_bridge)
 add_test(NAME test_msi_roundtrip COMMAND test_msi_roundtrip)
+
+add_executable(test_precise_mode test_precise_mode.c)
+target_link_libraries(test_precise_mode cosim_bridge)
+add_test(NAME test_precise_mode COMMAND test_precise_mode)

@@ -29,4 +29,7 @@ int bridge_complete_dma(bridge_ctx_t *ctx, uint32_t tag, uint32_t status);
 int bridge_request_mode_switch(bridge_ctx_t *ctx, cosim_mode_t target_mode);
 cosim_mode_t bridge_get_mode(bridge_ctx_t *ctx);
 
+/* P2: Precise mode clock advance (QEMU requests VCS advance N cycles, waits ACK) */
+int bridge_advance_clock(bridge_ctx_t *ctx, uint64_t cycles);
+
 #endif
