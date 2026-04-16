@@ -51,6 +51,8 @@ int eth_port_send(eth_port_t *port, eth_frame_t *frame, uint64_t now_ns)
         return -1;
     }
     link_model_inc_outstanding(&port->link);
+    /* Loose-coupling time sync: publish our local sim time as "last event". */
+    eth_shm_advance_time(&port->shm, port->role, frame->timestamp_ns);
     return 0;
 }
 

@@ -36,3 +36,7 @@ add_executable(test_mac_stub_e2e test_mac_stub_e2e.c)
 target_link_libraries(test_mac_stub_e2e cosim_eth pthread)
 add_test(NAME test_mac_stub_e2e COMMAND test_mac_stub_e2e)
 set_tests_properties(test_mac_stub_e2e PROPERTIES TIMEOUT 5)
+
+add_executable(test_time_sync_loose test_time_sync_loose.c)
+target_link_libraries(test_time_sync_loose cosim_eth)
+add_test(NAME test_time_sync_loose COMMAND test_time_sync_loose)
