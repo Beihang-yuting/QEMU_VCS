@@ -31,3 +31,8 @@ add_test(NAME test_eth_loopback COMMAND test_eth_loopback)
 add_executable(test_link_drop test_link_drop.c)
 target_link_libraries(test_link_drop cosim_eth)
 add_test(NAME test_link_drop COMMAND test_link_drop)
+
+add_executable(test_mac_stub_e2e test_mac_stub_e2e.c)
+target_link_libraries(test_mac_stub_e2e cosim_eth pthread)
+add_test(NAME test_mac_stub_e2e COMMAND test_mac_stub_e2e)
+set_tests_properties(test_mac_stub_e2e PROPERTIES TIMEOUT 5)
