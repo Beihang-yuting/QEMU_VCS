@@ -5,12 +5,19 @@
 #include <stdatomic.h>
 #include <stdbool.h>
 
+/* Header stored at the start of the shared-memory buffer; head/tail live here
+ * so they are visible to every process that maps the same region. */
 typedef struct {
-    uint8_t        *data;
-    uint32_t        element_size;
-    uint32_t        capacity;
     atomic_uint_least32_t head;
     atomic_uint_least32_t tail;
+    uint32_t              capacity;     /* total slots (power-of-2 not required) */
+    uint32_t              element_size;
+} ring_buf_hdr_t;
+
+/* Process-local handle; all mutable state is in the shared header. */
+typedef struct {
+    ring_buf_hdr_t *hdr;   /* points into shared memory */
+    uint8_t        *data;  /* element storage, immediately after hdr in shm */
 } ring_buf_t;
 
 int ring_buf_init(ring_buf_t *rb, void *buf, uint32_t buf_size, uint32_t element_size);

@@ -6,7 +6,7 @@
 #include "cosim_types.h"
 #include "ring_buffer.h"
 
-#define COSIM_SHM_TOTAL_SIZE    (64 * 1024 * 1024)
+#define COSIM_SHM_TOTAL_SIZE    (4 * 1024 * 1024)
 #define COSIM_SHM_CTRL_OFFSET   0x00000000
 #define COSIM_SHM_CTRL_SIZE     0x00001000
 #define COSIM_SHM_REQ_OFFSET    0x00001000
