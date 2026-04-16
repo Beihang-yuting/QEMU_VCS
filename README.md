@@ -28,12 +28,14 @@ cd QEMU_VCS
 make test   # 需要 cmake >= 3.16, gcc >= 9, pthread/librt
 ```
 
-预期输出：**9/9 测试通过**
+预期输出：**17/17 测试通过**
 
 | 类型 | 测试 |
 |---|---|
-| 单元 | `test_ring_buffer`, `test_shm_layout`, `test_dma_manager`, `test_trace_log` |
-| 集成 | `test_sock_sync`, `test_bridge_loopback`, `test_dma_roundtrip`, `test_msi_roundtrip`, `test_precise_mode` |
+| 单元（P1/P2/P3） | `test_ring_buffer`, `test_shm_layout`, `test_dma_manager`, `test_trace_log`, `test_eth_shm`, `test_link_model` |
+| 集成 PCIe（P1/P2） | `test_sock_sync`, `test_bridge_loopback`, `test_dma_roundtrip`, `test_msi_roundtrip`, `test_precise_mode` |
+| 集成 ETH（P3） | `test_eth_loopback`, `test_link_drop`, `test_mac_stub_e2e`, `test_time_sync_loose` |
+| 工具（P4） | `test_cli_smoke`, `test_launch_smoke` |
 
 ### 2. 集成到 QEMU 源码树
 
@@ -70,14 +72,16 @@ export GUEST_KERNEL=/path/to/bzImage
 ```
 cosim-platform/
 ├── bridge/
-│   ├── common/   # SHM、环形缓冲、DMA allocator、trace
-│   ├── qemu/     # QEMU 侧 libcosim_bridge.so
-│   └── vcs/      # VCS 侧 libcosim_bridge_vcs.so + bridge_vcs.sv
+│   ├── common/   # SHM、环形缓冲、DMA allocator、trace、eth_shm、link_model
+│   ├── qemu/     # QEMU 侧 libcosim_bridge.so（PCIe 通路）
+│   ├── vcs/      # VCS 侧 libcosim_bridge_vcs.so + bridge_vcs.sv
+│   └── eth/      # ETH 通路：eth_port、mac_stub、eth_mac_dpi（P3）
 ├── qemu-plugin/  # 自定义 cosim-pcie-rc 设备（装入 QEMU 源码树）
 ├── vcs-tb/       # 最小 PCIe EP 测试平台
-├── scripts/      # run/setup/analyzer/CLI/doc-gen
-├── tests/        # 单元 + 集成测试
-└── docs/         # 使用说明 / 调试指南
+├── scripts/      # run_cosim, setup_cosim_qemu, cosim_cli, trace_analyzer,
+│                 # launch_dual, gen_usage_doc
+├── tests/        # 单元 + 集成测试（17 个 ctest）
+└── docs/         # 使用说明 Word + GDB 调试指南
 ```
 
 ---
@@ -98,8 +102,8 @@ cosim-platform/
 |---|---|---|
 | **P1** | 单节点 PCIe MMIO 通路、快速模式 | 已完成 |
 | **P2** | DMA + MSI + 精确模式 + Trace | 已完成 |
-| **P3** | 双节点 ETH 互打、链路模型 | 计划中 |
-| **P4** | cosim_cli、trace_analyzer、GDB 集成、CI | 进行中 |
+| **P3** | 双节点 ETH 互打、链路模型（drop/burst/rate/FC）、launcher | 已完成 |
+| **P4** | cosim_cli、trace_analyzer、GDB 文档、CI、smoke tests | 已完成 |
 
 ---
 
