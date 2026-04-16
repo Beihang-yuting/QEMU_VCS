@@ -109,7 +109,7 @@ cosim-platform/
 
 ## License
 
-暂未声明。如需外部使用请先联系维护者。
+[MIT License](LICENSE) — Copyright (c) 2026 Beihang-yuting
 
 ## Maintainer
 
