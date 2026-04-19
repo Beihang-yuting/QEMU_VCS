@@ -1,6 +1,6 @@
 #include "irq_poller.h"
 #include <pthread.h>
-#include <stdatomic.h>
+#include "compat_atomic.h"
 #include <stdlib.h>
 #include <unistd.h>
 #include <stdio.h>
@@ -20,15 +20,22 @@ static void *poller_thread(void *arg) {
     while (!atomic_load(&p->stop)) {
         int did_work = 0;
 
-        msi_event_t ev;
-        while (ring_buf_dequeue(&p->shm->msi_ring, &ev) == 0) {
-            if (p->msi_cb) p->msi_cb(ev.vector, p->user);
-            did_work = 1;
-        }
-
+        /* Process DMA requests FIRST (before MSI) to avoid deadlock:
+         * MSI callback needs BQL (for pci_set_irq), but the main thread
+         * may hold BQL while waiting for VCS completion. If we block on
+         * BQL here, pending DMA requests behind us never get processed,
+         * and VCS (waiting for DMA_CPL) can never send the completion
+         * the main thread needs -> deadlock.
+         * DMA callback does NOT need BQL (uses cpu_physical_memory_*). */
         dma_req_t req;
         while (ring_buf_dequeue(&p->shm->dma_req_ring, &req) == 0) {
             if (p->dma_cb) p->dma_cb(&req, p->user);
+            did_work = 1;
+        }
+
+        msi_event_t ev;
+        while (ring_buf_dequeue(&p->shm->msi_ring, &ev) == 0) {
+            if (p->msi_cb) p->msi_cb(ev.vector, p->user);
             did_work = 1;
         }
 

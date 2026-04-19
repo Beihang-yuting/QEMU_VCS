@@ -24,13 +24,13 @@ extern "C" {
 /* Open a port. role = 0 (A) or 1 (B). create != 0 if this side creates the SHM. */
 int  vcs_eth_mac_init_dpi(const char *shm_name, int role, int create);
 
-/* Send a frame. Returns 0 on success, -1 ring full, -2 FC blocked, -3 dropped. */
-int  vcs_eth_mac_send_frame_dpi(const uint8_t *data, int len);
+/* Send a frame. Returns 0 on success, -1 ring full, -2 FC blocked, -3 dropped.
+ * data is svOpenArrayHandle when called via VCS DPI-C. */
+int  vcs_eth_mac_send_frame_dpi(const void *data, int len);
 
 /* Poll one frame non-blocking. Returns received length (>0) or 0 if empty,
- * -1 on error. data/max_len define the caller's buffer.
- */
-int  vcs_eth_mac_poll_frame_dpi(uint8_t *data, int max_len);
+ * -1 on error. data is svOpenArrayHandle from VCS DPI-C. */
+int  vcs_eth_mac_poll_frame_dpi(const void *data, int max_len);
 
 /* Link status helpers. */
 void vcs_eth_mac_link_up_dpi(void);

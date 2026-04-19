@@ -13,7 +13,8 @@ package cosim_bridge_pkg;
         output byte unsigned tlp_type,
         output longint unsigned addr,
         output int unsigned data[16],
-        output int len
+        output int len,
+        output int tag
     );
 
     import "DPI-C" function int bridge_vcs_send_completion(
@@ -41,6 +42,19 @@ package cosim_bridge_pkg;
         output int out_tag
     );
 
+    /* Phase 0: Synchronous DMA — blocks until QEMU completes */
+    import "DPI-C" function int bridge_vcs_dma_read_sync(
+        input longint unsigned host_addr,
+        output int unsigned data[16],
+        input int len
+    );
+
+    import "DPI-C" function int bridge_vcs_dma_write_sync(
+        input longint unsigned host_addr,
+        input int unsigned data[16],
+        input int len
+    );
+
     import "DPI-C" function int bridge_vcs_raise_msi(
         input int vector
     );
@@ -57,5 +71,40 @@ package cosim_bridge_pkg;
         DMA_DIR_READ  = 0,
         DMA_DIR_WRITE = 1
     } dma_direction_e;
+
+    /* ---- ETH MAC DPI-C (P3 ETH SHM layer) ---- */
+    import "DPI-C" function int vcs_eth_mac_init_dpi(
+        input string shm_name,
+        input int role,
+        input int create_shm
+    );
+
+    import "DPI-C" function int vcs_eth_mac_send_frame_dpi(
+        input byte unsigned data[],
+        input int len
+    );
+
+    import "DPI-C" function int vcs_eth_mac_poll_frame_dpi(
+        output byte unsigned data[],
+        input int max_len
+    );
+
+    import "DPI-C" function void vcs_eth_mac_close_dpi();
+
+    import "DPI-C" function int vcs_eth_mac_peer_ready_dpi();
+
+    /* ---- Virtqueue DMA processing (Phase 3) ---- */
+    import "DPI-C" function void vcs_vq_configure(
+        input int queue,
+        input longint unsigned desc_gpa,
+        input longint unsigned avail_gpa,
+        input longint unsigned used_gpa,
+        input int size
+    );
+
+    import "DPI-C" function int vcs_vq_process_tx();
+    import "DPI-C" function int vcs_vq_process_rx();
+    import "DPI-C" function int vcs_vq_get_tx_count();
+    import "DPI-C" function int vcs_vq_get_rx_count();
 
 endpackage

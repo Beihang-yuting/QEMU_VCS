@@ -2,7 +2,7 @@
 #define SHM_LAYOUT_H
 
 #include <stdint.h>
-#include <stdatomic.h>
+#include "compat_atomic.h"
 #include "cosim_types.h"
 #include "ring_buffer.h"
 

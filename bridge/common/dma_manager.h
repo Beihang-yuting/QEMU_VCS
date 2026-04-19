@@ -2,7 +2,7 @@
 #define DMA_MANAGER_H
 
 #include <stdint.h>
-#include <stdatomic.h>
+#include "compat_atomic.h"
 
 #define DMA_MGR_ALIGN       64
 #define DMA_MGR_INVALID     0xFFFFFFFFU

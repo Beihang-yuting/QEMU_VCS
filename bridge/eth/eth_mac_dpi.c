@@ -2,6 +2,7 @@
 #include "eth_port.h"
 #include <stdio.h>
 #include <string.h>
+#include "svdpi.h"
 
 /* The DPI-C shim owns a single eth_port per VCS process. VCS typically needs
  * only one ETH instance at a time (the simulated MAC), so a singleton
@@ -24,24 +25,28 @@ int vcs_eth_mac_init_dpi(const char *shm_name, int role, int create)
     return 0;
 }
 
-int vcs_eth_mac_send_frame_dpi(const uint8_t *data, int len)
+int vcs_eth_mac_send_frame_dpi(const void *data, int len)
 {
     if (!g_opened || !data || len <= 0 || len > (int)ETH_FRAME_MAX_DATA) return -1;
+    const uint8_t *ptr = (const uint8_t *)svGetArrayPtr(data);
+    if (!ptr) return -1;
     eth_frame_t f = {0};
     f.len = (uint16_t)len;
-    memcpy(f.data, data, (size_t)len);
+    memcpy(f.data, ptr, (size_t)len);
     return eth_port_send(&g_port, &f, 0);
 }
 
-int vcs_eth_mac_poll_frame_dpi(uint8_t *data, int max_len)
+int vcs_eth_mac_poll_frame_dpi(const void *data, int max_len)
 {
     if (!g_opened || !data || max_len <= 0) return -1;
+    uint8_t *ptr = (uint8_t *)svGetArrayPtr(data);
+    if (!ptr) return -1;
     eth_frame_t f;
     int rc = eth_port_recv(&g_port, &f, 0);
     if (rc != 0) return 0;  /* empty */
     eth_port_tx_complete(&g_port);
     int copy = f.len < (uint16_t)max_len ? f.len : max_len;
-    memcpy(data, f.data, (size_t)copy);
+    memcpy(ptr, f.data, (size_t)copy);
     return copy;
 }
 
@@ -73,6 +78,28 @@ void vcs_eth_mac_configure_link_dpi(uint32_t drop_rate_ppm,
     g_port.link.rate_mbps      = rate_mbps;
     g_port.link.latency_ns     = latency_ns;
     g_port.link.fc_window      = fc_window;
+}
+
+/* Raw C-level send/recv — called from virtqueue_dma.c (no svGetArrayPtr) */
+int vcs_eth_mac_send_raw(const uint8_t *data, int len)
+{
+    if (!g_opened || !data || len <= 0 || len > (int)ETH_FRAME_MAX_DATA) return -1;
+    eth_frame_t f = {0};
+    f.len = (uint16_t)len;
+    memcpy(f.data, data, (size_t)len);
+    return eth_port_send(&g_port, &f, 0);
+}
+
+int vcs_eth_mac_recv_raw(uint8_t *data, int max_len)
+{
+    if (!g_opened || !data || max_len <= 0) return -1;
+    eth_frame_t f;
+    int rc = eth_port_recv(&g_port, &f, 0);
+    if (rc != 0) return 0;  /* empty */
+    eth_port_tx_complete(&g_port);
+    int copy = f.len < (uint16_t)max_len ? f.len : max_len;
+    memcpy(data, f.data, (size_t)copy);
+    return copy;
 }
 
 void vcs_eth_mac_close_dpi(void)

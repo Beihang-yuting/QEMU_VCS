@@ -2,7 +2,7 @@
 #define COSIM_TYPES_H
 
 #include <stdint.h>
-#include <stdatomic.h>
+#include "compat_atomic.h"
 
 #define COSIM_SHM_MAGIC       0xDEADBEEF
 #define COSIM_PROTOCOL_VER    1

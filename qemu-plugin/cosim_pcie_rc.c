@@ -7,9 +7,12 @@
  *
  * 编译时需要链接 libcosim_bridge.so
  */
-#include "cosim_pcie_rc.h"
+#include "hw/net/cosim_pcie_rc.h"
 #include "qemu/log.h"
 #include "qemu/module.h"
+#include "qemu/main-loop.h"   /* qemu_bh_new / qemu_bh_schedule */
+#include "exec/address-spaces.h" /* address_space_memory */
+#include "exec/cpu-common.h"     /* cpu_physical_memory_read/write */
 #include "hw/qdev-properties.h"
 
 /* Bridge API — 通过动态链接使用 */
@@ -91,28 +94,66 @@ static void cosim_dma_cb(const dma_req_t *req, void *user)
 {
     CosimPCIeRC *s = COSIM_PCIE_RC(user);
     bridge_ctx_t *ctx = (bridge_ctx_t *)s->bridge_ctx;
-    PCIDevice *pci_dev = PCI_DEVICE(s);
     uint8_t *dma_buf = (uint8_t *)ctx->shm.dma_buf + req->dma_offset;
 
+    /* Use cpu_physical_memory_read/write for DMA to guest RAM.
+     * These are thread-safe for RAM regions and do NOT require BQL,
+     * avoiding deadlock when the main thread holds BQL during
+     * bridge_send_tlp_and_wait -> sock_sync_recv. */
     if (req->direction == DMA_DIR_WRITE) {
-        /* 设备→Host：从 DMA 区读数据，写入 Guest 内存 */
-        pci_dma_write(pci_dev, req->host_addr, dma_buf, req->len);
+        cpu_physical_memory_write(req->host_addr, dma_buf, req->len);
     } else {
-        /* Host→设备：从 Guest 内存读数据，写到 DMA 区 */
-        pci_dma_read(pci_dev, req->host_addr, dma_buf, req->len);
+        cpu_physical_memory_read(req->host_addr, dma_buf, req->len);
     }
+
+    qemu_log("cosim: DMA %s OK GPA=0x%lx len=%u tag=%u\n",
+             req->direction == DMA_DIR_WRITE ? "write" : "read",
+             (unsigned long)req->host_addr, req->len, req->tag);
 
     bridge_complete_dma(ctx, req->tag, 0);
 }
 
-/* MSI 中断回调：从 VCS 收到中断，注入 Guest */
+/* MSI BH 回调：在 QEMU 主循环中执行，自然持有 BQL，无死锁风险 */
+static void cosim_msi_bh_cb(void *opaque)
+{
+    CosimPCIeRC *s = COSIM_PCIE_RC(opaque);
+    PCIDevice *pci_dev = PCI_DEVICE(s);
+
+    while (s->msi_queue_head != s->msi_queue_tail) {
+        uint32_t vector = s->msi_queue[s->msi_queue_head % COSIM_MSI_QUEUE_SIZE];
+        __atomic_thread_fence(__ATOMIC_ACQUIRE);
+        s->msi_queue_head++;
+
+        if (vector == 0xFFFEu) {
+            qemu_log("cosim: MSI bh: deassert INTx (vector=0xFFFE)\n");
+            pci_set_irq(pci_dev, 0);
+        } else if (msi_enabled(pci_dev)) {
+            qemu_log("cosim: MSI bh: msi_notify vector=%u\n", vector);
+            msi_notify(pci_dev, vector);
+        } else {
+            qemu_log("cosim: MSI bh: pci_set_irq(1) INTx assert vector=%u\n", vector);
+            pci_set_irq(pci_dev, 1);
+        }
+    }
+}
+
+/* MSI 中断回调：从 irq_poller 线程调用 — 不获取 BQL，仅入队 + 调度 BH */
 static void cosim_msi_cb(uint32_t vector, void *user)
 {
     CosimPCIeRC *s = COSIM_PCIE_RC(user);
-    PCIDevice *pci_dev = PCI_DEVICE(s);
-    if (msi_enabled(pci_dev)) {
-        msi_notify(pci_dev, vector);
+
+    int tail = s->msi_queue_tail;
+    int head = s->msi_queue_head;
+    if (tail - head >= COSIM_MSI_QUEUE_SIZE) {
+        qemu_log("cosim: MSI queue full, dropping vector=%u\n", vector);
+        return;
     }
+
+    s->msi_queue[tail % COSIM_MSI_QUEUE_SIZE] = vector;
+    __atomic_thread_fence(__ATOMIC_RELEASE);
+    s->msi_queue_tail = tail + 1;
+
+    qemu_bh_schedule((QEMUBH *)s->msi_bh);
 }
 
 static const MemoryRegionOps cosim_mmio_ops = {
@@ -125,6 +166,85 @@ static const MemoryRegionOps cosim_mmio_ops = {
     },
 };
 
+/* ========== Phase 1: Config Space 转发 ========== */
+
+static uint32_t cosim_config_read(PCIDevice *pci_dev, uint32_t address, int len)
+{
+    CosimPCIeRC *s = COSIM_PCIE_RC(pci_dev);
+    bridge_ctx_t *ctx = (bridge_ctx_t *)s->bridge_ctx;
+
+    /* Bridge 未连接时，使用 QEMU 本地 config space */
+    if (!ctx) {
+        return pci_default_read_config(pci_dev, address, len);
+    }
+
+    /* VCS 按 dword 索引 config space，需对齐地址并处理字节偏移 */
+    uint32_t dword_addr = address & ~3u;
+    uint32_t byte_offset = address & 3u;
+
+    tlp_entry_t req = {0};
+    req.type = TLP_CFGRD;
+    req.addr = dword_addr;
+    req.len = 4;
+
+    cpl_entry_t cpl = {0};
+    int ret = bridge_send_tlp_and_wait(ctx, &req, &cpl);
+    if (ret < 0) {
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "cosim: CfgRd failed addr=0x%x, fallback to local\n",
+                      address);
+        return pci_default_read_config(pci_dev, address, len);
+    }
+
+    /* 从 completion 重建完整 dword，再提取目标字节 */
+    uint32_t dword = 0;
+    for (int i = 0; i < 4 && i < COSIM_TLP_DATA_SIZE; i++) {
+        dword |= ((uint32_t)cpl.data[i]) << (i * 8);
+    }
+
+    uint32_t val = dword >> (byte_offset * 8);
+    if (len < 4) {
+        val &= (1u << (len * 8)) - 1;
+    }
+
+    qemu_log_mask(LOG_UNIMP, "cosim: CfgRd addr=0x%02x len=%d val=0x%x\n",
+                  address, len, val);
+    return val;
+}
+
+static void cosim_config_write(PCIDevice *pci_dev, uint32_t address,
+                               uint32_t data, int len)
+{
+    CosimPCIeRC *s = COSIM_PCIE_RC(pci_dev);
+    bridge_ctx_t *ctx = (bridge_ctx_t *)s->bridge_ctx;
+
+    /* 始终先写本地 config space，保证 QEMU 内部状态一致 */
+    pci_default_write_config(pci_dev, address, data, len);
+
+    if (!ctx) {
+        return;
+    }
+
+    /* 同时转发 CfgWr TLP 到 VCS */
+    tlp_entry_t req = {0};
+    req.type = TLP_CFGWR;
+    req.addr = address;
+    req.len = len;
+    for (int i = 0; i < len && i < COSIM_TLP_DATA_SIZE; i++) {
+        req.data[i] = (data >> (i * 8)) & 0xFF;
+    }
+
+    int ret = bridge_send_tlp_fire(ctx, &req);
+    if (ret < 0) {
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "cosim: CfgWr failed addr=0x%x data=0x%x\n",
+                      address, data);
+    }
+
+    qemu_log_mask(LOG_UNIMP, "cosim: CfgWr addr=0x%02x len=%d data=0x%x\n",
+                  address, len, data);
+}
+
 /* ========== 设备生命周期 ========== */
 
 static void cosim_pcie_rc_realize(PCIDevice *pci_dev, Error **errp)
@@ -135,6 +255,13 @@ static void cosim_pcie_rc_realize(PCIDevice *pci_dev, Error **errp)
     memory_region_init_io(&s->bar0, OBJECT(s), &cosim_mmio_ops, s,
                           "cosim-bar0", COSIM_BAR0_SIZE);
     pci_register_bar(pci_dev, 0, PCI_BASE_ADDRESS_SPACE_MEMORY, &s->bar0);
+
+    /* Enable bus mastering so pci_dma_read/write can access guest memory */
+    pci_set_word(pci_dev->config + PCI_COMMAND,
+                 PCI_COMMAND_MEMORY | PCI_COMMAND_MASTER);
+
+    /* 配置 INTx 中断引脚 (INTA) — 需要在 msi_init 之前设置 */
+    pci_config_set_interrupt_pin(pci_dev->config, 1);  /* INTA */
 
     /* 初始化 MSI（P2 阶段启用中断） */
     if (msi_init(pci_dev, 0, 1, true, false, errp)) {
@@ -162,6 +289,11 @@ static void cosim_pcie_rc_realize(PCIDevice *pci_dev, Error **errp)
         return;
     }
 
+    /* 创建 MSI bottom-half（在主循环中处理 MSI，避免 BQL 死锁） */
+    s->msi_queue_head = 0;
+    s->msi_queue_tail = 0;
+    s->msi_bh = qemu_bh_new(cosim_msi_bh_cb, s);
+
     /* 启动 IRQ/DMA 轮询线程（DMA 请求与 MSI 异步事件处理） */
     s->irq_poller = irq_poller_start(&ctx->shm, cosim_dma_cb, cosim_msi_cb, s);
     if (!s->irq_poller) {
@@ -181,6 +313,10 @@ static void cosim_pcie_rc_exit(PCIDevice *pci_dev)
     if (s->irq_poller) {
         irq_poller_stop((irq_poller_t *)s->irq_poller);
         s->irq_poller = NULL;
+    }
+    if (s->msi_bh) {
+        qemu_bh_delete((QEMUBH *)s->msi_bh);
+        s->msi_bh = NULL;
     }
     if (s->bridge_ctx) {
         bridge_destroy((bridge_ctx_t *)s->bridge_ctx);
@@ -206,6 +342,8 @@ static void cosim_pcie_rc_class_init(ObjectClass *klass, void *data)
 
     k->realize = cosim_pcie_rc_realize;
     k->exit = cosim_pcie_rc_exit;
+    k->config_read = cosim_config_read;
+    k->config_write = cosim_config_write;
     k->vendor_id = COSIM_PCI_VENDOR_ID;
     k->device_id = COSIM_PCI_DEVICE_ID;
     k->revision = COSIM_PCI_REVISION;

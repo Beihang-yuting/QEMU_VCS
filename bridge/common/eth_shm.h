@@ -1,7 +1,7 @@
 #ifndef ETH_SHM_H
 #define ETH_SHM_H
 
-#include <stdatomic.h>
+#include "compat_atomic.h"
 #include <stddef.h>
 #include <stdint.h>
 #include "eth_types.h"

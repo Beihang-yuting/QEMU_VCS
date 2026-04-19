@@ -2,7 +2,7 @@
 #define RING_BUFFER_H
 
 #include <stdint.h>
-#include <stdatomic.h>
+#include "compat_atomic.h"
 #include <stdbool.h>
 
 /* Header stored at the start of the shared-memory buffer; head/tail live here

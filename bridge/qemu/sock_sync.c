@@ -6,6 +6,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <errno.h>
+#include <poll.h>
 
 int sock_sync_listen(const char *path) {
     int fd = socket(AF_UNIX, SOCK_STREAM, 0);
@@ -64,6 +65,19 @@ int sock_sync_recv(int fd, sync_msg_t *msg) {
         return -1;
     }
     return 0;
+}
+
+/* Non-blocking recv with timeout (milliseconds).
+ * Returns: 0=success, 1=timeout (no data), -1=error */
+int sock_sync_recv_timed(int fd, sync_msg_t *msg, int timeout_ms) {
+    struct pollfd pfd = { .fd = fd, .events = POLLIN };
+    int ret = poll(&pfd, 1, timeout_ms);
+    if (ret < 0) {
+        perror("sock_sync_recv_timed: poll");
+        return -1;
+    }
+    if (ret == 0) return 1;  /* timeout */
+    return sock_sync_recv(fd, msg);
 }
 
 void sock_sync_close(int fd) {

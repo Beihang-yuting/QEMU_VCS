@@ -2,7 +2,7 @@
 #define MAC_STUB_H
 
 #include <pthread.h>
-#include <stdatomic.h>
+#include "compat_atomic.h"
 #include "eth_port.h"
 
 /* Callback invoked by mac_stub whenever an ETH frame is received from the peer.
