@@ -211,7 +211,9 @@ echo -e "${CYAN}[3/9] 编译 Bridge 库${NC}"
 echo "========================================================"
 
 mkdir -p "$BUILD_DIR"
-cmake -B "$BUILD_DIR" -S "$PROJECT_DIR" -DCMAKE_BUILD_TYPE=Release
+# 显式指定 C 编译器，避免 /bin/gcc 符号链接异常导致编译失败
+COSIM_CC="${COSIM_CC:-$(command -v gcc-9 || command -v gcc)}"
+cmake -B "$BUILD_DIR" -S "$PROJECT_DIR" -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_COMPILER="$COSIM_CC"
 cmake --build "$BUILD_DIR" -j"$(nproc)"
 
 # 验证产物

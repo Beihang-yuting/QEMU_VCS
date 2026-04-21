@@ -205,7 +205,7 @@ class cosim_rc_driver extends pcie_tl_rc_driver;
                 /* Ensure at least 2 clock edges pass so glue can sample
                    the TLP beat (avoids delta-cycle race when send_tlp
                    returns on the same posedge it drives valid). */
-                repeat (2) @(posedge vif.clk);
+                repeat (2) @(posedge cpl_vif.clk);
 
                 // After send_tlp, vip_tlp.tag holds the VIP-assigned tag
                 if (vip_tlp.requires_completion()) begin
