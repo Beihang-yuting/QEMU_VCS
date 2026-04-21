@@ -14,6 +14,7 @@ package cosim_pkg;
      * enum name collision (TLP_CPL, TLP_MSG, etc. exist in both
      * pcie_tl_pkg and cosim_bridge_pkg). */
     import cosim_bridge_pkg::bridge_vcs_init;
+    import cosim_bridge_pkg::bridge_vcs_init_ex;
     import cosim_bridge_pkg::bridge_vcs_poll_tlp;
     import cosim_bridge_pkg::bridge_vcs_send_completion;
     import cosim_bridge_pkg::bridge_vcs_cleanup;

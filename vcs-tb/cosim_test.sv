@@ -52,20 +52,44 @@ class cosim_test extends uvm_test;
     task run_phase(uvm_phase phase);
         cosim_rc_driver drv;
         string shm_name, sock_path;
+        string transport_type, remote_host;
+        int port_base, instance_id;
 
         phase.raise_objection(this, "cosim_test waiting for shutdown");
 
         /* 等待复位完成 */
         #200ns;
 
-        /* 初始化 DPI-C bridge */
-        if (!uvm_config_db#(string)::get(this, "", "shm_name", shm_name))
-            shm_name = "/cosim0";
-        if (!uvm_config_db#(string)::get(this, "", "sock_path", sock_path))
-            sock_path = "/tmp/cosim.sock";
+        /* 读取 transport 参数 (plusarg 或 config_db) */
+        if (!$value$plusargs("transport=%s", transport_type))
+            transport_type = "shm";
 
-        if (bridge_vcs_init(shm_name, sock_path) != 0) begin
-            `uvm_fatal("COSIM_TEST", "bridge_vcs_init failed")
+        if (transport_type == "tcp") begin
+            if (!$value$plusargs("REMOTE_HOST=%s", remote_host))
+                remote_host = "127.0.0.1";
+            if (!$value$plusargs("PORT_BASE=%d", port_base))
+                port_base = 9100;
+            if (!$value$plusargs("INSTANCE_ID=%d", instance_id))
+                instance_id = 0;
+
+            `uvm_info("COSIM_TEST", $sformatf(
+                "TCP mode: host=%s port=%0d inst=%0d",
+                remote_host, port_base, instance_id), UVM_LOW)
+
+            if (bridge_vcs_init_ex(transport_type, "", "",
+                    remote_host, port_base, instance_id) != 0) begin
+                `uvm_fatal("COSIM_TEST", "bridge_vcs_init_ex (tcp) failed")
+            end
+        end else begin
+            /* SHM 模式 — 使用原有 bridge_vcs_init */
+            if (!uvm_config_db#(string)::get(this, "", "shm_name", shm_name))
+                shm_name = "/cosim0";
+            if (!uvm_config_db#(string)::get(this, "", "sock_path", sock_path))
+                sock_path = "/tmp/cosim.sock";
+
+            if (bridge_vcs_init(shm_name, sock_path) != 0) begin
+                `uvm_fatal("COSIM_TEST", "bridge_vcs_init failed")
+            end
         end
         `uvm_info("COSIM_TEST", "Bridge initialized, cosim_rc_driver running", UVM_LOW)
 

@@ -9,6 +9,15 @@ package cosim_bridge_pkg;
         input string sock_path
     );
 
+    import "DPI-C" function int bridge_vcs_init_ex(
+        input string transport_type,
+        input string shm_name,
+        input string sock_path,
+        input string remote_host,
+        input int    port_base,
+        input int    instance_id
+    );
+
     import "DPI-C" function int bridge_vcs_poll_tlp(
         output byte unsigned tlp_type,
         output longint unsigned addr,
