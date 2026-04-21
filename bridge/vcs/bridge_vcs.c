@@ -3,6 +3,7 @@
  */
 #include "shm_layout.h"
 #include "cosim_types.h"
+#include "cosim_transport.h"
 #include "../qemu/sock_sync.h"
 #include <string.h>
 #include <stdio.h>
@@ -11,6 +12,7 @@
 static cosim_shm_t g_shm;
 static int g_sock_fd = -1;
 static int g_initialized = 0;
+static cosim_transport_t *g_transport = NULL;
 
 /* Counter for TLP_READY messages consumed during DMA waits. */
 static int g_pending_tlp_ready = 0;
@@ -54,6 +56,53 @@ int bridge_vcs_poll_tlp(unsigned char *tlp_type, unsigned long long *addr,
         fprintf(stderr, "[VCS Bridge] heartbeat: poll_count=%d pending_tlp=%d\n",
                 g_poll_count, g_pending_tlp_ready);
     }
+
+    /* ---- TCP transport path ---- */
+    if (g_transport) {
+        tlp_entry_t entry;
+
+        /* Drain pending TLP_READY consumed during DMA waits */
+        if (g_pending_tlp_ready > 0) {
+            if (g_transport->recv_tlp(g_transport, &entry) == 0) {
+                g_pending_tlp_ready--;
+                g_last_entry = entry;
+                *tlp_type = entry.type;
+                *addr = entry.addr;
+                *len = entry.len;
+                *tag = entry.tag;
+                int words = (entry.len + 3) / 4;
+                for (int i = 0; i < words && i < 16; i++)
+                    memcpy(&data[i], &entry.data[i * 4], 4);
+                return 0;
+            }
+            g_pending_tlp_ready = 0;
+        }
+
+        /* Non-blocking check for TLP_READY on ctrl channel */
+        sync_msg_t msg;
+        int ret = g_transport->recv_sync_timed(g_transport, &msg, 0);
+        if (ret < 0) return -1;
+        if (ret == 1) return 1;  /* timeout — no TLP */
+        if (msg.type != SYNC_MSG_TLP_READY) {
+            if (msg.type == SYNC_MSG_SHUTDOWN) return -1;
+            return 1;
+        }
+
+        /* Receive the TLP via transport */
+        if (g_transport->recv_tlp(g_transport, &entry) < 0) return 1;
+
+        g_last_entry = entry;
+        *tlp_type = entry.type;
+        *addr = entry.addr;
+        *len = entry.len;
+        *tag = entry.tag;
+        int words = (entry.len + 3) / 4;
+        for (int i = 0; i < words && i < 16; i++)
+            memcpy(&data[i], &entry.data[i * 4], 4);
+        return 0;
+    }
+
+    /* ---- SHM path (original) ---- */
 
     /* If TLP_READY messages were consumed during DMA waits, dequeue
      * directly from the SHM ring without waiting for socket notification. */
@@ -144,6 +193,17 @@ int bridge_vcs_send_completion(int tag, const unsigned int *data, int len) {
         memcpy(&cpl.data[i * 4], &data[i], 4);
     }
 
+    /* ---- TCP transport path ---- */
+    if (g_transport) {
+        if (g_transport->send_cpl(g_transport, &cpl) < 0) {
+            fprintf(stderr, "[VCS Bridge] send_cpl failed\n");
+            return -1;
+        }
+        sync_msg_t msg = { .type = SYNC_MSG_CPL_READY, .payload = 0 };
+        return g_transport->send_sync(g_transport, &msg);
+    }
+
+    /* ---- SHM path (original) ---- */
     int ret = ring_buf_enqueue(&g_shm.cpl_ring, &cpl);
     if (ret < 0) {
         fprintf(stderr, "[VCS Bridge] Completion queue full\n");
@@ -160,6 +220,39 @@ int bridge_vcs_dma_request(int direction, unsigned long long host_addr,
                             const unsigned int *data, int len,
                             int *out_tag) {
     static uint32_t next_tag = 1000;
+
+    /* ---- TCP transport path ---- */
+    if (g_transport) {
+        uint32_t tag = next_tag++;
+
+        /* For WRITE: send data before the request so QEMU has it */
+        if (direction == DMA_DIR_WRITE) {
+            if (g_transport->send_dma_data(g_transport, tag, DMA_DIR_WRITE,
+                                            host_addr, (const uint8_t *)data, (uint32_t)len) < 0) {
+                fprintf(stderr, "[VCS Bridge] dma_request: send_dma_data failed\n");
+                return -1;
+            }
+        }
+
+        dma_req_t req = {
+            .tag = tag,
+            .direction = (uint32_t)direction,
+            .host_addr = host_addr,
+            .len = (uint32_t)len,
+            .dma_offset = 0,  /* unused in TCP mode */
+            .timestamp = 0,
+        };
+
+        if (g_transport->send_dma_req(g_transport, &req) < 0) {
+            fprintf(stderr, "[VCS Bridge] dma_request: send_dma_req failed\n");
+            return -1;
+        }
+
+        *out_tag = (int)tag;
+        return 0;
+    }
+
+    /* ---- SHM path (original) ---- */
 
     /* Simple bump offset for DMA buffer — wraps if exceeds dma_buf_size */
     static uint32_t bump_offset = 0;
@@ -199,6 +292,70 @@ int bridge_vcs_dma_read_sync(unsigned long long host_addr,
     if (!g_initialized || len <= 0) return -1;
 
     static uint32_t next_tag = 2000;
+
+    /* ---- TCP transport path ---- */
+    if (g_transport) {
+        uint32_t tag = next_tag++;
+        dma_req_t req = {
+            .tag = tag,
+            .direction = DMA_DIR_READ,
+            .host_addr = host_addr,
+            .len = (uint32_t)len,
+            .dma_offset = 0,  /* unused in TCP mode */
+            .timestamp = 0,
+        };
+
+        if (g_transport->send_dma_req(g_transport, &req) < 0) {
+            fprintf(stderr, "[VCS Bridge] DMA read sync: send_dma_req failed\n");
+            return -1;
+        }
+
+        /* Wait for SYNC_MSG_DMA_CPL */
+        for (int i = 0; i < 1000; i++) {
+            sync_msg_t msg;
+            int ret = g_transport->recv_sync(g_transport, &msg);
+            if (ret < 0) {
+                fprintf(stderr, "[VCS Bridge] DMA read sync: recv_sync error\n");
+                return -1;
+            }
+            if (msg.type == SYNC_MSG_SHUTDOWN) return -1;
+            if (msg.type == SYNC_MSG_TLP_READY) {
+                g_pending_tlp_ready++;
+                continue;
+            }
+            if (msg.type == SYNC_MSG_DMA_CPL) {
+                dma_cpl_t cpl;
+                if (g_transport->recv_dma_cpl(g_transport, &cpl) < 0) {
+                    fprintf(stderr, "[VCS Bridge] DMA read sync: recv_dma_cpl failed\n");
+                    return -1;
+                }
+                if (cpl.tag != tag || cpl.status != 0) {
+                    fprintf(stderr, "[VCS Bridge] DMA read: cpl tag=%u status=%u (expected tag=%u)\n",
+                            cpl.tag, cpl.status, tag);
+                    return -1;
+                }
+                /* Receive data from QEMU via transport */
+                uint32_t rx_tag, rx_dir, rx_len;
+                uint64_t rx_addr;
+                uint8_t tmp_buf[64];
+                /* Use a stack buffer large enough for typical DPI calls (up to 16 words = 64 bytes) */
+                rx_len = (uint32_t)len;
+                if (g_transport->recv_dma_data(g_transport, &rx_tag, &rx_dir,
+                                                &rx_addr, tmp_buf, &rx_len) < 0) {
+                    fprintf(stderr, "[VCS Bridge] DMA read sync: recv_dma_data failed\n");
+                    return -1;
+                }
+                int words = (len + 3) / 4;
+                for (int w = 0; w < words && w < 16; w++)
+                    memcpy(&data[w], tmp_buf + w * 4, 4);
+                return 0;
+            }
+        }
+        fprintf(stderr, "[VCS Bridge] DMA read sync: timeout (TCP)\n");
+        return -1;
+    }
+
+    /* ---- SHM path (original) ---- */
 
     /* Allocate DMA buffer offset */
     static uint32_t bump_offset = 0;
@@ -269,6 +426,63 @@ int bridge_vcs_dma_write_sync(unsigned long long host_addr,
 
     static uint32_t next_tag = 3000;
 
+    /* ---- TCP transport path ---- */
+    if (g_transport) {
+        uint32_t tag = next_tag++;
+
+        /* Send data first so QEMU has it when processing the request */
+        if (g_transport->send_dma_data(g_transport, tag, DMA_DIR_WRITE,
+                                        host_addr, (const uint8_t *)data, (uint32_t)len) < 0) {
+            fprintf(stderr, "[VCS Bridge] DMA write sync: send_dma_data failed\n");
+            return -1;
+        }
+
+        dma_req_t req = {
+            .tag = tag,
+            .direction = DMA_DIR_WRITE,
+            .host_addr = host_addr,
+            .len = (uint32_t)len,
+            .dma_offset = 0,  /* unused in TCP mode */
+            .timestamp = 0,
+        };
+
+        if (g_transport->send_dma_req(g_transport, &req) < 0) {
+            fprintf(stderr, "[VCS Bridge] DMA write sync: send_dma_req failed\n");
+            return -1;
+        }
+
+        /* Wait for SYNC_MSG_DMA_CPL */
+        for (int i = 0; i < 1000; i++) {
+            sync_msg_t msg;
+            int ret = g_transport->recv_sync(g_transport, &msg);
+            if (ret < 0) {
+                fprintf(stderr, "[VCS Bridge] DMA write sync: recv_sync error\n");
+                return -1;
+            }
+            if (msg.type == SYNC_MSG_SHUTDOWN) return -1;
+            if (msg.type == SYNC_MSG_TLP_READY) {
+                g_pending_tlp_ready++;
+                continue;
+            }
+            if (msg.type == SYNC_MSG_DMA_CPL) {
+                dma_cpl_t cpl;
+                if (g_transport->recv_dma_cpl(g_transport, &cpl) < 0) {
+                    fprintf(stderr, "[VCS Bridge] DMA write sync: recv_dma_cpl failed\n");
+                    return -1;
+                }
+                if (cpl.tag == tag && cpl.status == 0)
+                    return 0;
+                fprintf(stderr, "[VCS Bridge] DMA write: cpl tag=%u status=%u (expected tag=%u)\n",
+                        cpl.tag, cpl.status, tag);
+                return -1;
+            }
+        }
+        fprintf(stderr, "[VCS Bridge] DMA write sync: timeout (TCP)\n");
+        return -1;
+    }
+
+    /* ---- SHM path (original) ---- */
+
     static uint32_t bump_offset = 0;
     uint32_t aligned_len = ((uint32_t)len + 63) & ~63u;
     if (bump_offset + aligned_len > g_shm.dma_buf_size) {
@@ -328,6 +542,13 @@ int bridge_vcs_dma_write_sync(unsigned long long host_addr,
 /* DPI-C: VCS raises MSI interrupt */
 int bridge_vcs_raise_msi(int vector) {
     msi_event_t ev = { .vector = (uint32_t)vector, .timestamp = 0 };
+
+    /* ---- TCP transport path ---- */
+    if (g_transport) {
+        return g_transport->send_msi(g_transport, &ev);
+    }
+
+    /* ---- SHM path (original) ---- */
     if (ring_buf_enqueue(&g_shm.msi_ring, &ev) < 0) {
         fprintf(stderr, "[VCS Bridge] MSI queue full (vec=%d)\n", vector);
         return -1;
@@ -338,6 +559,12 @@ int bridge_vcs_raise_msi(int vector) {
 /* DPI-C: Precise mode — wait for QEMU's clock step request
  * Returns: 0=normal clock step (cycles_out set), other=msg type for dispatch */
 int bridge_vcs_wait_clock_step(int *cycles_out) {
+    /* TCP transport: precise clock mode not supported */
+    if (g_transport) {
+        *cycles_out = 0;
+        return -1;
+    }
+
     sync_msg_t msg;
     int ret = sock_sync_recv(g_sock_fd, &msg);
     if (ret < 0) return -1;
@@ -351,6 +578,9 @@ int bridge_vcs_wait_clock_step(int *cycles_out) {
 
 /* DPI-C: Precise mode — ack N cycles advanced */
 int bridge_vcs_clock_ack(int cycles) {
+    /* TCP transport: precise clock mode not supported */
+    if (g_transport) return -1;
+
     sync_msg_t msg = { .type = SYNC_MSG_CLOCK_ACK, .payload = (uint32_t)cycles };
     return sock_sync_send(g_sock_fd, &msg);
 }
@@ -363,6 +593,64 @@ int bridge_dma_read_bytes(uint64_t host_addr, uint8_t *buf, uint32_t len) {
     if (!g_initialized || len == 0 || !buf) return -1;
 
     static uint32_t rd_tag = 5000;
+
+    /* ---- TCP transport path ---- */
+    if (g_transport) {
+        uint32_t tag = rd_tag++;
+        dma_req_t req = {
+            .tag = tag,
+            .direction = DMA_DIR_READ,
+            .host_addr = host_addr,
+            .len = len,
+            .dma_offset = 0,  /* unused in TCP mode */
+            .timestamp = 0,
+        };
+
+        if (g_transport->send_dma_req(g_transport, &req) < 0) {
+            fprintf(stderr, "[VCS Bridge] dma_read_bytes: send_dma_req failed\n");
+            return -1;
+        }
+
+        for (int i = 0; i < 1000; i++) {
+            sync_msg_t msg;
+            int ret = g_transport->recv_sync(g_transport, &msg);
+            if (ret < 0) {
+                fprintf(stderr, "[VCS Bridge] dma_read_bytes: recv_sync error\n");
+                return -1;
+            }
+            if (msg.type == SYNC_MSG_SHUTDOWN) return -1;
+            if (msg.type == SYNC_MSG_TLP_READY) {
+                g_pending_tlp_ready++;
+                continue;
+            }
+            if (msg.type == SYNC_MSG_DMA_CPL) {
+                dma_cpl_t cpl;
+                if (g_transport->recv_dma_cpl(g_transport, &cpl) < 0) {
+                    fprintf(stderr, "[VCS Bridge] dma_read_bytes: recv_dma_cpl failed\n");
+                    return -1;
+                }
+                if (cpl.tag != tag || cpl.status != 0) {
+                    fprintf(stderr, "[VCS Bridge] dma_read_bytes: tag mismatch %u vs %u\n",
+                            cpl.tag, tag);
+                    return -1;
+                }
+                /* Receive the data QEMU read from guest RAM */
+                uint32_t rx_tag, rx_dir, rx_len = len;
+                uint64_t rx_addr;
+                if (g_transport->recv_dma_data(g_transport, &rx_tag, &rx_dir,
+                                                &rx_addr, buf, &rx_len) < 0) {
+                    fprintf(stderr, "[VCS Bridge] dma_read_bytes: recv_dma_data failed\n");
+                    return -1;
+                }
+                return 0;
+            }
+        }
+        fprintf(stderr, "[VCS Bridge] dma_read_bytes: timeout (TCP)\n");
+        return -1;
+    }
+
+    /* ---- SHM path (original) ---- */
+
     static uint32_t rd_bump = 0;
     uint32_t aligned = (len + 63) & ~63u;
     if (rd_bump + aligned > g_shm.dma_buf_size)
@@ -422,6 +710,63 @@ int bridge_dma_write_bytes(uint64_t host_addr, const uint8_t *buf, uint32_t len)
     if (!g_initialized || len == 0 || !buf) return -1;
 
     static uint32_t wr_tag = 6000;
+
+    /* ---- TCP transport path ---- */
+    if (g_transport) {
+        uint32_t tag = wr_tag++;
+
+        /* Send data first so QEMU has it when processing the request */
+        if (g_transport->send_dma_data(g_transport, tag, DMA_DIR_WRITE,
+                                        host_addr, buf, len) < 0) {
+            fprintf(stderr, "[VCS Bridge] dma_write_bytes: send_dma_data failed\n");
+            return -1;
+        }
+
+        dma_req_t req = {
+            .tag = tag,
+            .direction = DMA_DIR_WRITE,
+            .host_addr = host_addr,
+            .len = len,
+            .dma_offset = 0,  /* unused in TCP mode */
+            .timestamp = 0,
+        };
+
+        if (g_transport->send_dma_req(g_transport, &req) < 0) {
+            fprintf(stderr, "[VCS Bridge] dma_write_bytes: send_dma_req failed\n");
+            return -1;
+        }
+
+        for (int i = 0; i < 1000; i++) {
+            sync_msg_t msg;
+            int ret = g_transport->recv_sync(g_transport, &msg);
+            if (ret < 0) {
+                fprintf(stderr, "[VCS Bridge] dma_write_bytes: recv_sync error\n");
+                return -1;
+            }
+            if (msg.type == SYNC_MSG_SHUTDOWN) return -1;
+            if (msg.type == SYNC_MSG_TLP_READY) {
+                g_pending_tlp_ready++;
+                continue;
+            }
+            if (msg.type == SYNC_MSG_DMA_CPL) {
+                dma_cpl_t cpl;
+                if (g_transport->recv_dma_cpl(g_transport, &cpl) < 0) {
+                    fprintf(stderr, "[VCS Bridge] dma_write_bytes: recv_dma_cpl failed\n");
+                    return -1;
+                }
+                if (cpl.tag == tag && cpl.status == 0)
+                    return 0;
+                fprintf(stderr, "[VCS Bridge] dma_write_bytes: tag mismatch %u vs %u\n",
+                        cpl.tag, tag);
+                return -1;
+            }
+        }
+        fprintf(stderr, "[VCS Bridge] dma_write_bytes: timeout (TCP)\n");
+        return -1;
+    }
+
+    /* ---- SHM path (original) ---- */
+
     static uint32_t wr_bump = 0;
     uint32_t aligned = (len + 63) & ~63u;
     if (wr_bump + aligned > g_shm.dma_buf_size)
@@ -527,10 +872,6 @@ void bridge_vcs_cleanup(void) {
 }
 
 /* ========== Transport-aware API (新增) ========== */
-
-#include "cosim_transport.h"
-
-static cosim_transport_t *g_transport = NULL;
 
 int bridge_vcs_init_ex(const char *transport_type,
                         const char *shm_name, const char *sock_path,
