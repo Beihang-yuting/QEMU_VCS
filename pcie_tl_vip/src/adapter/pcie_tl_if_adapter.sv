@@ -87,6 +87,13 @@ class pcie_tl_if_adapter extends uvm_component;
         total_beats = (bytes.size() + 31) / 32;  // 256-bit bus = 32 bytes
 
         for (int i = 0; i < total_beats; i++) begin
+            /* Drive signals before the clock edge so glue's always_ff
+               samples the updated value.  Using blocking assign here
+               would violate synthesis style, but for a VIP driver task
+               it is acceptable and avoids the NBA delta-cycle race where
+               glue_if_to_stub samples vip_tlp_valid before the NBA
+               update from <= takes effect on the same posedge. */
+            @(negedge vif.clk);
             vif.tlp_valid <= 1;
             vif.tlp_sop   <= (i == 0);
             vif.tlp_eop   <= (i == total_beats - 1);
