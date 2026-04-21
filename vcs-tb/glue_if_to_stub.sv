@@ -499,6 +499,9 @@ module glue_if_to_stub (
     // =========================================================================
 `ifndef SYNTHESIS
     always_ff @(posedge clk) begin
+        if (vip_tlp_valid && vip_tlp_sop && state == ST_IDLE)
+            $display("[GLUE] vip_tlp_valid+sop in IDLE: ready=%0b eop=%0b",
+                     vip_tlp_ready, vip_tlp_eop);
         if (state == ST_DECODE) begin
             if (decoded_unsupported)
                 $display("[GLUE] Unsupported TLP: Fmt=%0h Type=%0h Tag=%0h has_data=%0b -> %s",

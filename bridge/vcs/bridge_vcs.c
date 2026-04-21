@@ -83,13 +83,18 @@ int bridge_vcs_poll_tlp(unsigned char *tlp_type, unsigned long long *addr,
         int ret = g_transport->recv_sync_timed(g_transport, &msg, 0);
         if (ret < 0) return -1;
         if (ret == 1) return 1;  /* timeout — no TLP */
+        fprintf(stderr, "[VCS poll#%d] recv_sync ret=%d msg.type=%d\n",
+                g_poll_count, ret, msg.type);
         if (msg.type != SYNC_MSG_TLP_READY) {
             if (msg.type == SYNC_MSG_SHUTDOWN) return -1;
+            fprintf(stderr, "[VCS poll] unexpected msg.type=%d, discarding\n", msg.type);
             return 1;
         }
 
         /* Receive the TLP via transport */
         if (g_transport->recv_tlp(g_transport, &entry) < 0) return 1;
+        fprintf(stderr, "[VCS poll] got TLP type=%d tag=%d addr=0x%llx\n",
+                entry.type, entry.tag, (unsigned long long)entry.addr);
 
         g_last_entry = entry;
         *tlp_type = entry.type;

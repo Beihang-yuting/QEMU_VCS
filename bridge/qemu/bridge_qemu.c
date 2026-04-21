@@ -43,13 +43,17 @@ int bridge_send_tlp(bridge_ctx_t *ctx, tlp_entry_t *req) {
     if (ctx->trace_enabled) trace_log_tlp(&ctx->trace, req);
 
     if (ctx->transport) {
+        fprintf(stderr, "[send_tlp] type=%d tag=%d addr=0x%llx\n",
+                req->type, req->tag, (unsigned long long)req->addr);
         int ret = ctx->transport->send_tlp(ctx->transport, req);
         if (ret < 0) {
             fprintf(stderr, "bridge_send_tlp: transport send_tlp failed\n");
             return -1;
         }
         sync_msg_t msg = { .type = SYNC_MSG_TLP_READY, .payload = 0 };
-        return ctx->transport->send_sync(ctx->transport, &msg);
+        ret = ctx->transport->send_sync(ctx->transport, &msg);
+        fprintf(stderr, "[send_tlp] sync sent ret=%d\n", ret);
+        return ret;
     }
 
     int ret = ring_buf_enqueue(&ctx->shm.req_ring, req);
@@ -67,10 +71,14 @@ int bridge_wait_completion(bridge_ctx_t *ctx, uint8_t tag, cpl_entry_t *cpl) {
     int ret;
 
     if (ctx->transport) {
+        fprintf(stderr, "[wait_cpl] waiting for tag=%d on ctrl_fd...\n", tag);
         ret = ctx->transport->recv_sync(ctx->transport, &msg);
+        fprintf(stderr, "[wait_cpl] recv_sync ret=%d msg.type=%d tag=%d\n",
+                ret, (ret == 0) ? msg.type : -1, tag);
         if (ret < 0) return -1;
         if (msg.type != SYNC_MSG_CPL_READY) {
-            fprintf(stderr, "bridge_wait_completion: unexpected msg type %d\n", msg.type);
+            fprintf(stderr, "bridge_wait_completion: unexpected msg type %d (expected %d)\n",
+                    msg.type, SYNC_MSG_CPL_READY);
             return -1;
         }
         ret = ctx->transport->recv_cpl(ctx->transport, cpl);
@@ -78,6 +86,7 @@ int bridge_wait_completion(bridge_ctx_t *ctx, uint8_t tag, cpl_entry_t *cpl) {
             fprintf(stderr, "bridge_wait_completion: transport recv_cpl failed\n");
             return -1;
         }
+        fprintf(stderr, "[wait_cpl] got cpl tag=%d (expected %d)\n", cpl->tag, tag);
     } else {
         ret = sock_sync_recv(ctx->client_fd, &msg);
         if (ret < 0) return -1;
