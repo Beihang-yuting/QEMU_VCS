@@ -190,14 +190,15 @@ static void test_recv_timeout(cosim_transport_t *server) {
 }
 
 static void test_port_allocation(void) {
-    printf("Test 7: port allocation... ");
+    printf("Test 7: port allocation (v2: N*3)... ");
 
-    CHECK(9100 + 0 * 2     == 9100);
-    CHECK(9100 + 0 * 2 + 1 == 9101);
-    CHECK(9100 + 1 * 2     == 9102);
-    CHECK(9100 + 1 * 2 + 1 == 9103);
-    CHECK(9100 + 2 * 2     == 9104);
-    CHECK(9100 + 2 * 2 + 1 == 9105);
+    /* v2 端口分配: ctrl=base+N*3, data=base+N*3+1, aux=base+N*3+2 */
+    CHECK(9100 + 0 * 3     == 9100);  /* inst 0 ctrl */
+    CHECK(9100 + 0 * 3 + 1 == 9101);  /* inst 0 data */
+    CHECK(9100 + 0 * 3 + 2 == 9102);  /* inst 0 aux  */
+    CHECK(9100 + 1 * 3     == 9103);  /* inst 1 ctrl */
+    CHECK(9100 + 1 * 3 + 1 == 9104);  /* inst 1 data */
+    CHECK(9100 + 1 * 3 + 2 == 9105);  /* inst 1 aux  */
 
     printf("PASS\n");
 }
