@@ -5,6 +5,7 @@
 #include "shm_layout.h"
 #include "sock_sync.h"
 #include "trace_log.h"
+#include <pthread.h>
 
 typedef struct {
     cosim_shm_t shm;
@@ -17,6 +18,7 @@ typedef struct {
     trace_log_t trace;
     int         trace_enabled;
     struct cosim_transport *transport;  /* NULL = legacy SHM mode */
+    pthread_mutex_t tlp_mutex;         /* protects send_tlp + wait_completion */
 } bridge_ctx_t;
 
 bridge_ctx_t *bridge_init(const char *shm_name, const char *sock_path);

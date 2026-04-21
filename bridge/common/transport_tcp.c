@@ -63,7 +63,8 @@ static int tcp_send_all(int fd, const void *buf, size_t len) {
         ssize_t n = send(fd, p + sent, len - sent, MSG_NOSIGNAL);
         if (n < 0) {
             if (errno == EINTR) continue;
-            perror("[tcp] send");
+            fprintf(stderr, "[tcp] send fd=%d len=%zu errno=%d (%s)\n",
+                    fd, len, errno, strerror(errno));
             return -1;
         }
         if (n == 0) return -1;
@@ -743,8 +744,10 @@ cosim_transport_t *transport_tcp_create(const transport_cfg_t *cfg) {
         }
     }
 
-    fprintf(stderr, "[tcp] Handshake complete, transport ready (v%u, %s)\n",
-            p->negotiated_version, (p->aux_fd >= 0) ? "3-conn" : "2-conn");
+    fprintf(stderr, "[tcp] Handshake complete, transport ready (v%u, %s) "
+            "ctrl_fd=%d data_fd=%d aux_fd=%d\n",
+            p->negotiated_version, (p->aux_fd >= 0) ? "3-conn" : "2-conn",
+            p->ctrl_fd, p->data_fd, p->aux_fd);
 
     t->send_sync       = tcp_send_sync;
     t->recv_sync       = tcp_recv_sync;

@@ -13,6 +13,7 @@ bridge_ctx_t *bridge_init(const char *shm_name, const char *sock_path) {
     ctx->listen_fd = -1;
     ctx->client_fd = -1;
     ctx->next_tag = 0;
+    pthread_mutex_init(&ctx->tlp_mutex, NULL);
 
     if (cosim_shm_create(&ctx->shm, shm_name) < 0) {
         free(ctx);
@@ -103,13 +104,22 @@ int bridge_wait_completion(bridge_ctx_t *ctx, uint8_t tag, cpl_entry_t *cpl) {
 }
 
 int bridge_send_tlp_and_wait(bridge_ctx_t *ctx, tlp_entry_t *req, cpl_entry_t *cpl) {
+    pthread_mutex_lock(&ctx->tlp_mutex);
     int ret = bridge_send_tlp(ctx, req);
-    if (ret < 0) return ret;
-    return bridge_wait_completion(ctx, req->tag, cpl);
+    if (ret < 0) {
+        pthread_mutex_unlock(&ctx->tlp_mutex);
+        return ret;
+    }
+    ret = bridge_wait_completion(ctx, req->tag, cpl);
+    pthread_mutex_unlock(&ctx->tlp_mutex);
+    return ret;
 }
 
 int bridge_send_tlp_fire(bridge_ctx_t *ctx, tlp_entry_t *req) {
-    return bridge_send_tlp(ctx, req);
+    pthread_mutex_lock(&ctx->tlp_mutex);
+    int ret = bridge_send_tlp(ctx, req);
+    pthread_mutex_unlock(&ctx->tlp_mutex);
+    return ret;
 }
 
 int bridge_complete_dma(bridge_ctx_t *ctx, uint32_t tag, uint32_t status) {
@@ -240,6 +250,7 @@ bridge_ctx_t *bridge_init_ex(const transport_cfg_t *cfg) {
     ctx->listen_fd = -1;
     ctx->client_fd = -1;
     ctx->next_tag = 0;
+    pthread_mutex_init(&ctx->tlp_mutex, NULL);
 
     transport_cfg_t server_cfg = *cfg;
     server_cfg.is_server = 1;
