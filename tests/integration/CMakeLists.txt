@@ -41,7 +41,19 @@ add_executable(test_time_sync_loose test_time_sync_loose.c)
 target_link_libraries(test_time_sync_loose cosim_eth)
 add_test(NAME test_time_sync_loose COMMAND test_time_sync_loose)
 
+# QEMU 侧综合集成测试 (Fast/Precise 模式、时间同步、DMA/MSI)
+add_executable(test_qemu_integration test_qemu_integration.c)
+target_link_libraries(test_qemu_integration cosim_bridge cosim_bridge_common pthread)
+add_test(NAME test_qemu_integration COMMAND test_qemu_integration)
+set_tests_properties(test_qemu_integration PROPERTIES TIMEOUT 60)
+
 # launch_dual.py smoke test (P3-T7)
 add_test(NAME test_launch_smoke
          COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/test_launch_smoke.sh)
 set_tests_properties(test_launch_smoke PROPERTIES TIMEOUT 15)
+
+# TCP transport roundtrip integration test
+add_executable(test_tcp_roundtrip test_tcp_roundtrip.c)
+target_link_libraries(test_tcp_roundtrip cosim_bridge_common cosim_bridge pthread)
+add_test(NAME test_tcp_roundtrip COMMAND test_tcp_roundtrip)
+set_tests_properties(test_tcp_roundtrip PROPERTIES TIMEOUT 30)
