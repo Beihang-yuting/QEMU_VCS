@@ -148,9 +148,55 @@ void bridge_destroy(bridge_ctx_t *ctx) {
         trace_log_close(&ctx->trace);
         ctx->trace_enabled = 0;
     }
-    sock_sync_close(ctx->client_fd);
-    sock_sync_close(ctx->listen_fd);
-    cosim_shm_destroy(&ctx->shm, ctx->shm_name);
-    unlink(ctx->sock_path);
+    if (ctx->transport) {
+        ctx->transport->close(ctx->transport);
+    } else {
+        sock_sync_close(ctx->client_fd);
+        sock_sync_close(ctx->listen_fd);
+        cosim_shm_destroy(&ctx->shm, ctx->shm_name);
+        unlink(ctx->sock_path);
+    }
     free(ctx);
+}
+
+/* ========== Transport-aware API (新增) ========== */
+
+bridge_ctx_t *bridge_init_ex(const transport_cfg_t *cfg) {
+    if (!cfg) return NULL;
+
+    /* SHM 模式 — 委托给原有 bridge_init */
+    if (!cfg->transport || strcmp(cfg->transport, "shm") == 0) {
+        bridge_ctx_t *ctx = bridge_init(cfg->shm_name, cfg->sock_path);
+        if (ctx) ctx->transport = NULL;
+        return ctx;
+    }
+
+    /* TCP 模式 */
+    bridge_ctx_t *ctx = calloc(1, sizeof(*ctx));
+    if (!ctx) return NULL;
+
+    ctx->listen_fd = -1;
+    ctx->client_fd = -1;
+    ctx->next_tag = 0;
+
+    transport_cfg_t server_cfg = *cfg;
+    server_cfg.is_server = 1;
+    ctx->transport = transport_create(&server_cfg);
+    if (!ctx->transport) {
+        free(ctx);
+        return NULL;
+    }
+
+    ctx->transport->set_ready(ctx->transport);
+    return ctx;
+}
+
+int bridge_connect_ex(bridge_ctx_t *ctx) {
+    if (!ctx) return -1;
+
+    if (!ctx->transport) {
+        return bridge_connect(ctx);
+    }
+
+    return ctx->transport->peer_ready(ctx->transport) ? 0 : -1;
 }

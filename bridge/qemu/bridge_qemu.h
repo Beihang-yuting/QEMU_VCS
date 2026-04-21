@@ -16,6 +16,7 @@ typedef struct {
     /* P2: optional transaction trace */
     trace_log_t trace;
     int         trace_enabled;
+    struct cosim_transport *transport;  /* NULL = legacy SHM mode */
 } bridge_ctx_t;
 
 bridge_ctx_t *bridge_init(const char *shm_name, const char *sock_path);
@@ -39,5 +40,10 @@ int bridge_advance_clock(bridge_ctx_t *ctx, uint64_t cycles);
 /* P2: Optional transaction trace logging */
 int  bridge_enable_trace(bridge_ctx_t *ctx, const char *path, trace_fmt_t fmt);
 void bridge_disable_trace(bridge_ctx_t *ctx);
+
+/* Transport-aware API (新增，不影响现有代码) */
+#include "cosim_transport.h"
+bridge_ctx_t *bridge_init_ex(const transport_cfg_t *cfg);
+int bridge_connect_ex(bridge_ctx_t *ctx);
 
 #endif
