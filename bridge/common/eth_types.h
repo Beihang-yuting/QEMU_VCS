@@ -5,8 +5,11 @@
 
 /* Maximum Ethernet frame payload, including jumbo (9K + overhead) */
 #define ETH_FRAME_MAX_DATA     9216u
-/* Number of slots per direction in ETH SHM (A->B and B->A) */
-#define ETH_FRAME_RING_DEPTH   64u
+/* Number of slots per direction in ETH SHM (A->B and B->A).
+ * Override at compile time: -DETH_FRAME_RING_DEPTH=128 */
+#ifndef ETH_FRAME_RING_DEPTH
+#define ETH_FRAME_RING_DEPTH   256u
+#endif
 
 /* Frame flags */
 #define ETH_FRAME_FLAG_DROP    0x01u   /* marked by link model, must not be delivered */

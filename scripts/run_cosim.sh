@@ -11,6 +11,20 @@ GUEST_ROOTFS="${GUEST_ROOTFS:-}"
 QEMU="${PROJECT_DIR}/third_party/qemu/build/qemu-system-x86_64"
 MEMORY="${MEMORY:-4G}"
 
+VIP_MODE=0
+
+# Parse arguments
+for arg in "$@"; do
+    case $arg in
+        --vip-mode) VIP_MODE=1 ;;
+    esac
+done
+
+if [ "$VIP_MODE" = "1" ]; then
+    echo "=== VIP MODE ==="
+    echo "Using VIP-integrated VCS simulation"
+fi
+
 QEMU_ARGS=(
     -machine q35
     -m "$MEMORY"

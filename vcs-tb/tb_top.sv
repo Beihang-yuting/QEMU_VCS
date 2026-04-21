@@ -5,6 +5,7 @@
  * 3. 循环：poll TLP → 驱动 EP 桩 → 读取 completion → 回写 bridge
  * 4. TX doorbell → 转发 packet 到 ETH SHM
  */
+`ifndef COSIM_VIP_MODE
 `timescale 1ns/1ps
 
 module tb_top;
@@ -399,3 +400,4 @@ module tb_top;
     end
 
 endmodule
+`endif /* !COSIM_VIP_MODE */

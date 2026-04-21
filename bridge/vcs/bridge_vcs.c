@@ -18,6 +18,9 @@ static int g_pending_tlp_ready = 0;
 /* Debug heartbeat counter — prints status every N poll iterations */
 static int g_poll_count = 0;
 
+/* Cache of last dequeued TLP entry for bridge_vcs_poll_tlp_ext */
+static tlp_entry_t g_last_entry;
+
 /* DPI-C: 初始化 — 打开 SHM，连接 Socket */
 int bridge_vcs_init(const char *shm_name, const char *sock_path) {
     if (g_initialized) return 0;
@@ -47,7 +50,7 @@ int bridge_vcs_init(const char *shm_name, const char *sock_path) {
 int bridge_vcs_poll_tlp(unsigned char *tlp_type, unsigned long long *addr,
                          unsigned int *data, int *len, int *tag) {
     g_poll_count++;
-    if ((g_poll_count % 5000) == 0) {
+    if ((g_poll_count % 100000) == 0) {
         fprintf(stderr, "[VCS Bridge] heartbeat: poll_count=%d pending_tlp=%d\n",
                 g_poll_count, g_pending_tlp_ready);
     }
@@ -59,6 +62,7 @@ int bridge_vcs_poll_tlp(unsigned char *tlp_type, unsigned long long *addr,
         int dret = ring_buf_dequeue(&g_shm.req_ring, &entry);
         if (dret == 0) {
             g_pending_tlp_ready--;
+            g_last_entry = entry;
             *tlp_type = entry.type;
             *addr = entry.addr;
             *len = entry.len;
@@ -72,9 +76,11 @@ int bridge_vcs_poll_tlp(unsigned char *tlp_type, unsigned long long *addr,
         g_pending_tlp_ready = 0;
     }
 
-    /* Check Socket with 1ms timeout (non-blocking for RX polling) */
+    /* Check Socket with 0ms timeout (non-blocking) — VCS Q-2020 segfaults
+     * when $finish fires during a blocking poll/select syscall on Linux 6.17.
+     * SV-side #delay provides the pacing instead. */
     sync_msg_t msg;
-    int ret = sock_sync_recv_timed(g_sock_fd, &msg, 1);
+    int ret = sock_sync_recv_timed(g_sock_fd, &msg, 0);
     if (ret < 0) return -1;
     if (ret == 1) return 1;  /* timeout — no TLP, allow RX poll */
     if (msg.type != SYNC_MSG_TLP_READY) {
@@ -87,6 +93,7 @@ int bridge_vcs_poll_tlp(unsigned char *tlp_type, unsigned long long *addr,
     ret = ring_buf_dequeue(&g_shm.req_ring, &entry);
     if (ret < 0) return 1;
 
+    g_last_entry = entry;
     *tlp_type = entry.type;
     *addr = entry.addr;
     *len = entry.len;
@@ -97,6 +104,28 @@ int bridge_vcs_poll_tlp(unsigned char *tlp_type, unsigned long long *addr,
         memcpy(&data[i], &entry.data[i * 4], 4);
     }
 
+    return 0;
+}
+
+/* DPI-C: Extended poll (VIP mode) — same as poll_tlp but also returns
+ * msg_code, atomic_op_size, vendor_id, first_be, last_be from tlp_entry_t. */
+int bridge_vcs_poll_tlp_ext(unsigned char *tlp_type, unsigned long long *addr,
+                             unsigned int *data, int *len, int *tag,
+                             unsigned char *msg_code,
+                             unsigned char *atomic_op_size,
+                             unsigned short *vendor_id,
+                             unsigned char *first_be,
+                             unsigned char *last_be) {
+    int ret = bridge_vcs_poll_tlp(tlp_type, addr, data, len, tag);
+    if (ret != 0) return ret;
+
+    /* Re-peek the entry for extended fields.  Since poll_tlp already dequeued,
+     * we store a copy of the last dequeued entry in a static. */
+    *msg_code       = g_last_entry.msg_code;
+    *atomic_op_size = g_last_entry.atomic_op_size;
+    *vendor_id      = g_last_entry.vendor_id;
+    *first_be       = g_last_entry.first_be;
+    *last_be        = g_last_entry.last_be;
     return 0;
 }
 
@@ -444,6 +473,48 @@ int bridge_dma_write_bytes(uint64_t host_addr, const uint8_t *buf, uint32_t len)
     }
     fprintf(stderr, "[VCS Bridge] dma_write_bytes: timeout\n");
     return -1;
+}
+
+/* ========== Array-free DPI wrappers for VCS package-scope calls ========== */
+
+/* Static buffers for poll/send — avoids DPI-C array parameter issues
+ * when called from package scope in VCS Q-2020. */
+static unsigned int g_poll_data_buf[16];
+static unsigned int g_send_cpl_buf[16];
+
+/* Fully scalar DPI: poll TLP, store ALL results in static vars.
+ * Return: 0=TLP available, 1=empty, -1=error/shutdown */
+static unsigned char  g_poll_tlp_type;
+static unsigned long long g_poll_addr;
+static int            g_poll_len;
+static int            g_poll_tag;
+
+int bridge_vcs_poll_tlp_scalar(void) {
+    return bridge_vcs_poll_tlp(&g_poll_tlp_type, &g_poll_addr,
+                                g_poll_data_buf, &g_poll_len, &g_poll_tag);
+}
+
+/* Getters — no output parameters, just return values */
+int bridge_vcs_get_poll_type(void)  { return (int)g_poll_tlp_type; }
+long long bridge_vcs_get_poll_addr(void) { return (long long)g_poll_addr; }
+int bridge_vcs_get_poll_len(void)   { return g_poll_len; }
+int bridge_vcs_get_poll_tag(void)   { return g_poll_tag; }
+
+/* Get one word from the last polled TLP data */
+unsigned int bridge_vcs_get_poll_data(int index) {
+    if (index < 0 || index >= 16) return 0;
+    return g_poll_data_buf[index];
+}
+
+/* Set one word in the completion data buffer */
+void bridge_vcs_set_cpl_data(int index, unsigned int value) {
+    if (index >= 0 && index < 16)
+        g_send_cpl_buf[index] = value;
+}
+
+/* Send completion using pre-set buffer — pure scalar DPI */
+int bridge_vcs_send_cpl_scalar(int tag, int len) {
+    return bridge_vcs_send_completion(tag, g_send_cpl_buf, len);
 }
 
 /* DPI-C: 关闭连接 */

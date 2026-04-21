@@ -10,12 +10,28 @@
 #define COSIM_IRQ_SLOTS       8
 
 typedef enum {
-    TLP_MWR    = 0,
-    TLP_MRD    = 1,
-    TLP_CFGWR  = 2,
-    TLP_CFGRD  = 3,
-    TLP_CPL    = 4,
+    TLP_MWR      = 0,
+    TLP_MRD      = 1,
+    TLP_CFGWR0   = 2,   /* 原 TLP_CFGWR，改名为 Type 0，值不变 */
+    TLP_CFGRD0   = 3,   /* 原 TLP_CFGRD，改名为 Type 0，值不变 */
+    TLP_CPL      = 4,
+    TLP_CFGWR1   = 5,
+    TLP_CFGRD1   = 6,
+    TLP_IORD     = 7,
+    TLP_IOWR     = 8,
+    TLP_CPLD     = 9,
+    TLP_MSG      = 10,
+    TLP_ATOMIC_FETCHADD = 11,
+    TLP_ATOMIC_SWAP     = 12,
+    TLP_ATOMIC_CAS      = 13,
+    TLP_VENDOR_MSG      = 14,
+    TLP_LTR             = 15,
+    TLP_MRD_LK          = 16,
 } tlp_type_t;
+
+/* 向后兼容别名 */
+#define TLP_CFGWR  TLP_CFGWR0
+#define TLP_CFGRD  TLP_CFGRD0
 
 typedef enum {
     COSIM_MODE_FAST    = 0,
@@ -44,14 +60,19 @@ typedef struct {
     uint8_t   type;
     uint8_t   tag;
     uint16_t  len;
-    uint32_t  _pad0;
+    uint8_t   msg_code;       /* Message code (TLP_MSG) */
+    uint8_t   atomic_op_size; /* AtomicOp operand size: 4 or 8 bytes */
+    uint16_t  vendor_id;      /* Vendor Defined Message ID */
     uint64_t  addr;
     uint8_t   data[COSIM_TLP_DATA_SIZE];
     uint64_t  dma_offset;
     uint64_t  timestamp;
+    uint8_t   first_be;       /* First DW Byte Enable */
+    uint8_t   last_be;        /* Last DW Byte Enable */
+    uint8_t   _reserved[6];
 } __attribute__((packed)) tlp_entry_t;
 
-_Static_assert(sizeof(tlp_entry_t) == 96, "tlp_entry_t must be 96 bytes");
+_Static_assert(sizeof(tlp_entry_t) == 104, "tlp_entry_t must be 104 bytes");
 
 typedef struct {
     uint8_t   type;
