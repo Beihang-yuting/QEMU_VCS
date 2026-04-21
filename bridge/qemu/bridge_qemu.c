@@ -39,13 +39,23 @@ int bridge_connect(bridge_ctx_t *ctx) {
 int bridge_send_tlp(bridge_ctx_t *ctx, tlp_entry_t *req) {
     req->tag = ctx->next_tag++;
 
+    if (ctx->trace_enabled) trace_log_tlp(&ctx->trace, req);
+
+    if (ctx->transport) {
+        int ret = ctx->transport->send_tlp(ctx->transport, req);
+        if (ret < 0) {
+            fprintf(stderr, "bridge_send_tlp: transport send_tlp failed\n");
+            return -1;
+        }
+        sync_msg_t msg = { .type = SYNC_MSG_TLP_READY, .payload = 0 };
+        return ctx->transport->send_sync(ctx->transport, &msg);
+    }
+
     int ret = ring_buf_enqueue(&ctx->shm.req_ring, req);
     if (ret < 0) {
         fprintf(stderr, "bridge_send_tlp: request queue full\n");
         return -1;
     }
-
-    if (ctx->trace_enabled) trace_log_tlp(&ctx->trace, req);
 
     sync_msg_t msg = { .type = SYNC_MSG_TLP_READY, .payload = 0 };
     return sock_sync_send(ctx->client_fd, &msg);
@@ -53,18 +63,32 @@ int bridge_send_tlp(bridge_ctx_t *ctx, tlp_entry_t *req) {
 
 int bridge_wait_completion(bridge_ctx_t *ctx, uint8_t tag, cpl_entry_t *cpl) {
     sync_msg_t msg;
-    int ret = sock_sync_recv(ctx->client_fd, &msg);
-    if (ret < 0) return -1;
+    int ret;
 
-    if (msg.type != SYNC_MSG_CPL_READY) {
-        fprintf(stderr, "bridge_wait_completion: unexpected msg type %d\n", msg.type);
-        return -1;
-    }
-
-    ret = ring_buf_dequeue(&ctx->shm.cpl_ring, cpl);
-    if (ret < 0) {
-        fprintf(stderr, "bridge_wait_completion: completion queue empty\n");
-        return -1;
+    if (ctx->transport) {
+        ret = ctx->transport->recv_sync(ctx->transport, &msg);
+        if (ret < 0) return -1;
+        if (msg.type != SYNC_MSG_CPL_READY) {
+            fprintf(stderr, "bridge_wait_completion: unexpected msg type %d\n", msg.type);
+            return -1;
+        }
+        ret = ctx->transport->recv_cpl(ctx->transport, cpl);
+        if (ret < 0) {
+            fprintf(stderr, "bridge_wait_completion: transport recv_cpl failed\n");
+            return -1;
+        }
+    } else {
+        ret = sock_sync_recv(ctx->client_fd, &msg);
+        if (ret < 0) return -1;
+        if (msg.type != SYNC_MSG_CPL_READY) {
+            fprintf(stderr, "bridge_wait_completion: unexpected msg type %d\n", msg.type);
+            return -1;
+        }
+        ret = ring_buf_dequeue(&ctx->shm.cpl_ring, cpl);
+        if (ret < 0) {
+            fprintf(stderr, "bridge_wait_completion: completion queue empty\n");
+            return -1;
+        }
     }
 
     if (ctx->trace_enabled) trace_log_cpl(&ctx->trace, cpl);
@@ -90,10 +114,37 @@ int bridge_send_tlp_fire(bridge_ctx_t *ctx, tlp_entry_t *req) {
 
 int bridge_complete_dma(bridge_ctx_t *ctx, uint32_t tag, uint32_t status) {
     dma_cpl_t cpl = { .tag = tag, .status = status, .timestamp = 0 };
+
+    if (ctx->transport) {
+        int ret = ctx->transport->send_dma_cpl(ctx->transport, &cpl);
+        if (ret < 0) return -1;
+        sync_msg_t msg = { .type = SYNC_MSG_DMA_CPL, .payload = tag };
+        return ctx->transport->send_sync(ctx->transport, &msg);
+    }
+
     int ret = ring_buf_enqueue(&ctx->shm.dma_cpl_ring, &cpl);
     if (ret < 0) return -1;
     sync_msg_t msg = { .type = SYNC_MSG_DMA_CPL, .payload = tag };
     return sock_sync_send(ctx->client_fd, &msg);
+}
+
+int bridge_complete_dma_with_data(bridge_ctx_t *ctx, uint32_t tag,
+                                  uint32_t status, uint32_t direction,
+                                  uint64_t host_addr, const uint8_t *data,
+                                  uint32_t len) {
+    if (ctx->transport) {
+        int ret = ctx->transport->send_dma_data(ctx->transport, tag, direction,
+                                                 host_addr, data, len);
+        if (ret < 0) return -1;
+        dma_cpl_t cpl = { .tag = tag, .status = status, .timestamp = 0 };
+        ret = ctx->transport->send_dma_cpl(ctx->transport, &cpl);
+        if (ret < 0) return -1;
+        sync_msg_t msg = { .type = SYNC_MSG_DMA_CPL, .payload = tag };
+        return ctx->transport->send_sync(ctx->transport, &msg);
+    }
+
+    /* SHM mode: data is already in shared dma_buf, just send completion */
+    return bridge_complete_dma(ctx, tag, status);
 }
 
 int bridge_enable_trace(bridge_ctx_t *ctx, const char *path, trace_fmt_t fmt) {
@@ -113,6 +164,10 @@ void bridge_disable_trace(bridge_ctx_t *ctx) {
 }
 
 int bridge_request_mode_switch(bridge_ctx_t *ctx, cosim_mode_t target_mode) {
+    if (ctx->transport) {
+        fprintf(stderr, "bridge_request_mode_switch: not supported in TCP mode\n");
+        return -1;
+    }
     atomic_store(&ctx->shm.ctrl->target_mode, target_mode);
     atomic_store(&ctx->shm.ctrl->mode_switch_pending, 1);
     sync_msg_t msg = { .type = SYNC_MSG_MODE_SWITCH, .payload = target_mode };
@@ -120,10 +175,17 @@ int bridge_request_mode_switch(bridge_ctx_t *ctx, cosim_mode_t target_mode) {
 }
 
 cosim_mode_t bridge_get_mode(bridge_ctx_t *ctx) {
+    if (ctx->transport) {
+        return COSIM_MODE_FAST;  /* no shared ctrl in TCP mode */
+    }
     return (cosim_mode_t)ctx->shm.ctrl->mode;
 }
 
 int bridge_advance_clock(bridge_ctx_t *ctx, uint64_t cycles) {
+    if (ctx->transport) {
+        fprintf(stderr, "bridge_advance_clock: not supported in TCP mode\n");
+        return -1;
+    }
     if (ctx->shm.ctrl->mode != COSIM_MODE_PRECISE) {
         fprintf(stderr, "bridge_advance_clock: not in precise mode\n");
         return -1;

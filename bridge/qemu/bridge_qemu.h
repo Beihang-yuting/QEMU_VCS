@@ -30,6 +30,12 @@ void bridge_destroy(bridge_ctx_t *ctx);
 /* P2: DMA completion (QEMU→VCS) */
 int bridge_complete_dma(bridge_ctx_t *ctx, uint32_t tag, uint32_t status);
 
+/* TCP mode: DMA completion with data (no shared dma_buf over network) */
+int bridge_complete_dma_with_data(bridge_ctx_t *ctx, uint32_t tag,
+                                  uint32_t status, uint32_t direction,
+                                  uint64_t host_addr, const uint8_t *data,
+                                  uint32_t len);
+
 /* P2: Mode switch */
 int bridge_request_mode_switch(bridge_ctx_t *ctx, cosim_mode_t target_mode);
 cosim_mode_t bridge_get_mode(bridge_ctx_t *ctx);
