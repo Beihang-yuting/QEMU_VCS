@@ -525,3 +525,51 @@ void bridge_vcs_cleanup(void) {
         g_initialized = 0;
     }
 }
+
+/* ========== Transport-aware API (新增) ========== */
+
+#include "cosim_transport.h"
+
+static cosim_transport_t *g_transport = NULL;
+
+int bridge_vcs_init_ex(const char *transport_type,
+                        const char *shm_name, const char *sock_path,
+                        const char *remote_host, int port_base, int instance_id) {
+    if (g_initialized) return 0;
+
+    if (!transport_type || strcmp(transport_type, "shm") == 0) {
+        return bridge_vcs_init(shm_name, sock_path);
+    }
+
+    transport_cfg_t cfg = {
+        .transport   = transport_type,
+        .shm_name    = shm_name,
+        .sock_path   = sock_path,
+        .remote_host = remote_host,
+        .port_base   = port_base,
+        .instance_id = instance_id,
+        .is_server   = 0,
+    };
+
+    g_transport = transport_create(&cfg);
+    if (!g_transport) {
+        fprintf(stderr, "[VCS Bridge] Failed to create %s transport\n", transport_type);
+        return -1;
+    }
+
+    g_transport->set_ready(g_transport);
+    g_initialized = 1;
+    fprintf(stderr, "[VCS Bridge] Initialized: transport=%s remote=%s port=%d inst=%d\n",
+            transport_type, remote_host ? remote_host : "(null)", port_base, instance_id);
+    return 0;
+}
+
+void bridge_vcs_cleanup_ex(void) {
+    if (g_transport) {
+        g_transport->close(g_transport);
+        g_transport = NULL;
+        g_initialized = 0;
+    } else {
+        bridge_vcs_cleanup();
+    }
+}
