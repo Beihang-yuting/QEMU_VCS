@@ -14,6 +14,7 @@
 #include "exec/address-spaces.h" /* address_space_memory */
 #include "exec/cpu-common.h"     /* cpu_physical_memory_read/write */
 #include "hw/qdev-properties.h"
+#include "qapi/error.h"
 
 /* Bridge API — 通过动态链接使用 */
 #include "bridge_qemu.h"
