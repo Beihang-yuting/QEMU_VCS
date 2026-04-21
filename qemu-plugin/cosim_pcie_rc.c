@@ -207,17 +207,17 @@ static uint32_t cosim_config_read(PCIDevice *pci_dev, uint32_t address, int len)
         return pci_default_read_config(pci_dev, address, len);
     }
 
-    /* Standard PCI header (0x00-0x3F): QEMU manages locally.
-     * Includes Vendor/Device ID, Command/Status, BARs (0x10-0x24),
-     * Subsystem IDs, Capabilities Pointer, etc.
-     * QEMU's PCI subsystem handles BAR sizing correctly via
-     * pci_register_bar; forwarding to VCS would desync BAR state. */
+    /* Standard PCI header (0x00-0x3F): QEMU manages locally. */
     if (address < 0x40) {
-        return pci_default_read_config(pci_dev, address, len);
+        uint32_t v = pci_default_read_config(pci_dev, address, len);
+        if (address >= 0x34)
+            fprintf(stderr, "[cfg_read] local addr=0x%02x len=%d val=0x%x\n",
+                    address, len, v);
+        return v;
     }
 
-    /* Capability chain (0x40+): forward to VCS.
-     * VCS ep_stub defines virtio PCI capabilities here. */
+    /* Capability chain (0x40+): forward to VCS. */
+    fprintf(stderr, "[cfg_read] VCS forward addr=0x%02x len=%d\n", address, len);
     uint32_t dword_addr = address & ~3u;
     uint32_t byte_offset = address & 3u;
 
@@ -296,14 +296,79 @@ static void cosim_pcie_rc_realize(PCIDevice *pci_dev, Error **errp)
     /* 配置 INTx 中断引脚 (INTA) — 需要在 msi_init 之前设置 */
     pci_config_set_interrupt_pin(pci_dev->config, 1);  /* INTA */
 
-    /* 初始化 MSI — QEMU 管理 MSI capability，msi_init 会自动设置
-     * PCI_STATUS_CAP_LIST 和 cap_pointer。offset=0x38 让 MSI cap
-     * 位于 0x38，其 next 字段指向 0x40（VCS 端 virtio cap chain）。 */
-    if (msi_init(pci_dev, 0x38, 1, true, false, errp)) {
-        return;
+    /* 初始化 MSI — auto-allocate offset.
+     * Note: msi_init sets *errp on failure and returns non-zero.
+     * We clear errp before calling so a failure doesn't abort realize. */
+    {
+        Error *msi_err = NULL;
+        int ret = msi_init(pci_dev, 0, 1, true, false, &msi_err);
+        if (ret != 0) {
+            fprintf(stderr, "[realize] msi_init failed (ret=%d): %s\n",
+                    ret, msi_err ? error_get_pretty(msi_err) : "unknown");
+            error_free(msi_err);
+            /* Continue without MSI — set cap_pointer directly to virtio chain */
+            pci_set_word(pci_dev->config + PCI_STATUS,
+                         pci_get_word(pci_dev->config + PCI_STATUS) | PCI_STATUS_CAP_LIST);
+            pci_set_byte(pci_dev->config + PCI_CAPABILITY_LIST, 0x50);
+        } else {
+            /* MSI succeeded — find where it was placed and link to virtio caps */
+            uint8_t msi_cap = pci_dev->config[PCI_CAPABILITY_LIST];
+            fprintf(stderr, "[realize] MSI at 0x%02x, linking next→0x50\n", msi_cap);
+            /* Walk to end of MSI capability chain and append 0x50 */
+            while (pci_dev->config[msi_cap + 1] != 0)
+                msi_cap = pci_dev->config[msi_cap + 1];
+            pci_set_byte(pci_dev->config + msi_cap + 1, 0x50);
+        }
     }
-    /* Link MSI cap's next pointer to VCS virtio cap chain at 0x40 */
-    pci_set_byte(pci_dev->config + 0x38 + 1, 0x40);
+
+    /* Virtio PCI capabilities in local config space.
+     * Linux reads config via MMCONFIG (direct memory map of config[]),
+     * bypassing config_read callback. Layout must also match VCS
+     * ep_stub for CfgRd TLP forwarding consistency.
+     *
+     * Capability offsets (after MSI at 0x38-0x45):
+     *   0x50: COMMON_CFG (16B) → next=0x64
+     *   0x64: NOTIFY_CFG (20B) → next=0x78
+     *   0x78: ISR_CFG    (16B) → next=0x88
+     *   0x88: DEVICE_CFG (16B) → next=0 (end)
+     */
+    uint8_t *c = pci_dev->config;
+
+    /* COMMON_CFG at 0x50 */
+    c[0x50] = 0x09; c[0x51] = 0x64; c[0x52] = 0x10; c[0x53] = 0x01;
+    c[0x54] = 0x00; c[0x55] = 0x00; c[0x56] = 0x00; c[0x57] = 0x00;
+    pci_set_long(c + 0x58, 0x1000);  /* offset in BAR0 */
+    pci_set_long(c + 0x5C, 0x0038);  /* length = 56 */
+
+    /* NOTIFY_CFG at 0x64 */
+    c[0x64] = 0x09; c[0x65] = 0x78; c[0x66] = 0x14; c[0x67] = 0x02;
+    c[0x68] = 0x00; c[0x69] = 0x00; c[0x6A] = 0x00; c[0x6B] = 0x00;
+    pci_set_long(c + 0x6C, 0x2000);  /* offset */
+    pci_set_long(c + 0x70, 0x0004);  /* length */
+    pci_set_long(c + 0x74, 0x0000);  /* notify_off_multiplier */
+
+    /* ISR_CFG at 0x78 */
+    c[0x78] = 0x09; c[0x79] = 0x88; c[0x7A] = 0x10; c[0x7B] = 0x03;
+    c[0x7C] = 0x00; c[0x7D] = 0x00; c[0x7E] = 0x00; c[0x7F] = 0x00;
+    pci_set_long(c + 0x80, 0x3000);  /* offset */
+    pci_set_long(c + 0x84, 0x0004);  /* length */
+
+    /* DEVICE_CFG at 0x88 */
+    c[0x88] = 0x09; c[0x89] = 0x00; c[0x8A] = 0x10; c[0x8B] = 0x04;
+    c[0x8C] = 0x00; c[0x8D] = 0x00; c[0x8E] = 0x00; c[0x8F] = 0x00;
+    pci_set_long(c + 0x90, 0x4000);  /* offset */
+    pci_set_long(c + 0x94, 0x0010);  /* length = 16 */
+
+    /* Debug: dump capability chain */
+    fprintf(stderr, "[realize] cap_ptr=0x%02x status=0x%04x\n",
+            c[PCI_CAPABILITY_LIST], pci_get_word(c + PCI_STATUS));
+    fprintf(stderr, "[realize] config[0x34-0x3F]: ");
+    for (int i = 0x34; i < 0x40; i++) fprintf(stderr, "%02x ", c[i]);
+    fprintf(stderr, "\n[realize] config[0x38-0x4F]: ");
+    for (int i = 0x38; i < 0x50; i++) fprintf(stderr, "%02x ", c[i]);
+    fprintf(stderr, "\n[realize] config[0x50-0x5F]: ");
+    for (int i = 0x50; i < 0x60; i++) fprintf(stderr, "%02x ", c[i]);
+    fprintf(stderr, "\n");
 
     /* 初始化 Bridge */
     if (s->transport && strcmp(s->transport, "tcp") == 0) {
@@ -370,6 +435,14 @@ static void cosim_pcie_rc_realize(PCIDevice *pci_dev, Error **errp)
         return;
     }
 
+    /* Debug: dump cap chain after all initialization */
+    {
+        uint8_t *cfg = pci_dev->config;
+        qemu_log("cosim: cap_ptr=0x%02x status=0x%04x cfg[0x50..0x53]=%02x %02x %02x %02x\n",
+                 cfg[PCI_CAPABILITY_LIST],
+                 pci_get_word(cfg + PCI_STATUS),
+                 cfg[0x50], cfg[0x51], cfg[0x52], cfg[0x53]);
+    }
     qemu_log("cosim: PCIe RC device realized (%s mode)\n",
              (s->transport && strcmp(s->transport, "tcp") == 0) ? "TCP" : "SHM");
 }
