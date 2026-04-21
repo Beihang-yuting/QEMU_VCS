@@ -102,3 +102,16 @@ run-legacy: vcs-legacy
 run-vip: vcs-vip
 	$(BUILD_DIR)/simv_vip +SHM_NAME=/cosim0 +SOCK_PATH=/tmp/cosim.sock \
 		+UVM_TESTNAME=cosim_test
+
+# ===== TCP 跨机模式 =====
+# QEMU 侧 (server, listen)
+.PHONY: run-vip-tcp-server
+run-vip-tcp-server: vcs-vip
+	$(BUILD_DIR)/simv_vip +transport=tcp +LISTEN=0.0.0.0 +PORT_BASE=9100 +INSTANCE_ID=0 \
+		+UVM_TESTNAME=cosim_test
+
+# VCS 侧 (client, connect) — 用法: make run-vip-tcp-client REMOTE_HOST=192.168.1.100
+.PHONY: run-vip-tcp-client
+run-vip-tcp-client: vcs-vip
+	$(BUILD_DIR)/simv_vip +transport=tcp +REMOTE_HOST=$(REMOTE_HOST) +PORT_BASE=9100 +INSTANCE_ID=0 \
+		+UVM_TESTNAME=cosim_test
