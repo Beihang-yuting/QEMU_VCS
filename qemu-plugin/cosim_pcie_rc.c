@@ -17,6 +17,7 @@
 
 /* Bridge API — 通过动态链接使用 */
 #include "bridge_qemu.h"
+#include "cosim_transport.h"
 #include "irq_poller.h"
 
 /* ========== MMIO 操作 ========== */
@@ -94,23 +95,50 @@ static void cosim_dma_cb(const dma_req_t *req, void *user)
 {
     CosimPCIeRC *s = COSIM_PCIE_RC(user);
     bridge_ctx_t *ctx = (bridge_ctx_t *)s->bridge_ctx;
-    uint8_t *dma_buf = (uint8_t *)ctx->shm.dma_buf + req->dma_offset;
 
-    /* Use cpu_physical_memory_read/write for DMA to guest RAM.
-     * These are thread-safe for RAM regions and do NOT require BQL,
-     * avoiding deadlock when the main thread holds BQL during
-     * bridge_send_tlp_and_wait -> sock_sync_recv. */
-    if (req->direction == DMA_DIR_WRITE) {
-        cpu_physical_memory_write(req->host_addr, dma_buf, req->len);
+    if (ctx->transport) {
+        /* TCP mode: no shared dma_buf, must transfer data via network */
+        if (req->direction == DMA_DIR_WRITE) {
+            /* Device→Host: VCS sends data via DMA_DATA, we write to guest RAM.
+             * In TCP mode, DMA_DATA arrives separately on the aux channel.
+             * For DMA_DIR_WRITE, VCS should have sent DMA_DATA before DMA_REQ.
+             * We need to recv_dma_data first, then write to guest memory. */
+            uint32_t tag, direction;
+            uint64_t host_addr;
+            uint8_t buf[65536];
+            uint32_t len = sizeof(buf);
+            int ret = ctx->transport->recv_dma_data(ctx->transport, &tag, &direction,
+                                                      &host_addr, buf, &len);
+            if (ret < 0) {
+                qemu_log("cosim: DMA write recv_dma_data failed tag=%u\n", req->tag);
+                bridge_complete_dma(ctx, req->tag, 1);
+                return;
+            }
+            cpu_physical_memory_write(req->host_addr, buf, len);
+            bridge_complete_dma(ctx, req->tag, 0);
+        } else {
+            /* Host→Device: read guest RAM, send data back to VCS via DMA_DATA */
+            uint8_t buf[65536];
+            uint32_t len = req->len > sizeof(buf) ? sizeof(buf) : req->len;
+            cpu_physical_memory_read(req->host_addr, buf, len);
+            bridge_complete_dma_with_data(ctx, req->tag, 0,
+                                           req->direction, req->host_addr, buf, len);
+        }
     } else {
-        cpu_physical_memory_read(req->host_addr, dma_buf, req->len);
+        /* SHM mode: data is in shared dma_buf */
+        uint8_t *dma_buf = (uint8_t *)ctx->shm.dma_buf + req->dma_offset;
+        if (req->direction == DMA_DIR_WRITE) {
+            cpu_physical_memory_write(req->host_addr, dma_buf, req->len);
+        } else {
+            cpu_physical_memory_read(req->host_addr, dma_buf, req->len);
+        }
+        bridge_complete_dma(ctx, req->tag, 0);
     }
 
-    qemu_log("cosim: DMA %s OK GPA=0x%lx len=%u tag=%u\n",
+    qemu_log("cosim: DMA %s OK GPA=0x%lx len=%u tag=%u (%s)\n",
              req->direction == DMA_DIR_WRITE ? "write" : "read",
-             (unsigned long)req->host_addr, req->len, req->tag);
-
-    bridge_complete_dma(ctx, req->tag, 0);
+             (unsigned long)req->host_addr, req->len, req->tag,
+             ctx->transport ? "TCP" : "SHM");
 }
 
 /* MSI BH 回调：在 QEMU 主循环中执行，自然持有 BQL，无死锁风险 */
@@ -269,25 +297,51 @@ static void cosim_pcie_rc_realize(PCIDevice *pci_dev, Error **errp)
     }
 
     /* 初始化 Bridge */
-    if (!s->shm_name || !s->sock_path) {
-        error_setg(errp, "cosim: shm_name and sock_path properties required");
-        return;
-    }
-
-    s->bridge_ctx = bridge_init(s->shm_name, s->sock_path);
-    if (!s->bridge_ctx) {
-        error_setg(errp, "cosim: bridge_init failed (shm=%s sock=%s)",
-                   s->shm_name, s->sock_path);
-        return;
+    if (s->transport && strcmp(s->transport, "tcp") == 0) {
+        /* TCP mode */
+        transport_cfg_t cfg = {
+            .transport   = "tcp",
+            .listen_addr = "0.0.0.0",
+            .remote_host = s->remote_host,
+            .port_base   = (int)s->port_base,
+            .instance_id = (int)s->instance_id,
+            .is_server   = 1,  /* QEMU side listens */
+        };
+        s->bridge_ctx = bridge_init_ex(&cfg);
+        if (!s->bridge_ctx) {
+            error_setg(errp, "cosim: bridge_init_ex failed (tcp, port_base=%d)",
+                       s->port_base);
+            return;
+        }
+        bridge_ctx_t *ctx = (bridge_ctx_t *)s->bridge_ctx;
+        if (bridge_connect_ex(ctx) < 0) {
+            error_setg(errp, "cosim: bridge_connect_ex failed (waiting for VCS)");
+            bridge_destroy(ctx);
+            s->bridge_ctx = NULL;
+            return;
+        }
+    } else {
+        /* SHM mode (original path) */
+        if (!s->shm_name || !s->sock_path) {
+            error_setg(errp, "cosim: shm_name and sock_path properties required");
+            return;
+        }
+        s->bridge_ctx = bridge_init(s->shm_name, s->sock_path);
+        if (!s->bridge_ctx) {
+            error_setg(errp, "cosim: bridge_init failed (shm=%s sock=%s)",
+                       s->shm_name, s->sock_path);
+            return;
+        }
+        bridge_ctx_t *ctx = (bridge_ctx_t *)s->bridge_ctx;
+        if (bridge_connect(ctx) < 0) {
+            error_setg(errp, "cosim: bridge_connect failed (waiting for VCS)");
+            bridge_destroy(ctx);
+            s->bridge_ctx = NULL;
+            return;
+        }
     }
 
     bridge_ctx_t *ctx = (bridge_ctx_t *)s->bridge_ctx;
-    if (bridge_connect(ctx) < 0) {
-        error_setg(errp, "cosim: bridge_connect failed (waiting for VCS)");
-        bridge_destroy(ctx);
-        s->bridge_ctx = NULL;
-        return;
-    }
 
     /* 创建 MSI bottom-half（在主循环中处理 MSI，避免 BQL 死锁） */
     s->msi_queue_head = 0;
@@ -295,7 +349,11 @@ static void cosim_pcie_rc_realize(PCIDevice *pci_dev, Error **errp)
     s->msi_bh = qemu_bh_new(cosim_msi_bh_cb, s);
 
     /* 启动 IRQ/DMA 轮询线程（DMA 请求与 MSI 异步事件处理） */
-    s->irq_poller = irq_poller_start(&ctx->shm, cosim_dma_cb, cosim_msi_cb, s);
+    if (ctx->transport) {
+        s->irq_poller = irq_poller_start_ex(ctx->transport, cosim_dma_cb, cosim_msi_cb, s);
+    } else {
+        s->irq_poller = irq_poller_start(&ctx->shm, cosim_dma_cb, cosim_msi_cb, s);
+    }
     if (!s->irq_poller) {
         error_setg(errp, "cosim: irq_poller_start failed");
         bridge_destroy(ctx);
@@ -303,8 +361,8 @@ static void cosim_pcie_rc_realize(PCIDevice *pci_dev, Error **errp)
         return;
     }
 
-    qemu_log("cosim: PCIe RC device realized (shm=%s sock=%s)\n",
-             s->shm_name, s->sock_path);
+    qemu_log("cosim: PCIe RC device realized (%s mode)\n",
+             (s->transport && strcmp(s->transport, "tcp") == 0) ? "TCP" : "SHM");
 }
 
 static void cosim_pcie_rc_exit(PCIDevice *pci_dev)
@@ -330,6 +388,10 @@ static void cosim_pcie_rc_exit(PCIDevice *pci_dev)
 static Property cosim_properties[] = {
     DEFINE_PROP_STRING("shm_name", CosimPCIeRC, shm_name),
     DEFINE_PROP_STRING("sock_path", CosimPCIeRC, sock_path),
+    DEFINE_PROP_STRING("transport", CosimPCIeRC, transport),
+    DEFINE_PROP_STRING("remote_host", CosimPCIeRC, remote_host),
+    DEFINE_PROP_UINT32("port_base", CosimPCIeRC, port_base, 9100),
+    DEFINE_PROP_UINT32("instance_id", CosimPCIeRC, instance_id, 0),
     DEFINE_PROP_END_OF_LIST(),
 };
 

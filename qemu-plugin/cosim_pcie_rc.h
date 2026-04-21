@@ -34,6 +34,12 @@ struct CosimPCIeRC {
     char *shm_name;
     char *sock_path;
 
+    /* TCP transport parameters (optional, NULL = SHM mode) */
+    char *transport;       /* "shm" (default) or "tcp" */
+    char *remote_host;     /* TCP: VCS server address */
+    uint32_t port_base;    /* TCP: port base (default 9100) */
+    uint32_t instance_id;  /* TCP: instance ID (default 0) */
+
     /* Bridge 上下文 — 使用 opaque 指针避免在 QEMU 编译环境中引入 bridge 头文件 */
     void *bridge_ctx;
 
