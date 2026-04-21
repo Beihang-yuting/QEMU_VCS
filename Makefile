@@ -35,7 +35,9 @@ BRIDGE_C_SRCS = \
 	bridge/common/trace_log.c \
 	bridge/common/eth_shm.c \
 	bridge/common/link_model.c \
-	bridge/vcs/vq_eth_stub.c
+	bridge/vcs/vq_eth_stub.c \
+	bridge/common/transport_shm.c \
+	bridge/common/transport_tcp.c
 
 VCS_CFLAGS = -I $(CURDIR)/bridge/common -I $(CURDIR)/bridge/vcs -I $(CURDIR)/bridge/qemu -std=c99
 VCS_LDFLAGS = -lrt -lpthread

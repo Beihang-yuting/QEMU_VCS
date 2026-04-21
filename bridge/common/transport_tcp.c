@@ -9,6 +9,9 @@
  *
  * QEMU 侧 listen (server), VCS 侧 connect (client)
  */
+#ifndef _GNU_SOURCE
+#define _GNU_SOURCE      /* usleep(), getaddrinfo() */
+#endif
 #include "cosim_transport.h"
 #include "transport_tcp.h"
 #include "cosim_types.h"
