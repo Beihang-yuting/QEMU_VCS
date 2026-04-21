@@ -98,6 +98,34 @@ static int shm_recv_msi(cosim_transport_t *t, msi_event_t *ev) {
     return ring_buf_dequeue(&p->shm.msi_ring, ev);
 }
 
+/* ========== DMA 数据搬运 (SHM 模式不需要，使用 dma_buf 直接访问) ========== */
+
+static int shm_send_dma_data(cosim_transport_t *t, uint32_t tag, uint32_t direction,
+                              uint64_t host_addr, const uint8_t *data, uint32_t len) {
+    (void)t; (void)tag; (void)direction; (void)host_addr; (void)data; (void)len;
+    return -1;  /* SHM 模式使用 dma_buf 直接访问，不需要网络搬运 */
+}
+
+static int shm_recv_dma_data(cosim_transport_t *t, uint32_t *tag, uint32_t *direction,
+                              uint64_t *host_addr, uint8_t *data, uint32_t *len) {
+    (void)t; (void)tag; (void)direction; (void)host_addr; (void)data; (void)len;
+    return -1;
+}
+
+/* ========== 非阻塞接收 ========== */
+
+static int shm_recv_dma_req_nb(cosim_transport_t *t, dma_req_t *req) {
+    transport_shm_priv_t *p = (transport_shm_priv_t *)t->priv;
+    int ret = ring_buf_dequeue(&p->shm.dma_req_ring, req);
+    return (ret < 0) ? 1 : 0;  /* ring_buf_dequeue returns -1 if empty */
+}
+
+static int shm_recv_msi_nb(cosim_transport_t *t, msi_event_t *ev) {
+    transport_shm_priv_t *p = (transport_shm_priv_t *)t->priv;
+    int ret = ring_buf_dequeue(&p->shm.msi_ring, ev);
+    return (ret < 0) ? 1 : 0;
+}
+
 /* ========== ETH 通道 ========== */
 
 static int shm_send_eth(cosim_transport_t *t, const eth_frame_t *frame) {
@@ -226,6 +254,10 @@ cosim_transport_t *transport_shm_create(const transport_cfg_t *cfg) {
     t->recv_dma_req    = shm_recv_dma_req;
     t->send_dma_cpl    = shm_send_dma_cpl;
     t->recv_dma_cpl    = shm_recv_dma_cpl;
+    t->send_dma_data   = shm_send_dma_data;
+    t->recv_dma_data   = shm_recv_dma_data;
+    t->recv_dma_req_nb = shm_recv_dma_req_nb;
+    t->recv_msi_nb     = shm_recv_msi_nb;
     t->send_msi        = shm_send_msi;
     t->recv_msi        = shm_recv_msi;
     t->send_eth        = shm_send_eth;
