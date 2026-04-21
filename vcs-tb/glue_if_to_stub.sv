@@ -344,16 +344,43 @@ module glue_if_to_stub (
     // =========================================================================
 
     // Mux: UR pending takes priority over stub completion
+    //
+    // Latch stub completion: pcie_ep_stub asserts cpl_valid for a single
+    // cycle.  If the VIP back-pressures (vip_cpl_ready==0), the pulse
+    // would be missed.  Latch it here and hold until consumed.
+    logic        stub_cpl_latched;
+    logic [7:0]  stub_cpl_tag_q;
+    logic [31:0] stub_cpl_rdata_q;
+    logic        stub_cpl_status_q;
+
+    always_ff @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            stub_cpl_latched  <= 1'b0;
+            stub_cpl_tag_q    <= 8'd0;
+            stub_cpl_rdata_q  <= 32'd0;
+            stub_cpl_status_q <= 1'b0;
+        end else begin
+            if (stub_cpl_valid && !stub_cpl_latched) begin
+                stub_cpl_latched  <= 1'b1;
+                stub_cpl_tag_q    <= stub_cpl_tag;
+                stub_cpl_rdata_q  <= stub_cpl_rdata;
+                stub_cpl_status_q <= stub_cpl_status;
+            end else if (stub_cpl_latched && vip_cpl_valid && vip_cpl_ready) begin
+                stub_cpl_latched <= 1'b0;
+            end
+        end
+    end
+
     logic        any_cpl_valid;
     logic [7:0]  cpl_tag_mux;
     logic [31:0] cpl_rdata_mux;
     logic [2:0]  cpl_status_mux;
 
-    assign any_cpl_valid  = stub_cpl_valid || ur_pending_q;
-    assign cpl_tag_mux    = ur_pending_q ? ur_tag_q      : stub_cpl_tag;
-    assign cpl_rdata_mux  = ur_pending_q ? 32'hFFFF_FFFF : stub_cpl_rdata;
+    assign any_cpl_valid  = stub_cpl_latched || ur_pending_q;
+    assign cpl_tag_mux    = ur_pending_q ? ur_tag_q      : stub_cpl_tag_q;
+    assign cpl_rdata_mux  = ur_pending_q ? 32'hFFFF_FFFF : stub_cpl_rdata_q;
     assign cpl_status_mux = ur_pending_q ? CPL_STATUS_UR :
-                            (stub_cpl_status ? CPL_STATUS_UR : CPL_STATUS_SC);
+                            (stub_cpl_status_q ? CPL_STATUS_UR : CPL_STATUS_SC);
 
     // Build 256-bit beat for a CplD TLP
     function automatic logic [255:0] build_cpld_beat(
