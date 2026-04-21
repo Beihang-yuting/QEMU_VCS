@@ -435,13 +435,18 @@ static void cosim_pcie_rc_realize(PCIDevice *pci_dev, Error **errp)
         return;
     }
 
-    /* Debug: dump cap chain after all initialization */
+    /* Debug: dump cap chain using raw write() to bypass any buffering */
     {
         uint8_t *cfg = pci_dev->config;
-        qemu_log("cosim: cap_ptr=0x%02x status=0x%04x cfg[0x50..0x53]=%02x %02x %02x %02x\n",
-                 cfg[PCI_CAPABILITY_LIST],
-                 pci_get_word(cfg + PCI_STATUS),
-                 cfg[0x50], cfg[0x51], cfg[0x52], cfg[0x53]);
+        char dbg[256];
+        int n = snprintf(dbg, sizeof(dbg),
+            "cosim-realize: cap_ptr=0x%02x status=0x%04x "
+            "cfg[0x50..0x57]=%02x %02x %02x %02x %02x %02x %02x %02x\n",
+            cfg[PCI_CAPABILITY_LIST],
+            pci_get_word(cfg + PCI_STATUS),
+            cfg[0x50], cfg[0x51], cfg[0x52], cfg[0x53],
+            cfg[0x54], cfg[0x55], cfg[0x56], cfg[0x57]);
+        (void)!write(2, dbg, n);
     }
     qemu_log("cosim: PCIe RC device realized (%s mode)\n",
              (s->transport && strcmp(s->transport, "tcp") == 0) ? "TCP" : "SHM");
