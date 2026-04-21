@@ -347,27 +347,50 @@ module glue_if_to_stub (
     //
     // Latch stub completion: pcie_ep_stub asserts cpl_valid for a single
     // cycle.  If the VIP back-pressures (vip_cpl_ready==0), the pulse
-    // would be missed.  Latch it here and hold until consumed.
-    logic        stub_cpl_latched;
+    // would be missed.  Use a pending flag + latched data: set on
+    // stub_cpl_valid, clear only after VIP handshake (valid && ready).
+    logic        stub_cpl_pending;
     logic [7:0]  stub_cpl_tag_q;
     logic [31:0] stub_cpl_rdata_q;
     logic        stub_cpl_status_q;
+    // Completion one-shot: stub_cpl_valid pulse → drive vip_cpl_valid
+    // for exactly one VIP handshake cycle.  Uses a 3-state approach:
+    //   EMPTY: waiting for stub_cpl_valid
+    //   READY: have data, need to present to VIP (vip_cpl_valid will assert)
+    //   SENT:  presented to VIP, waiting for vip_cpl_ready to consume
+    typedef enum logic [1:0] {CPL_EMPTY, CPL_READY, CPL_SENT} cpl_state_t;
+    cpl_state_t cpl_st;
 
     always_ff @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
-            stub_cpl_latched  <= 1'b0;
+            cpl_st            <= CPL_EMPTY;
             stub_cpl_tag_q    <= 8'd0;
             stub_cpl_rdata_q  <= 32'd0;
             stub_cpl_status_q <= 1'b0;
         end else begin
-            if (stub_cpl_valid && !stub_cpl_latched) begin
-                stub_cpl_latched  <= 1'b1;
-                stub_cpl_tag_q    <= stub_cpl_tag;
-                stub_cpl_rdata_q  <= stub_cpl_rdata;
-                stub_cpl_status_q <= stub_cpl_status;
-            end else if (stub_cpl_latched && vip_cpl_valid && vip_cpl_ready) begin
-                stub_cpl_latched <= 1'b0;
-            end
+            case (cpl_st)
+                CPL_EMPTY: begin
+                    if (stub_cpl_valid) begin
+                        cpl_st            <= CPL_READY;
+                        stub_cpl_tag_q    <= stub_cpl_tag;
+                        stub_cpl_rdata_q  <= stub_cpl_rdata;
+                        stub_cpl_status_q <= stub_cpl_status;
+                    end
+                end
+                CPL_READY: begin
+                    // Output logic will assert vip_cpl_valid this cycle.
+                    // Transition to SENT unconditionally — output was presented.
+                    cpl_st <= CPL_SENT;
+                end
+                CPL_SENT: begin
+                    // vip_cpl_valid is high (asserted last cycle).
+                    // Wait for VIP to accept.
+                    if (vip_cpl_ready)
+                        cpl_st <= CPL_EMPTY;
+                    // If !vip_cpl_ready, stay in SENT (valid held high by output logic)
+                end
+                default: cpl_st <= CPL_EMPTY;
+            endcase
         end
     end
 
@@ -376,7 +399,9 @@ module glue_if_to_stub (
     logic [31:0] cpl_rdata_mux;
     logic [2:0]  cpl_status_mux;
 
-    assign any_cpl_valid  = stub_cpl_latched || ur_pending_q;
+    // Assert any_cpl_valid only in CPL_READY (one-shot trigger for new data)
+    // In CPL_SENT, vip_cpl_valid is already high and held via the output register.
+    assign any_cpl_valid  = (cpl_st == CPL_READY) || ur_pending_q;
     assign cpl_tag_mux    = ur_pending_q ? ur_tag_q      : stub_cpl_tag_q;
     assign cpl_rdata_mux  = ur_pending_q ? 32'hFFFF_FFFF : stub_cpl_rdata_q;
     assign cpl_status_mux = ur_pending_q ? CPL_STATUS_UR :
@@ -421,7 +446,8 @@ module glue_if_to_stub (
             vip_cpl_sop   <= 1'b0;
             vip_cpl_eop   <= 1'b0;
         end else begin
-            if (any_cpl_valid && (!vip_cpl_valid || vip_cpl_ready)) begin
+            if (any_cpl_valid && !vip_cpl_valid) begin
+                // New completion data ready — assert valid
                 vip_cpl_valid <= 1'b1;
                 vip_cpl_sop   <= 1'b1;
                 vip_cpl_eop   <= 1'b1;
@@ -430,6 +456,7 @@ module glue_if_to_stub (
                                                   cpl_rdata_mux,
                                                   cpl_status_mux);
             end else if (vip_cpl_valid && vip_cpl_ready) begin
+                // Handshake complete — deassert valid
                 vip_cpl_valid <= 1'b0;
                 vip_cpl_sop   <= 1'b0;
                 vip_cpl_eop   <= 1'b0;
