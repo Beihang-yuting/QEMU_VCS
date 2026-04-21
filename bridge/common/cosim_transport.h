@@ -43,6 +43,16 @@ struct cosim_transport {
     int  (*send_dma_cpl)(cosim_transport_t *t, const dma_cpl_t *cpl);
     int  (*recv_dma_cpl)(cosim_transport_t *t, dma_cpl_t *cpl);
 
+    /* DMA 数据搬运 — TCP 模式专用 (SHM 用 dma_buf 直接访问) */
+    int  (*send_dma_data)(cosim_transport_t *t, uint32_t tag, uint32_t direction,
+                          uint64_t host_addr, const uint8_t *data, uint32_t len);
+    int  (*recv_dma_data)(cosim_transport_t *t, uint32_t *tag, uint32_t *direction,
+                          uint64_t *host_addr, uint8_t *data, uint32_t *len);
+
+    /* 非阻塞接收 — irq_poller 线程使用 (返回: 0=成功, 1=无数据, -1=错误) */
+    int  (*recv_dma_req_nb)(cosim_transport_t *t, dma_req_t *req);
+    int  (*recv_msi_nb)(cosim_transport_t *t, msi_event_t *ev);
+
     /* MSI 通道 */
     int  (*send_msi)(cosim_transport_t *t, const msi_event_t *ev);
     int  (*recv_msi)(cosim_transport_t *t, msi_event_t *ev);

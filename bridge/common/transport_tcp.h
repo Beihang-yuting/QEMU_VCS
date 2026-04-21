@@ -1,7 +1,10 @@
 /* transport_tcp.h — TCP 传输层内部定义
  *
  * 消息协议: 8 字节头 (msg_type 4B + payload_len 4B) + payload
- * 双连接: 控制通道 (sync_msg) + 数据通道 (tlp/cpl/dma/msi/eth)
+ *
+ * 连接架构 (版本协商):
+ *   v1 (双连接): ctrl(sync) + data(tlp/cpl/dma/msi/eth)
+ *   v2 (三连接): ctrl(sync) + data(tlp/cpl) + aux(dma/msi/eth)
  */
 #ifndef TRANSPORT_TCP_H
 #define TRANSPORT_TCP_H
@@ -9,7 +12,9 @@
 #include <stdint.h>
 
 #define TCP_HANDSHAKE_MAGIC   0x434F5349u  /* "COSI" */
-#define TCP_HANDSHAKE_VERSION 1u
+#define TCP_HANDSHAKE_VERSION 2u           /* 当前最新版本 */
+#define TCP_HANDSHAKE_V1      1u           /* 兼容旧版双连接 */
+#define TCP_HANDSHAKE_V2      2u           /* 三连接 + DMA_DATA */
 #define TCP_DEFAULT_PORT_BASE 9100
 #define TCP_RECV_BUF_SIZE     (256 * 1024)
 #define TCP_SEND_BUF_SIZE     (256 * 1024)
@@ -33,10 +38,12 @@ typedef struct {
     uint32_t payload_len;
 } __attribute__((packed)) tcp_msg_hdr_t;
 
-/* 握手消息 */
+/* 握手消息 — v2 扩展了 conn_count 字段 */
 typedef struct {
     uint32_t magic;
     uint32_t version;
+    uint32_t conn_count;  /* v2: 连接数 (2 或 3), v1 发送方忽略此字段 */
+    uint32_t _pad;
 } __attribute__((packed)) tcp_handshake_t;
 
 /* DMA 数据传输消息 — TCP 模式没有共享内存，
