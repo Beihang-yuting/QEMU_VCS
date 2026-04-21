@@ -21,3 +21,8 @@ add_test(NAME test_eth_shm COMMAND test_eth_shm)
 add_executable(test_link_model test_link_model.c)
 target_link_libraries(test_link_model cosim_bridge_common)
 add_test(NAME test_link_model COMMAND test_link_model)
+
+add_executable(test_transport_tcp test_transport_tcp.c)
+target_link_libraries(test_transport_tcp cosim_bridge_common cosim_bridge pthread)
+add_test(NAME test_transport_tcp COMMAND test_transport_tcp)
+set_tests_properties(test_transport_tcp PROPERTIES TIMEOUT 30)
