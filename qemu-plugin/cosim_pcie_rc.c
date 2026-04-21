@@ -207,7 +207,17 @@ static uint32_t cosim_config_read(PCIDevice *pci_dev, uint32_t address, int len)
         return pci_default_read_config(pci_dev, address, len);
     }
 
-    /* VCS 按 dword 索引 config space，需对齐地址并处理字节偏移 */
+    /* Standard PCI header (0x00-0x3F): QEMU manages locally.
+     * Includes Vendor/Device ID, Command/Status, BARs (0x10-0x24),
+     * Subsystem IDs, Capabilities Pointer, etc.
+     * QEMU's PCI subsystem handles BAR sizing correctly via
+     * pci_register_bar; forwarding to VCS would desync BAR state. */
+    if (address < 0x40) {
+        return pci_default_read_config(pci_dev, address, len);
+    }
+
+    /* Capability chain (0x40+): forward to VCS.
+     * VCS ep_stub defines virtio PCI capabilities here. */
     uint32_t dword_addr = address & ~3u;
     uint32_t byte_offset = address & 3u;
 
@@ -219,13 +229,9 @@ static uint32_t cosim_config_read(PCIDevice *pci_dev, uint32_t address, int len)
     cpl_entry_t cpl = {0};
     int ret = bridge_send_tlp_and_wait(ctx, &req, &cpl);
     if (ret < 0) {
-        qemu_log_mask(LOG_GUEST_ERROR,
-                      "cosim: CfgRd failed addr=0x%x, fallback to local\n",
-                      address);
         return pci_default_read_config(pci_dev, address, len);
     }
 
-    /* 从 completion 重建完整 dword，再提取目标字节 */
     uint32_t dword = 0;
     for (int i = 0; i < 4 && i < COSIM_TLP_DATA_SIZE; i++) {
         dword |= ((uint32_t)cpl.data[i]) << (i * 8);
@@ -236,8 +242,6 @@ static uint32_t cosim_config_read(PCIDevice *pci_dev, uint32_t address, int len)
         val &= (1u << (len * 8)) - 1;
     }
 
-    qemu_log_mask(LOG_UNIMP, "cosim: CfgRd addr=0x%02x len=%d val=0x%x\n",
-                  address, len, val);
     return val;
 }
 
@@ -292,10 +296,14 @@ static void cosim_pcie_rc_realize(PCIDevice *pci_dev, Error **errp)
     /* 配置 INTx 中断引脚 (INTA) — 需要在 msi_init 之前设置 */
     pci_config_set_interrupt_pin(pci_dev->config, 1);  /* INTA */
 
-    /* 初始化 MSI（P2 阶段启用中断） */
-    if (msi_init(pci_dev, 0, 1, true, false, errp)) {
+    /* 初始化 MSI — QEMU 管理 MSI capability，msi_init 会自动设置
+     * PCI_STATUS_CAP_LIST 和 cap_pointer。offset=0x38 让 MSI cap
+     * 位于 0x38，其 next 字段指向 0x40（VCS 端 virtio cap chain）。 */
+    if (msi_init(pci_dev, 0x38, 1, true, false, errp)) {
         return;
     }
+    /* Link MSI cap's next pointer to VCS virtio cap chain at 0x40 */
+    pci_set_byte(pci_dev->config + 0x38 + 1, 0x40);
 
     /* 初始化 Bridge */
     if (s->transport && strcmp(s->transport, "tcp") == 0) {
