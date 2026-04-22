@@ -11,6 +11,13 @@ class pcie_tl_rc_driver extends pcie_tl_base_driver;
     //--- Outstanding requests awaiting completion ---
     pcie_tl_tlp pending_cpl[bit [9:0]];  // tag -> request
 
+    //--- Multi-completion tracking: tag -> remaining bytes ---
+    typedef struct {
+        int  total_bytes;
+        int  received_bytes;
+    } cpl_byte_tracker_t;
+    cpl_byte_tracker_t cpl_byte_trackers[bit [9:0]];
+
     //--- BAR allocation state ---
     bit [63:0] next_bar_addr = 64'h0000_0001_0000_0000;  // start at 4GB
 
@@ -45,7 +52,7 @@ class pcie_tl_rc_driver extends pcie_tl_base_driver;
     virtual function bit handle_completion(pcie_tl_cpl_tlp cpl);
         pcie_tl_tlp req;
 
-        // Match with outstanding
+        // Match with outstanding (look up without consuming)
         req = tag_mgr.match_completion(cpl);
 
         if (req == null) begin
@@ -54,15 +61,31 @@ class pcie_tl_rc_driver extends pcie_tl_base_driver;
             return 0;
         end
 
-        // Remove from pending
-        if (pending_cpl.exists(cpl.tag))
-            pending_cpl.delete(cpl.tag);
+        // Initialize byte tracker on first CplD for this tag
+        if (!cpl_byte_trackers.exists(cpl.tag)) begin
+            cpl_byte_tracker_t t;
+            t.total_bytes    = (req.length == 0) ? 4096 : req.length * 4;
+            t.received_bytes = 0;
+            cpl_byte_trackers[cpl.tag] = t;
+        end
 
-        // Free tag
-        tag_mgr.free_tag(cpl.tag, cpl.requester_id[2:0]);
+        // Accumulate received bytes from this completion's payload
+        cpl_byte_trackers[cpl.tag].received_bytes += cpl.payload.size();
 
-        `uvm_info("RC_DRV", $sformatf("Completion matched: tag=0x%03h status=%s",
-                                       cpl.tag, cpl.cpl_status.name()), UVM_MEDIUM)
+        `uvm_info("RC_DRV", $sformatf("Completion matched: tag=0x%03h status=%s bytes=%0d/%0d",
+                                       cpl.tag, cpl.cpl_status.name(),
+                                       cpl_byte_trackers[cpl.tag].received_bytes,
+                                       cpl_byte_trackers[cpl.tag].total_bytes), UVM_MEDIUM)
+
+        // Only free tag and remove pending when ALL bytes received
+        if (cpl_byte_trackers[cpl.tag].received_bytes >=
+            cpl_byte_trackers[cpl.tag].total_bytes) begin
+            cpl_byte_trackers.delete(cpl.tag);
+            if (pending_cpl.exists(cpl.tag))
+                pending_cpl.delete(cpl.tag);
+            tag_mgr.free_tag(cpl.tag, cpl.requester_id[2:0]);
+        end
+
         return 1;
     endfunction
 
@@ -75,6 +98,8 @@ class pcie_tl_rc_driver extends pcie_tl_base_driver;
             `uvm_error("RC_DRV", $sformatf("Completion Timeout: tag=0x%03h after %0dns req=%s",
                                             tag, cpl_timeout_ns, req.convert2string()))
             pending_cpl.delete(tag);
+            if (cpl_byte_trackers.exists(tag))
+                cpl_byte_trackers.delete(tag);
             tag_mgr.free_tag(tag, req.requester_id[2:0]);
         end
     endtask

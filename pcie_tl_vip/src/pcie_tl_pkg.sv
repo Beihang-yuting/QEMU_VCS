@@ -18,6 +18,7 @@ package pcie_tl_pkg;
     `include "shared/pcie_tl_tag_manager.sv"
     `include "shared/pcie_tl_ordering_engine.sv"
     `include "shared/pcie_tl_cfg_space_manager.sv"
+    `include "shared/pcie_tl_link_delay_model.sv"
 
     //--- Adapter ---
     `include "adapter/pcie_tl_if_adapter.sv"

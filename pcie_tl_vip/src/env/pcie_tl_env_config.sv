@@ -67,6 +67,14 @@ class pcie_tl_env_config extends uvm_object;
     //--- Completion Timeout ---
     int                       cpl_timeout_ns     = 50000;
 
+    //--- Link Delay ---
+    bit                       link_delay_enable              = 0;
+    int                       rc2ep_latency_min_ns           = 0;
+    int                       rc2ep_latency_max_ns           = 0;
+    int                       ep2rc_latency_min_ns           = 0;
+    int                       ep2rc_latency_max_ns           = 0;
+    int                       link_delay_update_interval     = 16;
+
     function new(string name = "pcie_tl_env_config");
         super.new(name);
     endfunction

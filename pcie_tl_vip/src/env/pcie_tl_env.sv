@@ -28,6 +28,10 @@ class pcie_tl_env extends uvm_env;
     pcie_tl_if_adapter         rc_adapter;
     pcie_tl_if_adapter         ep_adapter;
 
+    //--- Link Delay Models ---
+    pcie_tl_link_delay_model   rc2ep_delay;
+    pcie_tl_link_delay_model   ep2rc_delay;
+
     //--- Virtual Sequencer ---
     pcie_tl_virtual_sequencer  v_seqr;
 
@@ -58,6 +62,10 @@ class pcie_tl_env extends uvm_env;
         // 3. Create adapters
         rc_adapter = pcie_tl_if_adapter::type_id::create("rc_adapter", this);
         ep_adapter = pcie_tl_if_adapter::type_id::create("ep_adapter", this);
+
+        // 3b. Create link delay models
+        rc2ep_delay = pcie_tl_link_delay_model::type_id::create("rc2ep_delay", this);
+        ep2rc_delay = pcie_tl_link_delay_model::type_id::create("ep2rc_delay", this);
 
         // 4. Create agents
         if (cfg.rc_agent_enable) begin
@@ -167,7 +175,13 @@ class pcie_tl_env extends uvm_env;
         forever begin
             rc_adapter.tlm_tx_fifo.get(tlp);
             `uvm_info("ENV_LOOP", $sformatf("RC->EP: %s", tlp.convert2string()), UVM_HIGH)
-            ep_adapter.tlm_rx_fifo.put(tlp);
+
+            // Register non-posted requests in scoreboard IMMEDIATELY (before delay)
+            // so completions can match even if they arrive before the EP monitor sees the request
+            if (scb != null && tlp.requires_completion())
+                scb.register_pending(tlp);
+
+            rc2ep_delay.forward(tlp, ep_adapter.tlm_rx_fifo);
             replenish_credits(tlp);
             if (cfg.ep_auto_response && ep_agent.ep_driver != null) begin
                 fork
@@ -188,14 +202,99 @@ class pcie_tl_env extends uvm_env;
         forever begin
             ep_adapter.tlm_tx_fifo.get(tlp);
             `uvm_info("ENV_LOOP", $sformatf("EP->RC: %s", tlp.convert2string()), UVM_HIGH)
-            rc_adapter.tlm_rx_fifo.put(tlp);
+            ep2rc_delay.forward(tlp, rc_adapter.tlm_rx_fifo);
             replenish_credits(tlp);
-            if (tlp.get_category() == TLP_CAT_COMPLETION && rc_agent.rc_driver != null) begin
-                pcie_tl_cpl_tlp cpl;
-                if ($cast(cpl, tlp)) begin
-                    void'(rc_agent.rc_driver.handle_completion(cpl));
+            if (tlp.get_category() == TLP_CAT_COMPLETION) begin
+                // Write completion to scoreboard IMMEDIATELY (before tag is freed/reused)
+                if (scb != null)
+                    scb.write_rc(tlp);
+                // Then handle in RC driver (may free tag)
+                if (rc_agent.rc_driver != null) begin
+                    pcie_tl_cpl_tlp cpl;
+                    if ($cast(cpl, tlp))
+                        void'(rc_agent.rc_driver.handle_completion(cpl));
                 end
             end
+            // RC auto-response for EP-originated non-posted requests (DMA reads)
+            // Symmetric to EP auto-response in tlm_loopback_rc_to_ep
+            else if (tlp.requires_completion()) begin
+                // Register in scoreboard for completion matching (before delay/tag reuse)
+                if (scb != null)
+                    scb.register_pending(tlp);
+                fork
+                    begin
+                        pcie_tl_tlp req_copy = tlp;
+                        rc_auto_respond(req_copy);
+                    end
+                join_none
+            end
+        end
+    endtask
+
+    //=========================================================================
+    // RC auto-response: generate completion for EP DMA reads
+    //=========================================================================
+    protected task rc_auto_respond(pcie_tl_tlp req);
+        pcie_tl_mem_tlp mem_req;
+        pcie_tl_cpl_tlp cpl;
+        int total_bytes, chunk, remaining, cpl_idx, received;
+        bit [63:0] cur_addr;
+        int mps_bytes, rcb_bytes;
+
+        if (!$cast(mem_req, req)) return;
+        if (req.kind != TLP_MEM_RD && req.kind != TLP_MEM_RD_LK) return;
+
+        // Free EP's tag IMMEDIATELY so it can be reused
+        // (scoreboard tracks via pending_requests independently of tag_mgr)
+        tag_mgr.free_tag(req.tag, req.requester_id[2:0]);
+
+        mps_bytes = int'(cfg.max_payload_size);
+        rcb_bytes = int'(cfg.read_completion_boundary);
+        total_bytes = (req.length == 0) ? 4096 : req.length * 4;
+        remaining   = total_bytes;
+        cur_addr    = mem_req.addr;
+        cpl_idx     = 0;
+        received    = 0;
+
+        while (remaining > 0) begin
+            int bytes_to_rcb, len_dw;
+
+            if (cpl_idx == 0) begin
+                bytes_to_rcb = rcb_bytes - (cur_addr % rcb_bytes);
+                if (bytes_to_rcb == 0) bytes_to_rcb = rcb_bytes;
+                chunk = (bytes_to_rcb < mps_bytes) ? bytes_to_rcb : mps_bytes;
+            end else begin
+                chunk = mps_bytes;
+            end
+            if (chunk > remaining) chunk = remaining;
+            len_dw = (chunk + 3) / 4;
+
+            cpl = pcie_tl_cpl_tlp::type_id::create("rc_auto_cpl");
+            cpl.kind         = TLP_CPLD;
+            cpl.fmt          = FMT_3DW_WITH_DATA;
+            cpl.type_f       = TLP_TYPE_CPL;
+            cpl.tc           = req.tc;
+            cpl.attr         = req.attr;
+            cpl.length       = (len_dw == 1024) ? 0 : len_dw[9:0];
+            cpl.requester_id = req.requester_id;
+            cpl.tag          = req.tag;
+            cpl.completer_id = 16'h0000;  // RC BDF
+            cpl.cpl_status   = CPL_STATUS_SC;
+            cpl.bcm          = 0;
+            cpl.byte_count   = remaining[11:0];
+            cpl.lower_addr   = cur_addr[6:0];
+            cpl.payload      = new[chunk];
+            foreach (cpl.payload[i])
+                cpl.payload[i] = 8'hAA;  // Fill pattern
+
+            // Write to scoreboard directly (avoids tag-reuse race through delay path)
+            if (scb != null)
+                scb.write_ep(cpl);
+
+            cur_addr  += chunk;
+            remaining -= chunk;
+            received  += chunk;
+            cpl_idx++;
         end
     endtask
 
@@ -271,6 +370,17 @@ class pcie_tl_env extends uvm_env;
         // Config space init
         cfg_mgr.init_type0_header();
         cfg_mgr.init_pcie_capability(8'h40, cfg.max_payload_size, cfg.max_read_request_size, cfg.read_completion_boundary);
+
+        // Link Delay
+        rc2ep_delay.enable          = cfg.link_delay_enable;
+        rc2ep_delay.latency_min_ns  = cfg.rc2ep_latency_min_ns;
+        rc2ep_delay.latency_max_ns  = cfg.rc2ep_latency_max_ns;
+        rc2ep_delay.update_interval = cfg.link_delay_update_interval;
+
+        ep2rc_delay.enable          = cfg.link_delay_enable;
+        ep2rc_delay.latency_min_ns  = cfg.ep2rc_latency_min_ns;
+        ep2rc_delay.latency_max_ns  = cfg.ep2rc_latency_max_ns;
+        ep2rc_delay.update_interval = cfg.link_delay_update_interval;
     endfunction
 
 endclass

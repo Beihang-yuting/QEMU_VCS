@@ -46,6 +46,9 @@ class pcie_tl_scoreboard extends uvm_scoreboard;
     pcie_tl_tlp rc_sent_history[$];
     pcie_tl_tlp ep_sent_history[$];
 
+    //--- Dedup: completions already processed via env direct call ---
+    bit cpl_processed[pcie_tl_tlp];  // TLP handle -> seen
+
     function new(string name = "pcie_tl_scoreboard", uvm_component parent = null);
         super.new(name, parent);
     endfunction
@@ -62,19 +65,28 @@ class pcie_tl_scoreboard extends uvm_scoreboard;
     function void write_rc(pcie_tl_tlp tlp);
         case (tlp.get_category())
             TLP_CAT_NON_POSTED: begin
-                // RC sent a request
+                // RC received a non-posted from EP (e.g. EP DMA read)
                 total_requests++;
                 pending_requests[tlp.tag] = tlp;
             end
             TLP_CAT_POSTED: begin
-                // RC sent a posted request (Memory Write)
+                // RC received a posted (EP DMA write or Memory Write)
                 total_requests++;
                 if (data_integrity_enable) begin
                     store_write_data(tlp);
                 end
             end
             TLP_CAT_COMPLETION: begin
-                // Should not happen on RC side normally
+                // Skip if already processed via env direct call
+                if (cpl_processed.exists(tlp)) begin
+                    cpl_processed.delete(tlp);
+                    return;
+                end
+                // RC received completion from EP (TLM loopback mode)
+                cpl_processed[tlp] = 1;
+                total_completions++;
+                if (completion_check_enable)
+                    check_completion(tlp);
             end
         endcase
 
@@ -96,9 +108,15 @@ class pcie_tl_scoreboard extends uvm_scoreboard;
                 if (completion_check_enable)
                     check_completion(tlp);
             end
-            TLP_CAT_POSTED, TLP_CAT_NON_POSTED: begin
-                // EP sent a request (DMA, MSI, etc.)
+            TLP_CAT_NON_POSTED: begin
+                // EP received non-posted from RC — count only (pending already registered by env)
                 total_requests++;
+            end
+            TLP_CAT_POSTED: begin
+                // EP received posted from RC (e.g. MEM_WR) or EP sent DMA
+                total_requests++;
+                if (data_integrity_enable)
+                    store_write_data(tlp);
             end
         endcase
 
@@ -108,6 +126,14 @@ class pcie_tl_scoreboard extends uvm_scoreboard;
         ep_sent_history.push_back(tlp);
         if (ep_sent_history.size() > 64)
             void'(ep_sent_history.pop_front());
+    endfunction
+
+    //=========================================================================
+    // Register pending request (called by env before delay, ensures timing)
+    //=========================================================================
+    function void register_pending(pcie_tl_tlp tlp);
+        if (tlp.requires_completion())
+            pending_requests[tlp.tag] = tlp;
     endfunction
 
     //=========================================================================
