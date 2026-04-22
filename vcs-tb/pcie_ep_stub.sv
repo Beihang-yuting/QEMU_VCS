@@ -339,15 +339,29 @@ module pcie_ep_stub (
                                 4'd3: vio_drv_feat[vio_drv_feat_sel[0]] <= tlp_wdata;
                                 4'd4: vio_msix_config <= tlp_wdata[15:0];
                                 4'd5: begin
-                                    /* device_status at byte 0, config_gen at byte 1, queue_sel at bytes 2-3 */
+                                    /* Virtio common_cfg dword 5 布局：
+                                     *   byte 0 = device_status (writeb)
+                                     *   byte 1 = config_generation (driver 只读)
+                                     *   byte 2-3 = queue_select (writew)
+                                     * Linux virtio-pci modern 用 writeb/writew，但
+                                     * 我们的 bridge+VIP codec 在 sub-DW 写时把 addr
+                                     * 强制 DW 对齐 + payload pad 成 4 字节，bus 上
+                                     * undefined bytes 导致 byte_off 和 BE 信息丢失。
+                                     *
+                                     * 启发式解码：
+                                     *   writeb(status, 0x1014): tlp_wdata[7:0]=status
+                                     *   writew(qsel,  0x1016): Linux 只把 qsel 放在
+                                     *     bytes 2-3，但桥 codec 也可能放低 16 位或
+                                     *     跨 byte_off 重组；因此：
+                                     *     - byte_off==0 & tlp_wdata[31:16]!=0 认为是
+                                     *       full-DW writel 里的 qsel 高 16 位
+                                     *     - byte_off==2 时直接用 tlp_wdata[15:0]
+                                     *   status write 时 tlp_wdata[31:16] 为 0 不更新
+                                     *   qsel（Linux 初始化后 qsel 不会再置 0）。 */
                                     if (byte_off == 0) vio_dev_status <= tlp_wdata[7:0];
-                                    if (byte_off == 0 && tlp_len >= 3) vio_queue_sel <= tlp_wdata[31:16];
-                                    if (byte_off == 2) vio_queue_sel <= tlp_wdata[15:0];
-                                    /* 全 dword 写 */
-                                    if (byte_off == 0 && tlp_len >= 4) begin
-                                        vio_dev_status <= tlp_wdata[7:0];
-                                        vio_queue_sel  <= tlp_wdata[31:16];
-                                    end
+                                    if (byte_off == 2) vio_queue_sel  <= tlp_wdata[15:0];
+                                    if (byte_off == 0 && tlp_wdata[31:16] != 16'h0)
+                                        vio_queue_sel <= tlp_wdata[31:16];
                                 end
                                 4'd6: begin
                                     if (byte_off == 0) vio_q_size[qsel] <= tlp_wdata[15:0];

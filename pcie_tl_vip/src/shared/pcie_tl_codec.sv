@@ -174,11 +174,14 @@ class pcie_tl_codec extends uvm_object;
             $cast(mem, tlp);
             dw1 = {tlp.requester_id, tlp.tag[7:0], mem.last_be, mem.first_be};
             hdr[1] = dw1;
+            /* CoSim 本地补丁：保留 addr[1:0]（上游按 PCIe 规范清零，但 cosim
+               内部 Linux virtio-pci writeb/writew 需要 byte offset 信息才能区分
+               status/queue_sel/config_gen 字段）。两端 codec 自洽即可。*/
             if (num_dw == 4) begin
                 hdr[2] = mem.addr[63:32];
-                hdr[3] = {mem.addr[31:2], 2'b00};
+                hdr[3] = mem.addr[31:0];
             end else begin
-                hdr[2] = {mem.addr[31:2], 2'b00};
+                hdr[2] = mem.addr[31:0];
             end
         end
         else if (tlp.kind inside {TLP_IO_RD, TLP_IO_WR}) begin
@@ -186,7 +189,7 @@ class pcie_tl_codec extends uvm_object;
             $cast(io, tlp);
             dw1 = {tlp.requester_id, tlp.tag[7:0], 4'h0, io.first_be};
             hdr[1] = dw1;
-            hdr[2] = {io.addr[31:2], 2'b00};
+            hdr[2] = io.addr[31:0];  /* CoSim 本地补丁：保留 addr[1:0] */
         end
         else if (tlp.kind inside {TLP_CFG_RD0, TLP_CFG_WR0, TLP_CFG_RD1, TLP_CFG_WR1}) begin
             pcie_tl_cfg_tlp cfg;

@@ -68,10 +68,15 @@ static int tap_configure(const char *dev_name, const char *ip_cidr)
     char cmd[256];
     int rc;
 
-    snprintf(cmd, sizeof(cmd), "ip addr add %s dev %s 2>/dev/null", ip_cidr, dev_name);
+    /* 用 /sbin/ip 绝对路径：部分容器环境下 sh 的 PATH 不含 /sbin */
+    snprintf(cmd, sizeof(cmd),
+             "/sbin/ip addr add %s dev %s 2>/dev/null || ip addr add %s dev %s 2>/dev/null",
+             ip_cidr, dev_name, ip_cidr, dev_name);
     rc = system(cmd);
 
-    snprintf(cmd, sizeof(cmd), "ip link set %s up", dev_name);
+    snprintf(cmd, sizeof(cmd),
+             "/sbin/ip link set %s up 2>/dev/null || ip link set %s up",
+             dev_name, dev_name);
     rc = system(cmd);
     (void)rc;
 

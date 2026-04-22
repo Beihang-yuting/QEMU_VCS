@@ -156,6 +156,108 @@ module cosim_vip_top;
         $finish;
     end
 
+    /* ============================================================
+     * 软件模拟 virtio → ETH SHM 数据面（默认）
+     * ------------------------------------------------------------
+     * Guest virtio-net driver 通过 common_cfg 配置好 queue 地址并写
+     * device_status=DRIVER_OK 后，会对 BAR0+0x2000 发 NOTIFY。stub
+     * 拉起 notify_valid，此处 edge-detect → 调 DPI-C virtqueue_dma.c
+     * 的真实 TX/RX 处理，配合 eth_mac_dpi.c 把数据搬到 ETH SHM；RX
+     * 侧周期 poll ETH SHM → DMA-write guest buffer → raise MSI。
+     *
+     * 真实 virtio IP 上板后 +define+COSIM_VIRTIO_REAL_IP 绕过整段。
+     * ============================================================ */
+`ifndef COSIM_VIRTIO_REAL_IP
+    string eth_shm_name;
+    int    eth_role;
+    int    eth_create;
+    logic  vq_configured_q = 1'b0;
+    logic  stub_notify_valid_q = 1'b0;
+
+    task automatic configure_vq_rings();
+        for (int q = 0; q < 2; q++) begin
+            longint unsigned desc_gpa, avail_gpa, used_gpa;
+            int qsize;
+            desc_gpa  = {ep.vio_q_desc_hi[q], ep.vio_q_desc_lo[q]};
+            avail_gpa = {ep.vio_q_drv_hi[q],  ep.vio_q_drv_lo[q]};
+            used_gpa  = {ep.vio_q_dev_hi[q],  ep.vio_q_dev_lo[q]};
+            qsize     = ep.vio_q_size[q];
+            $display("[VIP-VQ] Configuring queue %0d: desc=0x%016h avail=0x%016h used=0x%016h size=%0d",
+                     q, desc_gpa, avail_gpa, used_gpa, qsize);
+            vcs_vq_configure(q, desc_gpa, avail_gpa, used_gpa, qsize);
+        end
+        vq_configured_q <= 1'b1;
+        $display("[VIP-VQ] Virtqueue rings configured");
+    endtask
+
+    task automatic handle_vio_notify(input [15:0] queue_idx);
+        int rc;
+        if (!vq_configured_q) begin
+            $display("[VIP-VQ] WARNING: notify before VQ configured — configuring now");
+            configure_vq_rings();
+        end
+        if (queue_idx == 16'd1) begin
+            rc = vcs_vq_process_tx();
+            if (rc > 0)
+                $display("[VIP-VQ] TX notify: processed %0d packets (total=%0d)",
+                         rc, vcs_vq_get_tx_count());
+            else if (rc < 0)
+                $display("[VIP-VQ] TX notify: ERROR");
+        end else if (queue_idx == 16'd0) begin
+            $display("[VIP-VQ] RX queue notify (new buffers posted)");
+        end else begin
+            $display("[VIP-VQ] Unknown queue notify: %0d", queue_idx);
+        end
+    endtask
+
+    /* ETH SHM 初始化 */
+    initial begin
+        if (!$value$plusargs("ETH_SHM=%s", eth_shm_name))
+            eth_shm_name = "/cosim_eth0";
+        if (!$value$plusargs("ETH_ROLE=%d", eth_role))
+            eth_role = 0;  /* Role A (vs eth_tap_bridge Role B) */
+        if (!$value$plusargs("ETH_CREATE=%d", eth_create))
+            eth_create = 1;
+        @(posedge rst_n);
+        #20;
+        if (vcs_eth_mac_init_dpi(eth_shm_name, eth_role, eth_create) != 0) begin
+            $display("[VIP-TOP] WARNING: ETH MAC init failed (shm=%s role=%0d) — TX/RX disabled",
+                     eth_shm_name, eth_role);
+        end else begin
+            $display("[VIP-TOP] ETH MAC initialized (shm=%s role=%0d create=%0d)",
+                     eth_shm_name, eth_role, eth_create);
+        end
+    end
+
+    /* NOTIFY edge-detect → virtqueue TX / RX-buffer-post */
+    always_ff @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            stub_notify_valid_q <= 1'b0;
+        end else begin
+            stub_notify_valid_q <= stub_notify_valid;
+            if (stub_notify_valid && !stub_notify_valid_q) begin
+                handle_vio_notify(stub_notify_queue);
+            end
+        end
+    end
+
+    /* 周期性 RX poll：每 2us 从 ETH SHM 拿一帧注入 Guest RX vring */
+    initial begin
+        int rx_rc;
+        @(posedge rst_n);
+        #200;
+        forever begin
+            #2000;  /* 2us @ 1ns/1ps */
+            if (vq_configured_q) begin
+                rx_rc = vcs_vq_process_rx();
+                if (rx_rc > 0)
+                    $display("[VIP-VQ] RX injected %0d packets (total=%0d)",
+                             rx_rc, vcs_vq_get_rx_count());
+            end
+        end
+    end
+`endif  /* !COSIM_VIRTIO_REAL_IP */
+
     /* === Virtio 数据面 TLP 计数提前终止 ===
      * 真正的 "virtio 发包" = Guest 驱动和 device 在 virtqueue 层交换数据时触
      * 发的 MMIO：

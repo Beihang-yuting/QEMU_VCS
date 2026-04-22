@@ -26,6 +26,10 @@ VCS_UVM   = -ntb_opts uvm-1.2
 VIP_SRC_DIR = pcie_tl_vip/src
 
 # C bridge 源文件（直接编译，避免跨 GLIBC 版本 .so 依赖）
+# 注：P3 TAP 模式需要真实 virtqueue 处理（virtqueue_dma.c）和 ETH MAC DPI
+# （eth_mac_dpi.c + eth_port.c）。P5 曾把 BRIDGE_C_SRCS 简化成 vq_eth_stub.c
+# 仅供 VIP smoke test 链接，但那会让 TAP/Phase3 完整路径失效。此处还原真实实现
+# 以支持 Guest Linux virtio-net driver → vring → DMA → ETH SHM → TAP 闭环。
 BRIDGE_C_SRCS = \
 	bridge/vcs/bridge_vcs.c \
 	bridge/vcs/sock_sync_vcs.c \
@@ -35,11 +39,13 @@ BRIDGE_C_SRCS = \
 	bridge/common/trace_log.c \
 	bridge/common/eth_shm.c \
 	bridge/common/link_model.c \
-	bridge/vcs/vq_eth_stub.c \
+	bridge/vcs/virtqueue_dma.c \
+	bridge/eth/eth_mac_dpi.c \
+	bridge/eth/eth_port.c \
 	bridge/common/transport_shm.c \
 	bridge/common/transport_tcp.c
 
-VCS_CFLAGS = -I $(CURDIR)/bridge/common -I $(CURDIR)/bridge/vcs -I $(CURDIR)/bridge/qemu -std=c99
+VCS_CFLAGS = -I $(CURDIR)/bridge/common -I $(CURDIR)/bridge/vcs -I $(CURDIR)/bridge/qemu -I $(CURDIR)/bridge/eth -std=c99 -D_POSIX_C_SOURCE=200112L
 VCS_LDFLAGS = -lrt -lpthread
 
 # Legacy 模式
