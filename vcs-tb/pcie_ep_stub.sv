@@ -297,7 +297,11 @@ module pcie_ep_stub (
             cfg_space[33] <= 32'h0000_0010;             /* length = 16 */
 
         end else begin
-            cpl_valid    <= 1'b0;
+            /* cpl_valid: hold until next TLP arrives, giving glue's
+               CPL FSM time to capture. Single-cycle pulse was being
+               missed when FSM was in CPL_SENT state. */
+            if (tlp_valid)
+                cpl_valid <= 1'b0;
             notify_valid <= 1'b0;
 
             /* Phase 4: ISR set from tb_top RX injection */
