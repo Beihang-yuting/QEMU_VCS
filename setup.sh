@@ -151,13 +151,41 @@ if [ "$HAS_SUDO" = true ]; then
 else
     info "跳过系统包安装（无 sudo 权限）"
     info "如果编译失败，请检查以下开发库是否已安装:"
-    info "  - glib2-devel / libglib2.0-dev"
-    info "  - pixman-devel / libpixman-1-dev"
-    info "  - python3, meson, ninja"
+    info "  - glib2-devel / libglib2.0-dev (>= 2.66.0)"
+    info "  - pixman-devel / libpixman-1-dev (>= 0.21.8)"
+    info "  - python3 (>= 3.8), meson, ninja"
 fi
 
-# 验证关键工具是否可用
-info "检查工具链..."
+# ============================================================
+# 版本比较函数（后续多处使用）
+# ============================================================
+version_ge() {
+    # 返回 0 表示 $1 >= $2
+    printf '%s\n%s' "$2" "$1" | sort -V -C
+}
+
+# ============================================================
+# 依赖版本检查与自动修复
+# ============================================================
+# QEMU 9.2 关键依赖最低版本要求:
+#   glib    >= 2.66.0  (Ubuntu 20.04 仅提供 2.64.6，需源码编译)
+#   pixman  >= 0.21.8  (Ubuntu 20.04 提供 0.38.4，满足)
+#   zlib    (无最低版本要求)
+#   Python  >= 3.8     (QEMU configure 使用)
+#   meson   >= 1.5.0   (QEMU configure 自带到 pyvenv，无需系统安装)
+#   ninja   >= 1.0     (编译需要)
+#   cmake   >= 3.16    (Bridge 编译需要)
+# ============================================================
+
+echo ""
+info "========================================"
+info "检查依赖版本（QEMU 9.2 + Bridge 要求）"
+info "========================================"
+
+DEP_ERRORS=()
+
+# ---- [检查] 关键编译工具 ----
+info "检查编译工具链..."
 MISSING_CRITICAL=()
 for tool in gcc g++ make cmake python3; do
     if command -v "$tool" &>/dev/null; then
@@ -169,6 +197,15 @@ for tool in gcc g++ make cmake python3; do
     fi
 done
 
+if [ ${#MISSING_CRITICAL[@]} -gt 0 ]; then
+    fail "缺少关键编译工具: ${MISSING_CRITICAL[*]}"
+    if [ "$HAS_SUDO" = true ]; then
+        fail "请运行: sudo apt-get install -y ${MISSING_CRITICAL[*]}"
+    fi
+    fail "安装后重新运行 setup.sh"
+    exit 1
+fi
+
 # git 是可选工具（仅用于下载 QEMU 源码）
 if command -v git &>/dev/null; then
     info "  ✓ git: $(git --version 2>&1)"
@@ -176,31 +213,214 @@ else
     warn "  ✗ git 未安装（仅影响 QEMU 源码下载，可用 QEMU_SRC_DIR 或本地 tarball 替代）"
 fi
 
-# 检查 meson/ninja（QEMU 编译需要）
+# ---- [检查] meson / ninja ----
 for tool in meson ninja; do
     if command -v "$tool" &>/dev/null; then
         info "  ✓ ${tool}: $(${tool} --version 2>&1 | head -1 || true)"
     else
         warn "  ✗ ${tool} 未找到（QEMU 编译需要）"
         warn "    安装方法: pip3 install --user ${tool}"
+        DEP_ERRORS+=("${tool} 未安装")
     fi
 done
 
-if [ ${#MISSING_CRITICAL[@]} -gt 0 ]; then
-    fail "缺少关键工具: ${MISSING_CRITICAL[*]}"
-    fail "请安装以上工具后重试"
+# ---- [检查] pkg-config ----
+if ! command -v pkg-config &>/dev/null; then
+    fail "  ✗ pkg-config 未安装（依赖版本检测需要）"
+    fail "    安装方法: sudo apt-get install -y pkg-config"
+    DEP_ERRORS+=("pkg-config 未安装")
+fi
+
+# ---- [检查] cmake >= 3.16 ----
+CMAKE_MIN_VER="3.16"
+CMAKE_VER=$(cmake --version 2>&1 | head -1 | grep -oE '[0-9]+\.[0-9]+(\.[0-9]+)?' | head -1 || true)
+if [ -n "$CMAKE_VER" ] && version_ge "$CMAKE_VER" "$CMAKE_MIN_VER"; then
+    ok "cmake ${CMAKE_VER} >= ${CMAKE_MIN_VER}"
+else
+    fail "cmake 版本过低: ${CMAKE_VER:-未知}（需要 >= ${CMAKE_MIN_VER}）"
+    fail "  Ubuntu: sudo apt-get install -y cmake  或从 https://cmake.org 下载新版"
+    DEP_ERRORS+=("cmake < ${CMAKE_MIN_VER}")
+fi
+
+# ---- [检查] Python >= 3.8 + tomli（QEMU 9.2 pyvenv 需要）----
+PYTHON_MIN_VER="3.8"
+PYTHON_VER=$(python3 -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}")' 2>/dev/null || echo "")
+if [ -n "$PYTHON_VER" ] && version_ge "$PYTHON_VER" "$PYTHON_MIN_VER"; then
+    ok "Python ${PYTHON_VER} >= ${PYTHON_MIN_VER}"
+    # Python < 3.11 需要 tomli 包（QEMU mkvenv 依赖）
+    if ! python3 -c "import sys; exit(0 if sys.version_info >= (3,11) else 1)" 2>/dev/null; then
+        if python3 -c "import tomli" 2>/dev/null; then
+            ok "Python tomli 模块可用（Python < 3.11 需要）"
+        else
+            warn "Python < 3.11 且 tomli 未安装（QEMU configure 需要）"
+            info "  自动安装 tomli..."
+            if pip3 install --user tomli 2>/dev/null; then
+                ok "tomli 安装成功"
+            else
+                fail "tomli 安装失败，请手动运行: pip3 install --user tomli"
+                DEP_ERRORS+=("Python tomli 模块缺失")
+            fi
+        fi
+    fi
+else
+    fail "Python 版本过低: ${PYTHON_VER:-未安装}（需要 >= ${PYTHON_MIN_VER}）"
+    fail "  Ubuntu: sudo apt-get install -y python3"
+    DEP_ERRORS+=("Python < ${PYTHON_MIN_VER}")
+fi
+
+# ---- [检查] pixman >= 0.21.8 ----
+PIXMAN_MIN_VER="0.21.8"
+PIXMAN_VER=$(pkg-config --modversion pixman-1 2>/dev/null || echo "")
+if [ -n "$PIXMAN_VER" ] && version_ge "$PIXMAN_VER" "$PIXMAN_MIN_VER"; then
+    ok "pixman ${PIXMAN_VER} >= ${PIXMAN_MIN_VER}"
+else
+    fail "pixman 版本不满足: ${PIXMAN_VER:-未安装}（需要 >= ${PIXMAN_MIN_VER}）"
+    fail "  Ubuntu: sudo apt-get install -y libpixman-1-dev"
+    DEP_ERRORS+=("pixman < ${PIXMAN_MIN_VER}")
+fi
+
+# ---- [检查] zlib ----
+ZLIB_VER=$(pkg-config --modversion zlib 2>/dev/null || echo "")
+if [ -n "$ZLIB_VER" ]; then
+    ok "zlib ${ZLIB_VER}"
+else
+    fail "zlib 开发库未安装"
+    fail "  Ubuntu: sudo apt-get install -y zlib1g-dev"
+    DEP_ERRORS+=("zlib 未安装")
+fi
+
+# ---- [检查] libslirp（QEMU 用户网络需要）----
+SLIRP_VER=$(pkg-config --modversion slirp 2>/dev/null || echo "")
+if [ -n "$SLIRP_VER" ]; then
+    ok "libslirp ${SLIRP_VER}"
+else
+    warn "libslirp 未安装（QEMU 用户网络模式需要，非必须）"
+    warn "  Ubuntu: sudo apt-get install -y libslirp-dev"
+fi
+
+# ---- [检查+修复] glib >= 2.66.0（Ubuntu 20.04 核心问题）----
+GLIB_MIN_VER="2.66.0"
+GLIB_BUILD_VER="2.66.8"
+GLIB_CURRENT_VER=$(pkg-config --modversion glib-2.0 2>/dev/null || echo "")
+
+NEED_GLIB_BUILD=false
+if [ -n "$GLIB_CURRENT_VER" ]; then
+    if version_ge "$GLIB_CURRENT_VER" "$GLIB_MIN_VER"; then
+        ok "glib ${GLIB_CURRENT_VER} >= ${GLIB_MIN_VER}"
+    else
+        warn "glib ${GLIB_CURRENT_VER} < ${GLIB_MIN_VER}（QEMU 9.2 要求 >= ${GLIB_MIN_VER}）"
+        NEED_GLIB_BUILD=true
+    fi
+else
+    warn "glib 开发库未安装"
+    NEED_GLIB_BUILD=true
+fi
+
+# 检查 /usr/local 是否已有源码安装的新版 glib
+if [ "$NEED_GLIB_BUILD" = true ]; then
+    GLIB_PREFIX="/usr/local"
+    for pc_dir in "${GLIB_PREFIX}/lib/pkgconfig" "${GLIB_PREFIX}/lib/x86_64-linux-gnu/pkgconfig"; do
+        if [ -f "${pc_dir}/glib-2.0.pc" ]; then
+            GLIB_LOCAL_VER=$(PKG_CONFIG_PATH="${pc_dir}" pkg-config --modversion glib-2.0 2>/dev/null || echo "")
+            if [ -n "$GLIB_LOCAL_VER" ] && version_ge "$GLIB_LOCAL_VER" "$GLIB_MIN_VER"; then
+                info "已存在源码安装的 glib ${GLIB_LOCAL_VER}，跳过编译"
+                NEED_GLIB_BUILD=false
+                export PKG_CONFIG_PATH="${pc_dir}:${PKG_CONFIG_PATH:-}"
+                export LD_LIBRARY_PATH="$(dirname "${pc_dir}"):${LD_LIBRARY_PATH:-}"
+                ok "glib ${GLIB_LOCAL_VER} >= ${GLIB_MIN_VER}（来自 ${GLIB_PREFIX}）"
+                break
+            fi
+        fi
+    done
+fi
+
+if [ "$NEED_GLIB_BUILD" = true ]; then
+    echo ""
+    info "================================================"
+    info "glib 版本不满足 QEMU 9.2 要求，需要从源码编译"
+    info "  当前版本: ${GLIB_CURRENT_VER:-未安装}"
+    info "  需要版本: >= ${GLIB_MIN_VER}"
+    info "  将安装:   glib ${GLIB_BUILD_VER} 到 /usr/local"
+    info "  需要 sudo 执行: ninja install, ldconfig"
+    info "================================================"
+
+    if [ "$HAS_SUDO" != true ]; then
+        fail "从源码安装 glib 需要 sudo 权限，但当前无法使用 sudo"
+        fail "请以 root 身份运行，或手动安装 glib >= ${GLIB_MIN_VER}"
+        fail "手动编译步骤:"
+        fail "  wget https://download.gnome.org/sources/glib/2.66/glib-${GLIB_BUILD_VER}.tar.xz"
+        fail "  tar xf glib-${GLIB_BUILD_VER}.tar.xz && cd glib-${GLIB_BUILD_VER}"
+        fail "  meson setup _build --prefix=/usr/local && ninja -C _build"
+        fail "  sudo ninja -C _build install && sudo ldconfig"
+        exit 1
+    fi
+
+    # 安装 glib 编译依赖
+    info "安装 glib 编译依赖..."
+    sudo apt-get install -y -qq libmount-dev libffi-dev zlib1g-dev 2>/dev/null || true
+
+    GLIB_BUILD_DIR="${PROJECT_DIR}/third_party/glib-${GLIB_BUILD_VER}"
+    GLIB_TARBALL="${PROJECT_DIR}/third_party/glib-${GLIB_BUILD_VER}.tar.xz"
+    GLIB_URL="https://download.gnome.org/sources/glib/2.66/glib-${GLIB_BUILD_VER}.tar.xz"
+
+    mkdir -p "${PROJECT_DIR}/third_party"
+
+    if [ ! -d "$GLIB_BUILD_DIR" ]; then
+        if [ ! -f "$GLIB_TARBALL" ]; then
+            info "下载 glib ${GLIB_BUILD_VER} 源码..."
+            if ! wget -q -O "$GLIB_TARBALL" "$GLIB_URL"; then
+                fail "下载 glib 失败，请手动下载到: ${GLIB_TARBALL}"
+                fail "下载地址: ${GLIB_URL}"
+                exit 1
+            fi
+            ok "glib 源码下载完成"
+        fi
+        info "解压 glib 源码..."
+        tar xf "$GLIB_TARBALL" -C "${PROJECT_DIR}/third_party/"
+    fi
+
+    info "编译 glib ${GLIB_BUILD_VER}..."
+    cd "$GLIB_BUILD_DIR"
+    if [ ! -f "_build/build.ninja" ]; then
+        meson setup _build --prefix=/usr/local
+    fi
+    ninja -C _build
+
+    info "安装 glib 到 /usr/local（需要 sudo）..."
+    sudo ninja -C _build install
+    sudo ldconfig
+    cd "$PROJECT_DIR"
+
+    # 设置环境变量确保后续步骤能找到新 glib
+    export PKG_CONFIG_PATH="/usr/local/lib/pkgconfig:/usr/local/lib/x86_64-linux-gnu/pkgconfig:${PKG_CONFIG_PATH:-}"
+    export LD_LIBRARY_PATH="/usr/local/lib:/usr/local/lib/x86_64-linux-gnu:${LD_LIBRARY_PATH:-}"
+
+    # 验证
+    NEW_GLIB_VER=$(pkg-config --modversion glib-2.0 2>/dev/null || echo "unknown")
+    if version_ge "$NEW_GLIB_VER" "$GLIB_MIN_VER"; then
+        ok "glib ${NEW_GLIB_VER} 安装成功"
+    else
+        fail "glib 安装后版本检测异常: ${NEW_GLIB_VER}"
+        fail "请检查 PKG_CONFIG_PATH 是否包含 /usr/local/lib/pkgconfig"
+        exit 1
+    fi
+fi
+
+# ---- 依赖检查汇总 ----
+if [ ${#DEP_ERRORS[@]} -gt 0 ]; then
+    echo ""
+    fail "================================================"
+    fail "以下依赖不满足，后续编译将失败:"
+    for err in "${DEP_ERRORS[@]}"; do
+        fail "  ✗ ${err}"
+    done
+    fail "================================================"
+    fail "请按以上提示安装缺失依赖后重新运行 setup.sh"
     exit 1
 fi
 
-# 检查 cmake 版本 >= 3.16
-CMAKE_VER=$(cmake --version 2>&1 | head -1 | grep -oE '[0-9]+\.[0-9]+' | head -1 || true)
-CMAKE_MAJOR=$(echo "$CMAKE_VER" | cut -d. -f1)
-CMAKE_MINOR=$(echo "$CMAKE_VER" | cut -d. -f2)
-if [ "$CMAKE_MAJOR" -lt 3 ] || { [ "$CMAKE_MAJOR" -eq 3 ] && [ "$CMAKE_MINOR" -lt 16 ]; }; then
-    fail "cmake 版本过低 (${CMAKE_VER})，需要 >= 3.16"
-    exit 1
-fi
-ok "cmake 版本 ${CMAKE_VER} 满足要求"
+echo ""
+ok "所有依赖检查通过"
 
 # ============================================================
 # [3/9] 编译 Bridge 库 (cmake)
