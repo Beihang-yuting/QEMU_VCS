@@ -69,47 +69,52 @@ int bridge_send_tlp(bridge_ctx_t *ctx, tlp_entry_t *req) {
 int bridge_wait_completion(bridge_ctx_t *ctx, uint8_t tag, cpl_entry_t *cpl) {
     sync_msg_t msg;
     int ret;
+    int drain_guard = 256;  /* bound stale-cpl drain to avoid wedging */
 
-    if (ctx->transport) {
-        fprintf(stderr, "[wait_cpl] waiting for tag=%d on ctrl_fd...\n", tag);
-        ret = ctx->transport->recv_sync(ctx->transport, &msg);
-        fprintf(stderr, "[wait_cpl] recv_sync ret=%d msg.type=%d tag=%d\n",
-                ret, (ret == 0) ? msg.type : -1, tag);
-        if (ret < 0) return -1;
-        if (msg.type != SYNC_MSG_CPL_READY) {
-            fprintf(stderr, "bridge_wait_completion: unexpected msg type %d (expected %d)\n",
-                    msg.type, SYNC_MSG_CPL_READY);
-            return -1;
+    /* Drain completions until we match the expected tag. Fire-and-forget
+       TLPs (CfgWr on the QEMU side) still generate a Cpl from the VCS EP
+       (required by PCIe spec for non-posted writes); those cpls land in
+       our receive queue with no waiter, so when a new waiter arrives for
+       a different tag the queue may contain stale entries. Skip them. */
+    while (drain_guard-- > 0) {
+        if (ctx->transport) {
+            ret = ctx->transport->recv_sync(ctx->transport, &msg);
+            if (ret < 0) return -1;
+            if (msg.type != SYNC_MSG_CPL_READY) {
+                fprintf(stderr, "bridge_wait_completion: unexpected msg type %d (expected %d)\n",
+                        msg.type, SYNC_MSG_CPL_READY);
+                return -1;
+            }
+            ret = ctx->transport->recv_cpl(ctx->transport, cpl);
+            if (ret < 0) {
+                fprintf(stderr, "bridge_wait_completion: transport recv_cpl failed\n");
+                return -1;
+            }
+        } else {
+            ret = sock_sync_recv(ctx->client_fd, &msg);
+            if (ret < 0) return -1;
+            if (msg.type != SYNC_MSG_CPL_READY) {
+                fprintf(stderr, "bridge_wait_completion: unexpected msg type %d\n", msg.type);
+                return -1;
+            }
+            ret = ring_buf_dequeue(&ctx->shm.cpl_ring, cpl);
+            if (ret < 0) {
+                fprintf(stderr, "bridge_wait_completion: completion queue empty\n");
+                return -1;
+            }
         }
-        ret = ctx->transport->recv_cpl(ctx->transport, cpl);
-        if (ret < 0) {
-            fprintf(stderr, "bridge_wait_completion: transport recv_cpl failed\n");
-            return -1;
+
+        if (ctx->trace_enabled) trace_log_cpl(&ctx->trace, cpl);
+
+        if (cpl->tag == tag) {
+            return 0;
         }
-        fprintf(stderr, "[wait_cpl] got cpl tag=%d (expected %d)\n", cpl->tag, tag);
-    } else {
-        ret = sock_sync_recv(ctx->client_fd, &msg);
-        if (ret < 0) return -1;
-        if (msg.type != SYNC_MSG_CPL_READY) {
-            fprintf(stderr, "bridge_wait_completion: unexpected msg type %d\n", msg.type);
-            return -1;
-        }
-        ret = ring_buf_dequeue(&ctx->shm.cpl_ring, cpl);
-        if (ret < 0) {
-            fprintf(stderr, "bridge_wait_completion: completion queue empty\n");
-            return -1;
-        }
+        /* Stale cpl (likely from a prior fire-and-forget TLP) — drop and retry. */
     }
 
-    if (ctx->trace_enabled) trace_log_cpl(&ctx->trace, cpl);
-
-    if (cpl->tag != tag) {
-        fprintf(stderr, "bridge_wait_completion: tag mismatch (expected %d, got %d)\n",
-                tag, cpl->tag);
-        return -1;
-    }
-
-    return 0;
+    fprintf(stderr, "bridge_wait_completion: drained 256 stale cpls without matching tag=%d\n",
+            tag);
+    return -1;
 }
 
 int bridge_send_tlp_and_wait(bridge_ctx_t *ctx, tlp_entry_t *req, cpl_entry_t *cpl) {

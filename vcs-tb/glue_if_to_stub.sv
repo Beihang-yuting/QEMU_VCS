@@ -62,6 +62,7 @@ module glue_if_to_stub (
     input  logic [7:0]   stub_cpl_tag,
     input  logic [31:0]  stub_cpl_rdata,
     input  logic         stub_cpl_status,
+    output logic         stub_cpl_ack,
 
     // Stub pass-through
     input  logic         stub_notify_valid,
@@ -105,10 +106,15 @@ module glue_if_to_stub (
     typedef enum logic [1:0] {
         ST_IDLE    = 2'd0,
         ST_COLLECT = 2'd1,
-        ST_DECODE  = 2'd2
+        ST_DECODE  = 2'd2,
+        ST_WAIT    = 2'd3  // hold until prev completion fully drained
     } state_t;
 
     state_t state;
+
+    // Forward-declare completion FSM so ST_WAIT drain guard can reference it.
+    typedef enum logic [1:0] {CPL_EMPTY, CPL_READY, CPL_SENT, CPL_WAIT} cpl_state_t;
+    cpl_state_t cpl_st;
 
     // =========================================================================
     // Beat accumulation: capture first 256-bit beat which contains the full
@@ -169,27 +175,28 @@ module glue_if_to_stub (
                         beat0_q[127:120]}; // AddrLo[7:0]
         end
 
-        // Write data (first payload DW, PCIe big-endian byte order):
-        //   3DW: bytes[12..15] = Data
-        //     bytes[12] = data[103:96]  = Data[31:24]
-        //     bytes[13] = data[111:104] = Data[23:16]
-        //     bytes[14] = data[119:112] = Data[15:8]
-        //     bytes[15] = data[127:120] = Data[7:0]
-        //   4DW: bytes[16..19] = Data
-        //     bytes[16] = data[135:128] = Data[31:24]
-        //     bytes[17] = data[143:136] = Data[23:16]
-        //     bytes[18] = data[151:144] = Data[15:8]
-        //     bytes[19] = data[159:152] = Data[7:0]
+        // Write data (first payload DW):
+        //   上游 VIP codec.encode 把 `tlp.payload[i]` 直接 append 到 bytes[]
+        //   (bytes[12]=payload[0], bytes[13]=payload[1], …)，而 QEMU 的
+        //   cosim_mmio_write 以 req.data[i]=(val>>(i*8))&0xFF 打包 LSByte-first。
+        //   因此 payload[0] 是 CPU 写入值的 LSByte，bytes[12] = LSByte。
+        //   把 bytes[12..15] 拼回 32-bit 寄存器值时必须 LSByte-first：
+        //     tlp_wdata[ 7: 0] = bytes[12] = beat[103:96]
+        //     tlp_wdata[15: 8] = bytes[13] = beat[111:104]
+        //     tlp_wdata[23:16] = bytes[14] = beat[119:112]
+        //     tlp_wdata[31:24] = bytes[15] = beat[127:120]
+        //   (读路径 build_cpld_beat 的 byte 放置与 cosim_rc_driver 解析匹配，
+        //    其约定和此处独立，不要改。)
         if (!hdr_is_4dw) begin
-            hdr_wdata = {beat0_q[103:96],
-                         beat0_q[111:104],
+            hdr_wdata = {beat0_q[127:120],
                          beat0_q[119:112],
-                         beat0_q[127:120]};
+                         beat0_q[111:104],
+                         beat0_q[103:96]};
         end else begin
-            hdr_wdata = {beat0_q[135:128],
-                         beat0_q[143:136],
+            hdr_wdata = {beat0_q[159:152],
                          beat0_q[151:144],
-                         beat0_q[159:152]};
+                         beat0_q[143:136],
+                         beat0_q[135:128]};
         end
     end
 
@@ -229,6 +236,12 @@ module glue_if_to_stub (
     logic       ur_pending_q;
     logic [7:0] ur_tag_q;
 
+    // Settling counter for ST_WAIT — wait at least 2 cycles after dispatch so
+    // ep's registered cpl_valid becomes visible before we check "drain idle".
+    // Without this, the ST_WAIT check can fire in the same cycle ep is still
+    // latching its NBA assignment and wrongly conclude the pipeline is idle.
+    logic [1:0] wait_cnt;
+
     // =========================================================================
     // State machine transitions and beat capture
     // =========================================================================
@@ -238,6 +251,7 @@ module glue_if_to_stub (
             beat0_q      <= '0;
             ur_pending_q <= 1'b0;
             ur_tag_q     <= 8'd0;
+            wait_cnt     <= 2'd0;
         end else begin
             case (state)
                 ST_IDLE: begin
@@ -257,14 +271,25 @@ module glue_if_to_stub (
                 end
 
                 ST_DECODE: begin
-                    // Issue stub TLP or record UR pending; return to IDLE next cycle
-                    state <= ST_IDLE;
+                    // Issue stub TLP this cycle, then hold until prev cpl drains.
+                    state    <= ST_WAIT;
+                    wait_cnt <= 2'd0;
 
                     // Non-posted unsupported → queue UR completion
                     if (decoded_unsupported && !hdr_has_data) begin
                         ur_pending_q <= 1'b1;
                         ur_tag_q     <= hdr_tag;
                     end
+                end
+
+                ST_WAIT: begin
+                    // Wait at least 2 cycles so ep's registered cpl_valid can
+                    // be observed to transition 0→1 for non-posted TLPs; then
+                    // wait for the drain handshake to finish.
+                    if (wait_cnt < 2'd2)
+                        wait_cnt <= wait_cnt + 2'd1;
+                    else if (!stub_cpl_valid && cpl_st == CPL_EMPTY && !ur_pending_q)
+                        state <= ST_IDLE;
                 end
 
                 default: state <= ST_IDLE;
@@ -353,14 +378,13 @@ module glue_if_to_stub (
     logic [7:0]  stub_cpl_tag_q;
     logic [31:0] stub_cpl_rdata_q;
     logic        stub_cpl_status_q;
-    // Completion one-shot: stub_cpl_valid pulse → drive vip_cpl_valid
-    // for exactly one VIP handshake cycle.  Uses a 3-state approach:
+    // Completion handshake FSM:
     //   EMPTY: waiting for stub_cpl_valid
-    //   READY: have data, need to present to VIP (vip_cpl_valid will assert)
+    //   READY: have data, vip_cpl_valid will assert this cycle
     //   SENT:  presented to VIP, waiting for vip_cpl_ready to consume
-    typedef enum logic [1:0] {CPL_EMPTY, CPL_READY, CPL_SENT} cpl_state_t;
-    cpl_state_t cpl_st;
-
+    //   WAIT:  VIP consumed; pulse stub_cpl_ack so ep deasserts stub_cpl_valid
+    //          before we re-enter EMPTY (prevents re-latching a stale completion).
+    // cpl_state_t / cpl_st moved to top of module for forward reference
     always_ff @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
             cpl_st            <= CPL_EMPTY;
@@ -384,15 +408,23 @@ module glue_if_to_stub (
                 end
                 CPL_SENT: begin
                     // vip_cpl_valid is high (asserted last cycle).
-                    // Wait for VIP to accept.
+                    // Wait for VIP to accept, then go to WAIT to ack ep.
                     if (vip_cpl_ready)
-                        cpl_st <= CPL_EMPTY;
+                        cpl_st <= CPL_WAIT;
                     // If !vip_cpl_ready, stay in SENT (valid held high by output logic)
+                end
+                CPL_WAIT: begin
+                    // stub_cpl_ack is high this cycle; ep deasserts cpl_valid
+                    // on the next posedge. Return to EMPTY and re-check.
+                    cpl_st <= CPL_EMPTY;
                 end
                 default: cpl_st <= CPL_EMPTY;
             endcase
         end
     end
+
+    // stub_cpl_ack: pulse one cycle while in CPL_WAIT
+    assign stub_cpl_ack = (cpl_st == CPL_WAIT);
 
     logic        any_cpl_valid;
     logic [7:0]  cpl_tag_mux;

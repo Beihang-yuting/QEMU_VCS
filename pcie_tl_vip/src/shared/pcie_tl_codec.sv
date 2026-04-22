@@ -108,7 +108,11 @@ class pcie_tl_codec extends uvm_object;
             else if (!tlp.td)
                 payload_len = bytes.size() - payload_start;
 
+            /* CoSim 本地补丁（对应已合入上游前的 233595b）：
+               short TLP beat (如 CfgWr 的 header+4B) 下 payload_len 可能算出
+               负数，new[] 传负值会触发 VCS DT-NV fatal。钳为 0 防止崩溃。 */
             if (payload_len < 0) payload_len = 0;
+
             tlp.payload = new[payload_len];
             for (int i = 0; i < payload_len; i++)
                 tlp.payload[i] = bytes[payload_start + i];

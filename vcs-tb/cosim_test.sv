@@ -21,6 +21,12 @@ class cosim_test extends uvm_test;
         /* 创建 cosim 专用配置 */
         cfg = cosim_env_config::type_id::create("cfg");
 
+        /* CoSim 跨机模式：Guest 驱动会发出超过 nph_credit=32 的 CfgWr burst。
+           新 VIP FC 默认开启但 init_nph=32，本地 glue 的 fc_update 只在
+           ST_DECODE 周期脉冲一次，跨机 TCP 延迟下会饿死 VIP driver。
+           禁用 FC 检查（改用 infinite_credit），让 VIP 发包不受流控阻塞。 */
+        cfg.infinite_credit = 1;
+
         /* 设置到 config_db */
         uvm_config_db#(pcie_tl_env_config)::set(this, "env", "cfg", cfg);
 

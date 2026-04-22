@@ -41,7 +41,10 @@ module tb_uvm_top;
         .cpl_status   (cif.cpl_status),
         .notify_valid (cif.notify_valid),
         .notify_queue (cif.notify_queue),
-        .isr_set      (cif.isr_set)
+        .isr_set      (cif.isr_set),
+        /* Standalone UVM: DUT's cpl_valid is sampled combinationally by
+           the monitor; tie ack high so cpl_valid clears after one cycle. */
+        .cpl_ack      (1'b1)
     );
 
     // Initialize interface outputs to avoid X

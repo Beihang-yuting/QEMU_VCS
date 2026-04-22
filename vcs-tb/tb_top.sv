@@ -51,7 +51,10 @@ module tb_top;
         .cpl_status   (cpl_status),
         .notify_valid (notify_valid),
         .notify_queue (notify_queue),
-        .isr_set      (isr_set)
+        .isr_set      (isr_set),
+        /* Non-VIP mode reads cpl_valid once per TLP, so tie ack high to
+           restore single-cycle pulse semantics (cpl_valid auto-clears). */
+        .cpl_ack      (1'b1)
     );
 
     /* DPI-C 变量 */

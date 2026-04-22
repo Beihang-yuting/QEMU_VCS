@@ -38,6 +38,7 @@ module cosim_vip_top;
     logic [7:0]  stub_cpl_tag;
     logic [31:0] stub_cpl_rdata;
     logic        stub_cpl_status;
+    logic        stub_cpl_ack;
     logic        stub_notify_valid;
     logic [15:0] stub_notify_queue;
     logic        stub_isr_set;
@@ -80,6 +81,7 @@ module cosim_vip_top;
         .stub_cpl_tag    (stub_cpl_tag),
         .stub_cpl_rdata  (stub_cpl_rdata),
         .stub_cpl_status (stub_cpl_status),
+        .stub_cpl_ack    (stub_cpl_ack),
         .stub_notify_valid (stub_notify_valid),
         .stub_notify_queue (stub_notify_queue),
         .stub_isr_set    (stub_isr_set)
@@ -101,7 +103,8 @@ module cosim_vip_top;
         .cpl_status   (stub_cpl_status),
         .notify_valid (stub_notify_valid),
         .notify_queue (stub_notify_queue),
-        .isr_set      (stub_isr_set)
+        .isr_set      (stub_isr_set),
+        .cpl_ack      (stub_cpl_ack)
     );
 
     /* === cpl_if slave-side defaults (driver controls ready via VIF) === */
@@ -151,6 +154,50 @@ module cosim_vip_top;
         repeat (timeout_ms) #1_000_000;
         $display("[VIP-TOP] TIMEOUT after %0d ms", timeout_ms);
         $finish;
+    end
+
+    /* === Virtio 数据面 TLP 计数提前终止 ===
+     * 真正的 "virtio 发包" = Guest 驱动和 device 在 virtqueue 层交换数据时触
+     * 发的 MMIO：
+     *   0x2000-0x2003  NOTIFY     — Guest 按 vring 索引通知 device 有新描述符
+     *   0x3000-0x3003  ISR_CFG    — Guest 读 ISR 处理 device 中断（被 deliver
+     *                                的 RX/TX 完成事件）
+     * common_cfg (0x1000..0x103F) 和 device_cfg (0x4000..) 是配置层，不算数据面。
+     * STOP_AFTER_TLPS=0 时不启用，依赖 SIM_TIMEOUT_MS 兜底。 */
+    int unsigned virtio_tlp_count = 0;
+    int unsigned stop_after_tlps  = 0;
+
+    wire is_mem_access      = (stub_tlp_type == 3'd0) || (stub_tlp_type == 3'd1);
+    wire is_virtio_notify   = (stub_tlp_addr[15:0] >= 16'h2000) &&
+                              (stub_tlp_addr[15:0] <  16'h2004);
+    wire is_virtio_isr      = (stub_tlp_addr[15:0] >= 16'h3000) &&
+                              (stub_tlp_addr[15:0] <  16'h3004);
+    wire is_virtio_tlp      = stub_tlp_valid && is_mem_access &&
+                              (is_virtio_notify || is_virtio_isr);
+
+    initial begin
+        if (!$value$plusargs("STOP_AFTER_TLPS=%d", stop_after_tlps))
+            stop_after_tlps = 0;
+        if (stop_after_tlps > 0)
+            $display("[VIP-TOP] Early-stop enabled: $finish after %0d virtio TLPs (BAR0 0x1000-0x400F)",
+                     stop_after_tlps);
+    end
+
+    always_ff @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            virtio_tlp_count <= 0;
+        end else if (is_virtio_tlp) begin
+            virtio_tlp_count <= virtio_tlp_count + 1;
+            $display("[VIP-TOP] virtio-data TLP #%0d: kind=%s type=%0d addr=0x%04h t=%0t",
+                     virtio_tlp_count + 1,
+                     is_virtio_notify ? "NOTIFY" : "ISR",
+                     stub_tlp_type, stub_tlp_addr[15:0], $time);
+            if (stop_after_tlps > 0 && (virtio_tlp_count + 1) >= stop_after_tlps) begin
+                $display("[VIP-TOP] Reached STOP_AFTER_TLPS=%0d virtio data-plane TLPs — $finish at time %0t",
+                         stop_after_tlps, $time);
+                $finish;
+            end
+        end
     end
 
 endmodule

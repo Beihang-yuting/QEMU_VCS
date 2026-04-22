@@ -44,7 +44,9 @@ module pcie_ep_stub (
     output logic        notify_valid,
     output logic [15:0] notify_queue,
     /* Phase 4: ISR set request from tb_top (RX injection) */
-    input  logic        isr_set
+    input  logic        isr_set,
+    /* Completion ack: deassert cpl_valid when consumer has latched it */
+    input  logic        cpl_ack
 );
     /* MAC 地址最后一字节 (通过 plusargs 配置, 区分不同实例) */
     int mac_last_byte_param;
@@ -297,10 +299,11 @@ module pcie_ep_stub (
             cfg_space[33] <= 32'h0000_0010;             /* length = 16 */
 
         end else begin
-            /* cpl_valid: hold until next TLP arrives, giving glue's
-               CPL FSM time to capture. Single-cycle pulse was being
-               missed when FSM was in CPL_SENT state. */
-            if (tlp_valid)
+            /* cpl_valid: hold until consumer acks (cpl_ack) or a new TLP
+               arrives. This gives the glue's CPL FSM time to capture a
+               completion without losing it to a single-cycle pulse race,
+               while the ack handshake prevents re-latching duplicates. */
+            if (tlp_valid || cpl_ack)
                 cpl_valid <= 1'b0;
             notify_valid <= 1'b0;
 
@@ -411,6 +414,9 @@ module pcie_ep_stub (
                     end
 
                     /* ===== CfgWr ===== */
+                    /* PCIe CfgWr is non-posted; must return a Cpl (no data).
+                       The glue layer always emits CplD format; cpl_rdata is
+                       ignored by the requester for config writes. */
                     3'd2: begin
                         if (tlp_addr[7:0] < 8'hFF) begin
                             logic [31:0] old_val, new_val, final_val;
@@ -432,6 +438,10 @@ module pcie_ep_stub (
                             $display("[EP-CFG] CfgWr reg[0x%02h] byte_off=%0d len=%0d: 0x%08h -> 0x%08h",
                                      tlp_addr[7:0], boff, tlp_len, old_val, final_val);
                         end
+                        cpl_valid  <= 1'b1;
+                        cpl_tag    <= tlp_tag;
+                        cpl_rdata  <= 32'd0;
+                        cpl_status <= 1'b0;
                     end
 
                     /* ===== CfgRd ===== */
