@@ -304,8 +304,13 @@ CoSim Platform 统一入口
     all             按顺序运行所有阶段
 
   start <组件>      启动单个组件
-    qemu [--shm NAME] [--sock PATH] [--initrd FILE]
-    vcs  [--role A|B] [--eth-shm NAME] [--mac-last N]
+    qemu [选项]       SHM: --shm NAME --sock PATH
+                      TCP: --transport tcp [--port-base N] [--instance-id N]
+                      Guest: --initrd FILE 或 --drive FILE [--append ARGS]
+    vcs  [选项]       SHM: --shm NAME --sock PATH
+                      TCP: --transport tcp --remote-host IP [--port-base N]
+                      通用: [--role A|B] [--eth-shm NAME] [--mac-last N]
+                            [--timeout MS] [--test NAME]
     tap  [--eth-shm NAME] [--ip ADDR] [--tap-dev NAME]
 
   status            显示运行中的 CoSim 进程
@@ -324,7 +329,9 @@ CoSim Platform 统一入口
 示例:
   ./cosim.sh test phase1              # 运行 Phase 1 测试
   ./cosim.sh test all                 # 运行所有测试
-  ./cosim.sh start qemu --shm /cosim0 --sock /tmp/cosim0.sock
+  ./cosim.sh start qemu --shm /cosim0 --sock /tmp/cosim0.sock     # SHM 本地模式
+  ./cosim.sh start qemu --transport tcp --port-base 9100           # TCP 跨机模式
+  ./cosim.sh start qemu --transport tcp --drive rootfs.ext4        # TCP + 磁盘镜像
   ./cosim.sh status                   # 查看运行状态
   ./cosim.sh clean                    # 清理所有资源
 HELP
@@ -980,39 +987,97 @@ run_all_tests() {
 # ============================================================
 
 cmd_start_qemu() {
+    local transport="shm"
     local shm_name="/cosim0"
     local sock_path="/tmp/cosim0.sock"
+    local port_base="9100"
+    local instance_id="0"
     local initrd_file=""
+    local drive_file=""
+    local extra_append=""
 
     while [ $# -gt 0 ]; do
         case "$1" in
-            --shm)    shm_name="$2"; shift 2 ;;
-            --sock)   sock_path="$2"; shift 2 ;;
-            --initrd) initrd_file="$2"; shift 2 ;;
+            --transport)   transport="$2"; shift 2 ;;
+            --shm)         shm_name="$2"; shift 2 ;;
+            --sock)        sock_path="$2"; shift 2 ;;
+            --port-base)   port_base="$2"; shift 2 ;;
+            --instance-id) instance_id="$2"; shift 2 ;;
+            --initrd)      initrd_file="$2"; shift 2 ;;
+            --drive)       drive_file="$2"; shift 2 ;;
+            --append)      extra_append="$2"; shift 2 ;;
             *) log_err "未知选项: $1"; return 1 ;;
         esac
     done
 
-    local qemu_bin kernel_bin
-    qemu_bin="$(resolve_qemu)" || { log_err "找不到 QEMU"; return 1; }
-    kernel_bin="$(resolve_kernel)" || { log_err "找不到 kernel"; return 1; }
+    # 参数校验
+    case "$transport" in
+        shm|tcp) ;;
+        *) log_err "无效 transport: $transport（可选: shm, tcp）"; return 1 ;;
+    esac
 
-    if [ -z "$initrd_file" ]; then
-        initrd_file="$(resolve_initrd "")" || true
+    local qemu_bin
+    qemu_bin="$(resolve_qemu)" || { log_err "找不到 QEMU"; return 1; }
+
+    # ---- 构建 -device 参数 ----
+    local device_arg
+    if [ "$transport" = "tcp" ]; then
+        device_arg="cosim-pcie-rc,transport=tcp,port_base=$port_base,instance_id=$instance_id"
+    else
+        device_arg="cosim-pcie-rc,shm_name=$shm_name,sock_path=$sock_path"
     fi
 
+    # ---- 构建 QEMU 命令行 ----
     local QEMU_ARGS=(
         -M q35 -m "${GUEST_MEMORY}" -smp 1
-        -kernel "$kernel_bin"
-        -append "console=ttyS0 init=/init"
-        -device "cosim-pcie-rc,shm_name=$shm_name,sock_path=$sock_path"
+        -device "$device_arg"
         -nographic -no-reboot
     )
 
-    if [ -n "$initrd_file" ] && [ -f "$initrd_file" ]; then
-        QEMU_ARGS+=(-initrd "$initrd_file")
+    # ---- Guest 启动方式: drive 模式 vs initramfs 模式 ----
+    local append_str="console=ttyS0"
+
+    if [ -n "$drive_file" ]; then
+        # 磁盘镜像模式 (full guest)
+        if [ ! -f "$drive_file" ]; then
+            log_err "磁盘镜像不存在: $drive_file"
+            return 1
+        fi
+        # 自动检测格式
+        local drive_fmt="raw"
+        case "$drive_file" in
+            *.qcow2) drive_fmt="qcow2" ;;
+            *.img)   drive_fmt="qcow2" ;;
+        esac
+        QEMU_ARGS+=(-drive "file=$drive_file,format=$drive_fmt,if=virtio")
+        append_str="${append_str} root=/dev/vda"
+
+        # kernel 可选：有则用，无则依赖镜像内置引导
+        local kernel_bin
+        kernel_bin="$(resolve_kernel 2>/dev/null)" || true
+        if [ -n "$kernel_bin" ]; then
+            QEMU_ARGS+=(-kernel "$kernel_bin")
+        fi
+    else
+        # initramfs 模式 (minimal guest)
+        local kernel_bin
+        kernel_bin="$(resolve_kernel)" || { log_err "找不到 kernel"; return 1; }
+        QEMU_ARGS+=(-kernel "$kernel_bin")
+
+        if [ -z "$initrd_file" ]; then
+            initrd_file="$(resolve_initrd "")" || true
+        fi
+        if [ -n "$initrd_file" ] && [ -f "$initrd_file" ]; then
+            QEMU_ARGS+=(-initrd "$initrd_file")
+        fi
+        append_str="${append_str} init=/init"
     fi
 
+    # 附加 append 参数
+    [ -n "$extra_append" ] && append_str="${append_str} ${extra_append}"
+    QEMU_ARGS+=(-append "$append_str")
+
+    # ---- KVM 检测 ----
     if [ -e /dev/kvm ] && [ -w /dev/kvm ]; then
         QEMU_ARGS+=(-cpu host -enable-kvm)
         log_info "KVM 加速已启用"
@@ -1021,32 +1086,66 @@ cmd_start_qemu() {
         log_warn "KVM 不可用，使用 TCG（较慢）"
     fi
 
+    # ---- 启动信息 ----
     log_info "启动 QEMU..."
-    log_info "  SHM:    $shm_name"
-    log_info "  Socket: $sock_path"
-    log_info "  Kernel: $kernel_bin"
-    [ -n "$initrd_file" ] && log_info "  Initrd: $initrd_file"
+    log_info "  Transport: $transport"
+    if [ "$transport" = "tcp" ]; then
+        log_info "  端口基数: $port_base (占用 ${port_base}-$((port_base + 2)))"
+        log_info "  实例 ID:  $instance_id"
+        log_info "  提示: QEMU 将监听端口等待 VCS 连接，启动后终端无输出是正常的"
+    else
+        log_info "  SHM:    $shm_name"
+        log_info "  Socket: $sock_path"
+    fi
+    if [ -n "$drive_file" ]; then
+        log_info "  磁盘:   $drive_file"
+    fi
+    [ -n "${kernel_bin:-}" ] && log_info "  Kernel: $kernel_bin"
+    [ -n "$initrd_file" ] && [ -f "$initrd_file" ] && log_info "  Initrd: $initrd_file"
 
     exec "$qemu_bin" "${QEMU_ARGS[@]}"
 }
 
 cmd_start_vcs() {
+    local transport="shm"
     local role="A"
     local eth_shm="/cosim_eth0"
     local mac_last="1"
     local shm_name="/cosim0"
     local sock_path="/tmp/cosim0.sock"
+    local remote_host=""
+    local port_base="9100"
+    local instance_id="0"
+    local sim_timeout="600000"
+    local test_name="cosim_test"
 
     while [ $# -gt 0 ]; do
         case "$1" in
-            --role)     role="$2"; shift 2 ;;
-            --eth-shm)  eth_shm="$2"; shift 2 ;;
-            --mac-last) mac_last="$2"; shift 2 ;;
-            --shm)      shm_name="$2"; shift 2 ;;
-            --sock)     sock_path="$2"; shift 2 ;;
+            --transport)   transport="$2"; shift 2 ;;
+            --role)        role="$2"; shift 2 ;;
+            --eth-shm)     eth_shm="$2"; shift 2 ;;
+            --mac-last)    mac_last="$2"; shift 2 ;;
+            --shm)         shm_name="$2"; shift 2 ;;
+            --sock)        sock_path="$2"; shift 2 ;;
+            --remote-host) remote_host="$2"; shift 2 ;;
+            --port-base)   port_base="$2"; shift 2 ;;
+            --instance-id) instance_id="$2"; shift 2 ;;
+            --timeout)     sim_timeout="$2"; shift 2 ;;
+            --test)        test_name="$2"; shift 2 ;;
             *) log_err "未知选项: $1"; return 1 ;;
         esac
     done
+
+    # 参数校验
+    case "$transport" in
+        shm|tcp) ;;
+        *) log_err "无效 transport: $transport（可选: shm, tcp）"; return 1 ;;
+    esac
+
+    if [ "$transport" = "tcp" ] && [ -z "$remote_host" ]; then
+        log_err "TCP 模式必须指定 --remote-host <QEMU机器IP>"
+        return 1
+    fi
 
     local simv_bin
     simv_bin="$(resolve_simv)" || { log_err "找不到 simv"; return 1; }
@@ -1060,18 +1159,48 @@ cmd_start_vcs() {
         eth_create=0
     fi
 
+    # ---- 构建 simv 参数 ----
+    local SIMV_ARGS=(
+        +ETH_SHM="$eth_shm" +ETH_ROLE=$eth_role +ETH_CREATE=$eth_create
+        +MAC_LAST="$mac_last"
+        +UVM_TESTNAME="$test_name"
+        +SIM_TIMEOUT_MS="$sim_timeout"
+    )
+
+    if [ "$transport" = "tcp" ]; then
+        SIMV_ARGS+=(
+            +transport=tcp
+            +REMOTE_HOST="$remote_host"
+            +PORT_BASE="$port_base"
+            +INSTANCE_ID="$instance_id"
+        )
+    else
+        SIMV_ARGS+=(
+            +SHM_NAME="$shm_name"
+            +SOCK_PATH="$sock_path"
+        )
+    fi
+
+    # ---- 启动信息 ----
     log_info "启动 VCS simv..."
+    log_info "  Transport: $transport"
+    if [ "$transport" = "tcp" ]; then
+        log_info "  远程 QEMU: $remote_host"
+        log_info "  端口基数:  $port_base (连接 ${port_base}-$((port_base + 2)))"
+        log_info "  实例 ID:   $instance_id"
+        log_info "  提示: VCS 将连接 QEMU（最多重试 15 秒），请确保 QEMU 已启动"
+    else
+        log_info "  SHM:     $shm_name"
+        log_info "  Socket:  $sock_path"
+    fi
     log_info "  Role:    $role (ETH_ROLE=$eth_role)"
-    log_info "  SHM:     $shm_name"
-    log_info "  Socket:  $sock_path"
     log_info "  ETH SHM: $eth_shm"
     log_info "  MAC:     de:ad:be:ef:00:0$mac_last"
+    log_info "  Test:    $test_name"
+    log_info "  Timeout: ${sim_timeout}ms"
 
     cd "$simv_dir"
-    exec ./simv \
-        +SHM_NAME="$shm_name" +SOCK_PATH="$sock_path" \
-        +ETH_SHM="$eth_shm" +ETH_ROLE=$eth_role +ETH_CREATE=$eth_create \
-        +MAC_LAST="$mac_last"
+    exec ./simv "${SIMV_ARGS[@]}"
 }
 
 cmd_start_tap() {
