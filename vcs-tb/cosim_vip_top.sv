@@ -250,9 +250,21 @@ module cosim_vip_top;
             #2000;  /* 2us @ 1ns/1ps */
             if (vq_configured_q) begin
                 rx_rc = vcs_vq_process_rx();
-                if (rx_rc > 0)
+                if (rx_rc > 0) begin
                     $display("[VIP-VQ] RX injected %0d packets (total=%0d)",
                              rx_rc, vcs_vq_get_rx_count());
+                    /* 先设 ISR bit，再发 MSI（顺序关键：Guest 读 ISR 必须非零） */
+                    stub_isr_set <= 1;
+                    @(posedge clk);
+                    stub_isr_set <= 0;
+                    @(posedge clk);
+                    begin
+                        int msi_rc;
+                        msi_rc = bridge_vcs_raise_msi(0);
+                        if (msi_rc < 0)
+                            $display("[VIP-VQ] WARNING: raise_msi failed rc=%0d", msi_rc);
+                    end
+                end
             end
         end
     end

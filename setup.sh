@@ -851,45 +851,25 @@ if [ "$NEED_VCS" = true ]; then
             fi
         done
 
-        mkdir -p "$VCS_SIM_DIR"
-        cd "$VCS_SIM_DIR"
-
+        # 使用 Makefile 的 vcs-vip 目标编译（VIP 模式，含 UVM + pcie_tl_vip）
+        info "编译 VCS VIP 模式 (make vcs-vip)..."
         set +e
-        "$VCS_BIN" -full64 -sverilog \
-            -timescale=1ns/1ps \
-            -CFLAGS "-std=gnu99 -I ${PROJECT_DIR}/bridge/common -I ${PROJECT_DIR}/bridge/qemu -I ${PROJECT_DIR}/bridge/vcs -I ${PROJECT_DIR}/bridge/eth" \
-            "${PROJECT_DIR}/bridge/vcs/bridge_vcs.c" \
-            "${PROJECT_DIR}/bridge/vcs/sock_sync_vcs.c" \
-            "${PROJECT_DIR}/bridge/vcs/virtqueue_dma.c" \
-            "${PROJECT_DIR}/bridge/common/ring_buffer.c" \
-            "${PROJECT_DIR}/bridge/common/shm_layout.c" \
-            "${PROJECT_DIR}/bridge/common/dma_manager.c" \
-            "${PROJECT_DIR}/bridge/common/trace_log.c" \
-            "${PROJECT_DIR}/bridge/common/eth_shm.c" \
-            "${PROJECT_DIR}/bridge/common/link_model.c" \
-            "${PROJECT_DIR}/bridge/common/transport_shm.c" \
-            "${PROJECT_DIR}/bridge/common/transport_tcp.c" \
-            "${PROJECT_DIR}/bridge/eth/eth_mac_dpi.c" \
-            "${PROJECT_DIR}/bridge/eth/eth_port.c" \
-            "${PROJECT_DIR}/bridge/vcs/bridge_vcs.sv" \
-            "${PROJECT_DIR}"/vcs-tb/*.sv \
-            -LDFLAGS "-lrt -lpthread" \
-            -o simv
+        make -C "$PROJECT_DIR" vcs-vip 2>&1
         VCS_RET=$?
         set -e
-
-        cd "$PROJECT_DIR"
 
         if [ "$VCS_RET" -ne 0 ]; then
             fail "VCS 编译失败 (exit code: $VCS_RET)"
             fail "  请检查 VCS 许可证和环境设置"
+            fail "  手动重试: make vcs-vip"
         fi
 
-        if [ -f "${VCS_SIM_DIR}/simv" ]; then
-            ok "simv 编译成功: ${VCS_SIM_DIR}/simv"
+        VCS_VIP_BIN="${BUILD_DIR}/simv_vip"
+        if [ -f "$VCS_VIP_BIN" ]; then
+            ok "simv_vip 编译成功: ${VCS_VIP_BIN}"
             PASS_COUNT=$((PASS_COUNT + 1))
         else
-            fail "simv 未生成"
+            fail "simv_vip 未生成"
             FAIL_COUNT=$((FAIL_COUNT + 1))
         fi
     fi

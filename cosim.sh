@@ -104,10 +104,22 @@ resolve_qemu() {
 }
 
 resolve_simv() {
-    find_binary "VCS simv" \
-        "${SIMV:-}" \
+    # 优先级: 环境变量 > build/simv_vip (VIP模式) > 旧路径 (legacy)
+    if [ -n "${SIMV:-}" ] && [ -f "${SIMV:-}" ]; then
+        echo "$SIMV"
+        return 0
+    fi
+    for candidate in \
+        "${PROJECT_DIR}/build/simv_vip" \
         "${PROJECT_DIR}/vcs-tb/sim_build/simv" \
-        "$HOME/workspace/cosim-platform/vcs-tb/sim_build/simv"
+        "$HOME/workspace/cosim-platform/build/simv_vip" \
+        "$HOME/cosim-platform/build/simv_vip"; do
+        if [ -f "$candidate" ]; then
+            echo "$candidate"
+            return 0
+        fi
+    done
+    return 1
 }
 
 resolve_tap_bridge() {
