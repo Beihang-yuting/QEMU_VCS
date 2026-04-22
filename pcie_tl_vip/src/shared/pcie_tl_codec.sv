@@ -108,6 +108,7 @@ class pcie_tl_codec extends uvm_object;
             else if (!tlp.td)
                 payload_len = bytes.size() - payload_start;
 
+            if (payload_len < 0) payload_len = 0;
             tlp.payload = new[payload_len];
             for (int i = 0; i < payload_len; i++)
                 tlp.payload[i] = bytes[payload_start + i];
