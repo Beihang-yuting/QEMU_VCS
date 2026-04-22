@@ -602,6 +602,7 @@ int bridge_dma_read_bytes(uint64_t host_addr, uint8_t *buf, uint32_t len) {
     /* ---- TCP transport path ---- */
     if (g_transport) {
         uint32_t tag = rd_tag++;
+        uint8_t  buf_stale_discard[4096];  /* 吞掉 stale CPL payload */
         dma_req_t req = {
             .tag = tag,
             .direction = DMA_DIR_READ,
@@ -629,24 +630,37 @@ int bridge_dma_read_bytes(uint64_t host_addr, uint8_t *buf, uint32_t len) {
                 continue;
             }
             if (msg.type == SYNC_MSG_DMA_CPL) {
+                /* QEMU `bridge_complete_dma_with_data` 在 aux/data_fd 上的发送
+                   顺序是 ① send_dma_data  ② send_dma_cpl  ③ ctrl send_sync。
+                   所以 VCS 收到 SYNC_MSG_DMA_CPL 时 aux_fd 队头是 DMA_DATA 帧，
+                   第二帧才是 DMA_CPL。必须按此顺序 recv，否则 tcp_recv_hdr
+                   拿到的 msg_type 不匹配期望类型，协议错位。 */
+                uint32_t rx_tag, rx_dir, rx_len = sizeof(buf_stale_discard);
+                uint64_t rx_addr;
+                if (g_transport->recv_dma_data(g_transport, &rx_tag, &rx_dir,
+                                                &rx_addr,
+                                                buf_stale_discard, &rx_len) < 0) {
+                    fprintf(stderr, "[VCS Bridge] dma_read_bytes: recv_dma_data failed\n");
+                    return -1;
+                }
+
                 dma_cpl_t cpl;
                 if (g_transport->recv_dma_cpl(g_transport, &cpl) < 0) {
                     fprintf(stderr, "[VCS Bridge] dma_read_bytes: recv_dma_cpl failed\n");
                     return -1;
                 }
+
                 if (cpl.tag != tag || cpl.status != 0) {
-                    fprintf(stderr, "[VCS Bridge] dma_read_bytes: tag mismatch %u vs %u\n",
-                            cpl.tag, tag);
-                    return -1;
+                    /* Stale CPL：前一个 DMA read 因 1000-loop 超时 return -1 后
+                       QEMU 稍后才回复的 orphan 包。data 已读走，直接丢。 */
+                    fprintf(stderr, "[VCS Bridge] dma_read_bytes: drop stale cpl tag=%u expected=%u status=%d\n",
+                            cpl.tag, tag, cpl.status);
+                    continue;
                 }
-                /* Receive the data QEMU read from guest RAM */
-                uint32_t rx_tag, rx_dir, rx_len = len;
-                uint64_t rx_addr;
-                if (g_transport->recv_dma_data(g_transport, &rx_tag, &rx_dir,
-                                                &rx_addr, buf, &rx_len) < 0) {
-                    fprintf(stderr, "[VCS Bridge] dma_read_bytes: recv_dma_data failed\n");
-                    return -1;
-                }
+
+                /* 本次请求的 data：复制到 caller 的 buf（rx_len 受 len 限制） */
+                uint32_t copy_len = (rx_len < len) ? rx_len : len;
+                memcpy(buf, buf_stale_discard, copy_len);
                 return 0;
             }
         }

@@ -37,13 +37,28 @@ static vq_state_t vq[2];   /* 0=RX, 1=TX */
 static int tx_pkt_count = 0;
 static int rx_pkt_count = 0;
 
-/* ========== DPI-C: Configure queue ========== */
+/* ========== DPI-C: Configure queue ==========
+ * 幂等：若参数与当前 cache 完全一致且已 configured，则直接 return。
+ * 否则更新 GPA/size 并重置 last_avail/last_used（只在 GPA 真正变化时重置）。
+ * 这样 SV 侧可以每次 notify 都调用 configure_vq_rings，不会因为"重复
+ * configure 清零 ring 位置"破坏 virtio 语义；Guest 若在 soft-reset 后重
+ * 配 vring 到新地址，此处会检测到差异并重置。 */
 void vcs_vq_configure(int queue,
                        unsigned long long desc_gpa,
                        unsigned long long avail_gpa,
                        unsigned long long used_gpa,
                        int size) {
     if (queue < 0 || queue > 1) return;
+
+    /* 参数与 cache 完全一致 → no-op */
+    if (vq[queue].configured &&
+        vq[queue].desc_gpa  == (uint64_t)desc_gpa &&
+        vq[queue].avail_gpa == (uint64_t)avail_gpa &&
+        vq[queue].used_gpa  == (uint64_t)used_gpa &&
+        vq[queue].size      == (uint16_t)size) {
+        return;
+    }
+
     vq[queue].desc_gpa   = desc_gpa;
     vq[queue].avail_gpa  = avail_gpa;
     vq[queue].used_gpa   = used_gpa;
@@ -51,7 +66,7 @@ void vcs_vq_configure(int queue,
     vq[queue].last_avail = 0;
     vq[queue].last_used  = 0;
     vq[queue].configured = 1;
-    fprintf(stderr, "[VQ] Queue %d configured: desc=0x%llx avail=0x%llx used=0x%llx size=%d\n",
+    fprintf(stderr, "[VQ] Queue %d (re)configured: desc=0x%llx avail=0x%llx used=0x%llx size=%d\n",
             queue, (unsigned long long)desc_gpa, (unsigned long long)avail_gpa,
             (unsigned long long)used_gpa, size);
 }

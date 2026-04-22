@@ -192,10 +192,10 @@ module cosim_vip_top;
 
     task automatic handle_vio_notify(input [15:0] queue_idx);
         int rc;
-        if (!vq_configured_q) begin
-            $display("[VIP-VQ] WARNING: notify before VQ configured — configuring now");
-            configure_vq_rings();
-        end
+        /* Guest 可能在 soft-reset 后重新配 vring 到新地址，因此每次 notify 都
+         * 重读 ep 里的 vio_q_*_hi/lo 调 vcs_vq_configure。C 侧 vcs_vq_configure
+         * 已幂等化——若 GPA 不变则是 no-op，不会清 ring 位置。 */
+        configure_vq_rings();
         if (queue_idx == 16'd1) begin
             rc = vcs_vq_process_tx();
             if (rc > 0)
