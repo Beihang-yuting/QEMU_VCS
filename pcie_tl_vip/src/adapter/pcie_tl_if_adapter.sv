@@ -87,24 +87,24 @@ class pcie_tl_if_adapter extends uvm_component;
         total_beats = (bytes.size() + 31) / 32;  // 256-bit bus = 32 bytes
 
         for (int i = 0; i < total_beats; i++) begin
-            /* Drive signals before the clock edge so glue's always_ff
-               samples the updated value.  Using blocking assign here
-               would violate synthesis style, but for a VIP driver task
-               it is acceptable and avoids the NBA delta-cycle race where
-               glue_if_to_stub samples vip_tlp_valid before the NBA
-               update from <= takes effect on the same posedge. */
+            /* Blocking assigns (=) for testbench driver signals.
+               NBA (<=) causes delta-cycle races where glue's always_ff
+               samples old values. Blocking assigns update immediately
+               in the active region, guaranteeing the next posedge sees
+               the driven value. Drive at negedge for setup time margin. */
             @(negedge vif.clk);
-            vif.tlp_valid <= 1;
-            vif.tlp_sop   <= (i == 0);
-            vif.tlp_eop   <= (i == total_beats - 1);
-            vif.tlp_data  <= pack_beat(bytes, i);
-            vif.tlp_strb  <= calc_strb(bytes, i, total_beats);
+            vif.tlp_valid = 1;
+            vif.tlp_sop   = (i == 0);
+            vif.tlp_eop   = (i == total_beats - 1);
+            vif.tlp_data  = pack_beat(bytes, i);
+            vif.tlp_strb  = calc_strb(bytes, i, total_beats);
             @(posedge vif.clk);
             while (!vif.tlp_ready) @(posedge vif.clk);
         end
-        vif.tlp_valid <= 0;
-        vif.tlp_sop   <= 0;
-        vif.tlp_eop   <= 0;
+        @(negedge vif.clk);
+        vif.tlp_valid = 0;
+        vif.tlp_sop   = 0;
+        vif.tlp_eop   = 0;
     endtask
 
     //=========================================================================
