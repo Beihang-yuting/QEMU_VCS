@@ -640,7 +640,8 @@ if [ "$NEED_QEMU" = true ]; then
         ninja -C _build
 
         info "安装 glib 到 /usr/local（需要 sudo）..."
-        sudo ninja -C _build install
+        # sudo -E 保留用户 PATH/PYTHONPATH，避免 sudo 下找不到 meson 模块
+        sudo -E env "PATH=$PATH" ninja -C _build install
         sudo ldconfig
         cd "$PROJECT_DIR"
 
