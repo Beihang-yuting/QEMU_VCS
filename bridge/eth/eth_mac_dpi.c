@@ -2,6 +2,7 @@
 #include "eth_port.h"
 #include <stdio.h>
 #include <string.h>
+#include <stdint.h>
 #include "svdpi.h"
 
 /* The DPI-C shim owns a single eth_port per VCS process. VCS typically needs
@@ -28,7 +29,7 @@ int vcs_eth_mac_init_dpi(const char *shm_name, int role, int create)
 int vcs_eth_mac_send_frame_dpi(const void *data, int len)
 {
     if (!g_opened || !data || len <= 0 || len > (int)ETH_FRAME_MAX_DATA) return -1;
-    const uint8_t *ptr = (const uint8_t *)svGetArrayPtr(data);
+    const uint8_t *ptr = (const uint8_t *)svGetArrayPtr((void *)(uintptr_t)data);
     if (!ptr) return -1;
     eth_frame_t f = {0};
     f.len = (uint16_t)len;
@@ -39,7 +40,7 @@ int vcs_eth_mac_send_frame_dpi(const void *data, int len)
 int vcs_eth_mac_poll_frame_dpi(const void *data, int max_len)
 {
     if (!g_opened || !data || max_len <= 0) return -1;
-    uint8_t *ptr = (uint8_t *)svGetArrayPtr(data);
+    uint8_t *ptr = (uint8_t *)svGetArrayPtr((void *)(uintptr_t)data);
     if (!ptr) return -1;
     eth_frame_t f;
     int rc = eth_port_recv(&g_port, &f, 0);
