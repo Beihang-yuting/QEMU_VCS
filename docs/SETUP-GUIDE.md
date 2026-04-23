@@ -68,7 +68,7 @@ CoSim Platform 支持两种部署模式：
 ### 2.2 手动逐组件启动
 
 ```bash
-# 终端 1: QEMU
+# 终端 1: QEMU（基础模式，串口输出到终端）
 ./cosim.sh start qemu --shm /cosim0 --sock /tmp/cosim0.sock \
     --drive /path/to/rootfs.ext4
 
@@ -79,7 +79,47 @@ CoSim Platform 支持两种部署模式：
 ./cosim.sh start tap --eth-shm /cosim_eth0
 ```
 
-### 2.3 波形查看
+### 2.3 串口交互模式（推荐）
+
+加 `--serial-sock` 可通过 Unix socket 与 Guest 串口交互，执行 ping/iperf 等测试：
+
+```bash
+# 终端 1: QEMU（串口通过 socket 输出）
+./cosim.sh start qemu --shm /cosim0 --sock /tmp/cosim0.sock \
+    --serial-sock /tmp/qemu-serial.sock \
+    --drive /path/to/rootfs.ext4
+
+# 终端 2: VCS
+./cosim.sh start vcs --shm /cosim0 --sock /tmp/cosim0.sock --role A
+
+# 终端 3: TAP bridge
+./cosim.sh start tap --eth-shm /cosim_eth0
+
+# 终端 4: 连接串口交互
+python3 -c "
+import socket, time
+s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+s.connect('/tmp/qemu-serial.sock')
+s.settimeout(5)
+# drain boot output
+try:
+    while True: s.recv(4096)
+except: pass
+# login
+s.sendall(b'\n'); time.sleep(1); s.recv(4096)
+s.sendall(b'root\n'); time.sleep(3); s.recv(4096)
+# configure network
+s.sendall(b'ip addr add 10.0.0.2/24 dev eth0\n'); time.sleep(3)
+s.sendall(b'ip link set eth0 up\n'); time.sleep(3)
+# ping test
+s.sendall(b'ping -c 5 -W 600 10.0.0.1\n')
+# read output...
+"
+```
+
+> **提示：** TCP 跨机模式也支持 `--serial-sock`，操作方式完全相同。
+
+### 2.4 波形查看
 
 VCS 默认输出 `cosim_wave.fsdb`（Verdi 打开）：
 ```bash

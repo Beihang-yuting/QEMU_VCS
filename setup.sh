@@ -1102,6 +1102,12 @@ case "$SETUP_MODE" in
         echo "  手动启动单个组件:"
         echo "    ./cosim.sh start qemu --shm /cosim0 --sock /tmp/cosim0.sock"
         echo "    ./cosim.sh start vcs  --shm /cosim0 --sock /tmp/cosim0.sock --role A"
+        echo ""
+        echo "  手动启动 + 串口交互（可在 Guest 中执行 ping/iperf 等测试）:"
+        echo "    ./cosim.sh start qemu --shm /cosim0 --sock /tmp/cosim0.sock \\"
+        echo "        --serial-sock /tmp/qemu-serial.sock --drive <rootfs路径>"
+        echo "    # 然后用 python/socat 连接串口:"
+        echo "    python3 -c \"import socket; s=socket.socket(socket.AF_UNIX); s.connect('/tmp/qemu-serial.sock'); ...\""
         ;;
     qemu-only)
         echo "  启动 QEMU 侧（TCP server，监听等待 VCS 连接）:"
