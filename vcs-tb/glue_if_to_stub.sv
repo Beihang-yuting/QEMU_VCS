@@ -67,7 +67,7 @@ module glue_if_to_stub (
     // Stub pass-through
     input  logic         stub_notify_valid,
     input  logic [15:0]  stub_notify_queue,
-    output logic         stub_isr_set
+    input  logic         stub_isr_set
 );
 
     // =========================================================================
@@ -521,10 +521,9 @@ module glue_if_to_stub (
     // Stub pass-through
     // stub_notify_valid / stub_notify_queue are outputs from pcie_ep_stub and
     // are passed straight through this module's ports for tb_top wiring.
-    // stub_isr_set is driven by tb_top directly; this glue layer does not
-    // originate ISR set requests, so tie to 0.
+    // stub_isr_set: input from cosim_vip_top, passed through to ep stub.
+    // glue layer does not originate ISR set requests.
     // =========================================================================
-    assign stub_isr_set = 1'b0;
 
     // =========================================================================
     // Debug display (simulation only)
