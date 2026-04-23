@@ -793,9 +793,19 @@ if [ "$NEED_QEMU" = true ]; then
                         fi
                     done
                 fi
+                # 内网环境：删除 .wrap 文件防止 meson 尝试从网上下载 subproject
+                if [ -d "subprojects" ]; then
+                    local wrap_count
+                    wrap_count=$(find subprojects -name "*.wrap" 2>/dev/null | wc -l)
+                    if [ "$wrap_count" -gt 0 ]; then
+                        info "删除 ${wrap_count} 个 subproject .wrap 文件（内网无法下载）"
+                        find subprojects -name "*.wrap" -delete
+                    fi
+                fi
                 info "配置 QEMU (--target-list=x86_64-softmmu)..."
                 ./configure \
                     --target-list=x86_64-softmmu \
+                    --disable-fdt \
                     --extra-cflags="-I${PROJECT_DIR}/bridge/common -I${PROJECT_DIR}/bridge/qemu" \
                     --extra-ldflags="-L${BRIDGE_LIB_DIR} -lcosim_bridge -Wl,-rpath,${BRIDGE_LIB_DIR}"
             else
