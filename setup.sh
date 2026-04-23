@@ -1111,7 +1111,7 @@ if [ "$NEED_QEMU" = true ]; then
     check_artifact "qemu-system-x86_64" "${QEMU_DIR}/build/qemu-system-x86_64"
 fi
 if [ "$NEED_VCS" = true ]; then
-    check_artifact "simv (VCS)" "${VCS_SIM_DIR}/simv"
+    check_artifact "simv_vip (VCS)" "${BUILD_DIR}/simv_vip"
 fi
 if [ "$NEED_TAP_BRIDGE" = true ]; then
     check_artifact "eth_tap_bridge" "${PROJECT_DIR}/tools/eth_tap_bridge"
