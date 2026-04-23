@@ -14,8 +14,37 @@ static int g_sock_fd = -1;
 static int g_initialized = 0;
 static cosim_transport_t *g_transport = NULL;
 
-/* Counter for TLP_READY messages consumed during DMA waits. */
+/* Counter for TLP_READY messages consumed during DMA waits (SHM mode only). */
 static int g_pending_tlp_ready = 0;
+
+/* TLP cache: TCP 模式 DMA read 期间消费的 TLP_READY 会立即 recv_tlp 缓存在此，
+ * poll_tlp 优先从缓存读取，避免 pending 计数与 data channel 错位。 */
+#define TLP_CACHE_SIZE 128
+static tlp_entry_t g_tlp_cache[TLP_CACHE_SIZE];
+static int g_tlp_cache_head = 0;
+static int g_tlp_cache_tail = 0;
+
+static int tlp_cache_push(const tlp_entry_t *e) {
+    int next = (g_tlp_cache_head + 1) % TLP_CACHE_SIZE;
+    if (next == g_tlp_cache_tail) {
+        fprintf(stderr, "[VCS Bridge] TLP cache full! dropping TLP\n");
+        return -1;
+    }
+    g_tlp_cache[g_tlp_cache_head] = *e;
+    g_tlp_cache_head = next;
+    return 0;
+}
+
+static int tlp_cache_pop(tlp_entry_t *e) {
+    if (g_tlp_cache_head == g_tlp_cache_tail) return -1;
+    *e = g_tlp_cache[g_tlp_cache_tail];
+    g_tlp_cache_tail = (g_tlp_cache_tail + 1) % TLP_CACHE_SIZE;
+    return 0;
+}
+
+static int tlp_cache_count(void) {
+    return (g_tlp_cache_head - g_tlp_cache_tail + TLP_CACHE_SIZE) % TLP_CACHE_SIZE;
+}
 
 /* Debug heartbeat counter — prints status every N poll iterations */
 static int g_poll_count = 0;
@@ -53,29 +82,27 @@ int bridge_vcs_poll_tlp(unsigned char *tlp_type, unsigned long long *addr,
                          unsigned int *data, int *len, int *tag) {
     g_poll_count++;
     if ((g_poll_count % 100000) == 0) {
-        fprintf(stderr, "[VCS Bridge] heartbeat: poll_count=%d pending_tlp=%d\n",
-                g_poll_count, g_pending_tlp_ready);
+        fprintf(stderr, "[VCS Bridge] heartbeat: poll_count=%d cached_tlp=%d\n",
+                g_poll_count, tlp_cache_count());
     }
 
     /* ---- TCP transport path ---- */
     if (g_transport) {
         tlp_entry_t entry;
 
-        /* Drain pending TLP_READY consumed during DMA waits */
-        if (g_pending_tlp_ready > 0) {
-            if (g_transport->recv_tlp(g_transport, &entry) == 0) {
-                g_pending_tlp_ready--;
-                g_last_entry = entry;
-                *tlp_type = entry.type;
-                *addr = entry.addr;
-                *len = entry.len;
-                *tag = entry.tag;
-                int words = (entry.len + 3) / 4;
-                for (int i = 0; i < words && i < 16; i++)
-                    memcpy(&data[i], &entry.data[i * 4], 4);
-                return 0;
-            }
-            g_pending_tlp_ready = 0;
+        /* 优先从 TLP 缓存读取（DMA read 期间缓存的 TLP） */
+        if (tlp_cache_pop(&entry) == 0) {
+            fprintf(stderr, "[VCS poll#%d] cached TLP type=%d tag=%d addr=0x%llx\n",
+                    g_poll_count, entry.type, entry.tag, (unsigned long long)entry.addr);
+            g_last_entry = entry;
+            *tlp_type = entry.type;
+            *addr = entry.addr;
+            *len = entry.len;
+            *tag = entry.tag;
+            int words = (entry.len + 3) / 4;
+            for (int i = 0; i < words && i < 16; i++)
+                memcpy(&data[i], &entry.data[i * 4], 4);
+            return 0;
         }
 
         /* Non-blocking check for TLP_READY on ctrl channel */
@@ -325,7 +352,13 @@ int bridge_vcs_dma_read_sync(unsigned long long host_addr,
             }
             if (msg.type == SYNC_MSG_SHUTDOWN) return -1;
             if (msg.type == SYNC_MSG_TLP_READY) {
-                g_pending_tlp_ready++;
+                /* 立即 recv_tlp 并缓存，避免 data channel 消息错位 */
+                tlp_entry_t cached_tlp;
+                if (g_transport->recv_tlp(g_transport, &cached_tlp) == 0) {
+                    tlp_cache_push(&cached_tlp);
+                } else {
+                    fprintf(stderr, "[VCS Bridge] dma_wait: recv_tlp for cache failed\n");
+                }
                 continue;
             }
             if (msg.type == SYNC_MSG_DMA_CPL) {
@@ -466,7 +499,13 @@ int bridge_vcs_dma_write_sync(unsigned long long host_addr,
             }
             if (msg.type == SYNC_MSG_SHUTDOWN) return -1;
             if (msg.type == SYNC_MSG_TLP_READY) {
-                g_pending_tlp_ready++;
+                /* 立即 recv_tlp 并缓存，避免 data channel 消息错位 */
+                tlp_entry_t cached_tlp;
+                if (g_transport->recv_tlp(g_transport, &cached_tlp) == 0) {
+                    tlp_cache_push(&cached_tlp);
+                } else {
+                    fprintf(stderr, "[VCS Bridge] dma_wait: recv_tlp for cache failed\n");
+                }
                 continue;
             }
             if (msg.type == SYNC_MSG_DMA_CPL) {
@@ -626,7 +665,13 @@ int bridge_dma_read_bytes(uint64_t host_addr, uint8_t *buf, uint32_t len) {
             }
             if (msg.type == SYNC_MSG_SHUTDOWN) return -1;
             if (msg.type == SYNC_MSG_TLP_READY) {
-                g_pending_tlp_ready++;
+                /* 立即 recv_tlp 并缓存，避免 data channel 消息错位 */
+                tlp_entry_t cached_tlp;
+                if (g_transport->recv_tlp(g_transport, &cached_tlp) == 0) {
+                    tlp_cache_push(&cached_tlp);
+                } else {
+                    fprintf(stderr, "[VCS Bridge] dma_wait: recv_tlp for cache failed\n");
+                }
                 continue;
             }
             if (msg.type == SYNC_MSG_DMA_CPL) {
@@ -764,7 +809,13 @@ int bridge_dma_write_bytes(uint64_t host_addr, const uint8_t *buf, uint32_t len)
             }
             if (msg.type == SYNC_MSG_SHUTDOWN) return -1;
             if (msg.type == SYNC_MSG_TLP_READY) {
-                g_pending_tlp_ready++;
+                /* 立即 recv_tlp 并缓存，避免 data channel 消息错位 */
+                tlp_entry_t cached_tlp;
+                if (g_transport->recv_tlp(g_transport, &cached_tlp) == 0) {
+                    tlp_cache_push(&cached_tlp);
+                } else {
+                    fprintf(stderr, "[VCS Bridge] dma_wait: recv_tlp for cache failed\n");
+                }
                 continue;
             }
             if (msg.type == SYNC_MSG_DMA_CPL) {
