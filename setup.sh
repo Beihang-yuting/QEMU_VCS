@@ -783,7 +783,7 @@ if [ "$NEED_QEMU" = true ]; then
                     rm -rf build
                 fi
                 # 检测网络连通性，决定 subproject 和 fdt 策略
-                local HAS_NETWORK=false
+                HAS_NETWORK=false
                 if timeout 5 git ls-remote https://gitlab.com/qemu-project/dtc.git HEAD &>/dev/null; then
                     HAS_NETWORK=true
                     ok "外网可达，保留 subproject .wrap 文件（meson 可自动下载依赖）"
@@ -798,7 +798,6 @@ if [ "$NEED_QEMU" = true ]; then
                             fi
                         done
                         # 删除 .wrap 文件防止 meson 尝试网络下载
-                        local wrap_count
                         wrap_count=$(find subprojects -name "*.wrap" 2>/dev/null | wc -l)
                         if [ "$wrap_count" -gt 0 ]; then
                             info "  删除 ${wrap_count} 个 .wrap 文件"
@@ -808,7 +807,7 @@ if [ "$NEED_QEMU" = true ]; then
                 fi
 
                 # configure 参数：内网禁用 fdt（避免下载 dtc），外网保留全部功能
-                local QEMU_EXTRA_OPTS=""
+                QEMU_EXTRA_OPTS=""
                 if [ "$HAS_NETWORK" = false ]; then
                     QEMU_EXTRA_OPTS="--disable-fdt"
                 fi
