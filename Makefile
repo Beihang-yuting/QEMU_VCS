@@ -20,7 +20,8 @@ clean:
 	rm -rf $(BUILD_DIR)
 
 # ===== VCS 仿真目标 =====
-VCS_FLAGS = -full64 -sverilog -timescale=1ns/1ps +v2k -debug_access+all
+# -cc gcc: 强制用 gcc（C 编译器）编译 DPI-C .c 文件，避免 g++ 的 C++ 严格类型检查
+VCS_FLAGS = -full64 -sverilog -timescale=1ns/1ps +v2k -debug_access+all -cc gcc
 VCS_UVM   = -ntb_opts uvm-1.2
 
 VIP_SRC_DIR = pcie_tl_vip/src
