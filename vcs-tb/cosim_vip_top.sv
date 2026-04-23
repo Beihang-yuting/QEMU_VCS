@@ -229,15 +229,30 @@ module cosim_vip_top;
         end
     end
 
-    /* NOTIFY edge-detect → virtqueue TX / RX-buffer-post */
+    /* NOTIFY 事件传递：always_ff 检测边沿并触发 event，
+     * initial 块等待 event 并处理（可安全阻塞 DPI-C）。
+     * 用 event + 独立变量避免 always_ff/initial 多驱动冲突。 */
+    event        notify_event;
+    logic [15:0] notify_event_queue;
+
     always_ff @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
             stub_notify_valid_q <= 1'b0;
         end else begin
             stub_notify_valid_q <= stub_notify_valid;
             if (stub_notify_valid && !stub_notify_valid_q) begin
-                handle_vio_notify(stub_notify_queue);
+                notify_event_queue <= stub_notify_queue;
+                -> notify_event;
             end
+        end
+    end
+
+    /* NOTIFY 处理循环：在 initial 块中等待 event，可安全调用阻塞 DPI-C */
+    initial begin
+        @(posedge rst_n);
+        forever begin
+            @(notify_event);
+            handle_vio_notify(notify_event_queue);
         end
     end
 

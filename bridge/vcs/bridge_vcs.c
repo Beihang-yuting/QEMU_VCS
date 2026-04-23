@@ -19,7 +19,7 @@ static int g_pending_tlp_ready = 0;
 
 /* TLP cache: TCP 模式 DMA read 期间消费的 TLP_READY 会立即 recv_tlp 缓存在此，
  * poll_tlp 优先从缓存读取，避免 pending 计数与 data channel 错位。 */
-#define TLP_CACHE_SIZE 128
+#define TLP_CACHE_SIZE 1024
 static tlp_entry_t g_tlp_cache[TLP_CACHE_SIZE];
 static int g_tlp_cache_head = 0;
 static int g_tlp_cache_tail = 0;
