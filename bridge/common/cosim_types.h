@@ -4,9 +4,18 @@
 #include <stdint.h>
 #include "compat_atomic.h"
 
-/* _Static_assert 兼容：C11+ 原生支持，C99 下忽略 */
-#if !defined(__cplusplus) && (!defined(__STDC_VERSION__) || __STDC_VERSION__ < 201112L)
-#define _Static_assert(expr, msg)   /* C99: skip */
+/* _Static_assert 兼容：
+ * - C11+: 原生支持
+ * - C99:  不支持，定义为空
+ * - C++:  用 static_assert 替代（C++11+），老版本跳过 */
+#ifdef __cplusplus
+#if __cplusplus >= 201103L
+#define _Static_assert(expr, msg)  static_assert(expr, msg)
+#else
+#define _Static_assert(expr, msg)
+#endif
+#elif !defined(__STDC_VERSION__) || __STDC_VERSION__ < 201112L
+#define _Static_assert(expr, msg)
 #endif
 
 #define COSIM_SHM_MAGIC       0xDEADBEEF

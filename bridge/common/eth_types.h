@@ -3,10 +3,20 @@
 
 #include <stdint.h>
 
-/* _Static_assert 兼容：C11+ 原生支持，C99 下忽略 */
-#if !defined(__cplusplus) && (!defined(__STDC_VERSION__) || __STDC_VERSION__ < 201112L)
+/* _Static_assert 兼容（同 cosim_types.h） */
+#ifdef __cplusplus
+#if __cplusplus >= 201103L
 #ifndef _Static_assert
-#define _Static_assert(expr, msg)   /* C99: skip */
+#define _Static_assert(expr, msg)  static_assert(expr, msg)
+#endif
+#else
+#ifndef _Static_assert
+#define _Static_assert(expr, msg)
+#endif
+#endif
+#elif !defined(__STDC_VERSION__) || __STDC_VERSION__ < 201112L
+#ifndef _Static_assert
+#define _Static_assert(expr, msg)
 #endif
 #endif
 
