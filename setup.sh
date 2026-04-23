@@ -782,6 +782,17 @@ if [ "$NEED_QEMU" = true ]; then
                     warn "build/ 目录已存在但非 QEMU configure 创建，清理..."
                     rm -rf build
                 fi
+                # tarball 解压的 QEMU 可能有空的 subproject 目录（缺 meson.build），
+                # 会导致 meson setup 报 "Subproject exists but has no meson.build file"。
+                # 删除这些空壳目录让 configure 跳过。
+                if [ -d "subprojects" ]; then
+                    for _sp_dir in subprojects/*/; do
+                        if [ -d "$_sp_dir" ] && [ ! -f "$_sp_dir/meson.build" ]; then
+                            warn "删除空 QEMU subproject: $_sp_dir"
+                            rm -rf "$_sp_dir"
+                        fi
+                    done
+                fi
                 info "配置 QEMU (--target-list=x86_64-softmmu)..."
                 ./configure \
                     --target-list=x86_64-softmmu \
