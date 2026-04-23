@@ -613,7 +613,29 @@ if [ "$NEED_QEMU" = true ]; then
         info "编译 glib ${GLIB_BUILD_VER}..."
         cd "$GLIB_BUILD_DIR"
         if [ ! -f "_build/build.ninja" ]; then
-            meson setup _build --prefix=/usr/local
+            # 清理损坏的旧构建目录（避免 meson 报 "Neither source directory nor build directory" 错误）
+            if [ -d "_build" ]; then
+                warn "清理旧 glib 构建目录 _build/..."
+                rm -rf _build
+            fi
+            # 自动检测高版本 gcc（meson 需要可用的 C 编译器）
+            GLIB_CC="${CC:-}"
+            if [ -z "$GLIB_CC" ]; then
+                for cc_candidate in gcc-12 gcc-11 gcc-9 gcc; do
+                    if command -v "$cc_candidate" &>/dev/null; then
+                        GLIB_CC="$cc_candidate"
+                        break
+                    fi
+                done
+            fi
+            info "使用编译器: ${GLIB_CC:-cc}"
+            info "提示: 如果 meson 报 'Compiler cc can not compile programs'，请设置 CC 环境变量:"
+            info "  CC=/path/to/gcc-9 ./setup.sh"
+            if [ -n "$GLIB_CC" ]; then
+                CC="$GLIB_CC" meson setup _build --prefix=/usr/local
+            else
+                meson setup _build --prefix=/usr/local
+            fi
         fi
         ninja -C _build
 
