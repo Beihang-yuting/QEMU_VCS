@@ -325,6 +325,57 @@ class cosim_rc_driver extends pcie_tl_rc_driver;
     endtask
 
     // -----------------------------------------------------------------------
+    // handle_completion override
+    //   VIP env's tlm_loopback_ep_to_rc calls handle_completion() directly,
+    //   bypassing completion_loop. Override to also forward to QEMU via DPI-C.
+    // -----------------------------------------------------------------------
+    virtual function bit handle_completion(pcie_tl_cpl_tlp cpl);
+        bit result;
+        int vip_tag_int = int'(cpl.tag);
+        int qemu_tag;
+        int ret;
+
+        // Call base class first (tag matching + release)
+        result = super.handle_completion(cpl);
+
+        // Forward to QEMU if we have a tag mapping
+        if (vip_tag_to_qemu_tag.exists(vip_tag_int)) begin
+            qemu_tag = int'(vip_tag_to_qemu_tag[vip_tag_int]);
+
+            // Clean up maps
+            vip_tag_to_qemu_tag.delete(vip_tag_int);
+            qemu_tag_to_vip_tag.delete(qemu_tag[7:0]);
+
+            // Forward completion data to QEMU via DPI-C
+            for (int i = 0; i < 16; i++)
+                bridge_vcs_set_cpl_data(i, 0);
+            if (cpl.payload.size() >= 4)
+                bridge_vcs_set_cpl_data(0, {cpl.payload[0], cpl.payload[1],
+                                             cpl.payload[2], cpl.payload[3]});
+            else if (cpl.payload.size() > 0) begin
+                logic [31:0] d = 0;
+                for (int i = 0; i < cpl.payload.size(); i++)
+                    d[((3-i)*8) +: 8] = cpl.payload[i];
+                bridge_vcs_set_cpl_data(0, d);
+            end
+
+            ret = bridge_vcs_send_cpl_scalar(qemu_tag, 1);
+            if (ret != 0)
+                `uvm_error(get_name(),
+                    $sformatf("handle_completion: bridge send failed ret=%0d qemu_tag=0x%02h",
+                              ret, qemu_tag))
+            total_cpl_count++;
+
+            `uvm_info(get_name(),
+                $sformatf("Completion→QEMU: vip_tag=0x%03h qemu_tag=0x%02h status=%s",
+                          cpl.tag, qemu_tag, cpl.cpl_status.name()),
+                UVM_MEDIUM)
+        end
+
+        return result;
+    endfunction
+
+    // -----------------------------------------------------------------------
     // dma_msi_loop
     //   Placeholder for DMA-initiated requests and MSI handling.
     //   Exits cleanly when shutdown_event fires.
