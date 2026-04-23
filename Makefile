@@ -47,7 +47,7 @@ BRIDGE_C_SRCS = \
 	bridge/common/transport_tcp.c
 
 VCS_CFLAGS = -I $(CURDIR)/bridge/common -I $(CURDIR)/bridge/vcs -I $(CURDIR)/bridge/qemu -I $(CURDIR)/bridge/eth -std=c99 -D_POSIX_C_SOURCE=200112L
-VCS_LDFLAGS = -lrt -lpthread
+VCS_LDFLAGS = -Wl,--no-as-needed -lrt -lpthread
 
 # Legacy 模式
 .PHONY: vcs-legacy
