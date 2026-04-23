@@ -122,12 +122,22 @@ int bridge_vcs_poll_tlp(unsigned char *tlp_type, unsigned long long *addr,
         if (tlp_cache_pop(&entry) == 0)
             goto return_entry;
 
-        /* Phase 4: 带超时等待 — 跨机 TCP 传输延迟可达数毫秒
-         * 使用较短超时（5ms）平衡响应速度与仿真推进效率。
-         * 超时期间 VCS 仿真暂停（DPI-C 阻塞），不影响正确性。 */
-        ret = g_transport->recv_sync_timed(g_transport, &msg, 5);
-        if (ret < 0) return -1;
-        if (ret == 1) return 1;  /* 5ms 内无新 TLP */
+        /* Phase 4: 自适应超时等待 — 跨机 TCP 传输延迟可达数毫秒。
+         * 刚收到过 TLP 时用短超时（1ms）快速响应后续包；
+         * 连续空 poll 后递增到较长超时（50ms）减少 CPU 空转；
+         * 收到 TLP 后重置为短超时。 */
+        {
+            static int empty_streak = 0;
+            int timeout_ms = (empty_streak < 5) ? 1 :
+                             (empty_streak < 20) ? 5 : 50;
+            ret = g_transport->recv_sync_timed(g_transport, &msg, timeout_ms);
+            if (ret < 0) return -1;
+            if (ret == 1) {
+                empty_streak++;
+                return 1;  /* 超时，无新 TLP */
+            }
+            empty_streak = 0;  /* 收到数据，重置 */
+        }
         if (msg.type == SYNC_MSG_SHUTDOWN) return -1;
         if (msg.type == SYNC_MSG_TLP_READY) {
             if (g_transport->recv_tlp(g_transport, &entry) < 0) return 1;
