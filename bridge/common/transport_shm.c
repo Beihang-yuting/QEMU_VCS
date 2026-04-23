@@ -203,10 +203,10 @@ static void shm_close(cosim_transport_t *t) {
 /* ========== 工厂函数 ========== */
 
 cosim_transport_t *transport_shm_create(const transport_cfg_t *cfg) {
-    cosim_transport_t *t = calloc(1, sizeof(*t));
+    cosim_transport_t *t = (cosim_transport_t *)calloc(1, sizeof(*t));
     if (!t) return NULL;
 
-    transport_shm_priv_t *p = calloc(1, sizeof(*p));
+    transport_shm_priv_t *p = (transport_shm_priv_t *)calloc(1, sizeof(*p));
     if (!p) { free(t); return NULL; }
 
     p->is_server = cfg->is_server;

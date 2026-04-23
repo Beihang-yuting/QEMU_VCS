@@ -647,10 +647,10 @@ static int tcp_do_handshake_client(transport_tcp_priv_t *p) {
 /* ========== 工厂函数 ========== */
 
 cosim_transport_t *transport_tcp_create(const transport_cfg_t *cfg) {
-    cosim_transport_t *t = calloc(1, sizeof(*t));
+    cosim_transport_t *t = (cosim_transport_t *)calloc(1, sizeof(*t));
     if (!t) return NULL;
 
-    transport_tcp_priv_t *p = calloc(1, sizeof(*p));
+    transport_tcp_priv_t *p = (transport_tcp_priv_t *)calloc(1, sizeof(*p));
     if (!p) { free(t); return NULL; }
 
     p->ctrl_fd = -1;
