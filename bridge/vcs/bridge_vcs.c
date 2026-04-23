@@ -806,24 +806,27 @@ int bridge_dma_write_bytes(uint64_t host_addr, const uint8_t *buf, uint32_t len)
     if (g_transport) {
         uint32_t tag = wr_tag++;
 
-        /* Send data first so QEMU has it when processing the request */
-        if (g_transport->send_dma_data(g_transport, tag, DMA_DIR_WRITE,
-                                        host_addr, buf, len) < 0) {
-            fprintf(stderr, "[VCS Bridge] dma_write_bytes: send_dma_data failed\n");
-            return -1;
-        }
-
+        /* 先发 DMA_REQ 再发 DMA_DATA。
+         * irq_poller 用 MSG_PEEK 按类型匹配，DMA_DATA 不是 DMA_REQ 类型，
+         * 如果 DMA_DATA 在前会堵住 aux channel。
+         * QEMU cosim_dma_cb 收到 DMA_REQ(WRITE) 后再 recv_dma_data。 */
         dma_req_t req = {
             .tag = tag,
             .direction = DMA_DIR_WRITE,
             .host_addr = host_addr,
             .len = len,
-            .dma_offset = 0,  /* unused in TCP mode */
+            .dma_offset = 0,
             .timestamp = 0,
         };
 
         if (g_transport->send_dma_req(g_transport, &req) < 0) {
             fprintf(stderr, "[VCS Bridge] dma_write_bytes: send_dma_req failed\n");
+            return -1;
+        }
+
+        if (g_transport->send_dma_data(g_transport, tag, DMA_DIR_WRITE,
+                                        host_addr, buf, len) < 0) {
+            fprintf(stderr, "[VCS Bridge] dma_write_bytes: send_dma_data failed\n");
             return -1;
         }
 
