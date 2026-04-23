@@ -777,6 +777,11 @@ if [ "$NEED_QEMU" = true ]; then
             cd "$PROJECT_DIR"
         else
             if [ ! -f "build/build.ninja" ]; then
+                # 清理非 QEMU configure 创建的 build 目录（避免冲突）
+                if [ -d "build" ] && [ ! -f "build/config-host.mak" ]; then
+                    warn "build/ 目录已存在但非 QEMU configure 创建，清理..."
+                    rm -rf build
+                fi
                 info "配置 QEMU (--target-list=x86_64-softmmu)..."
                 ./configure \
                     --target-list=x86_64-softmmu \
