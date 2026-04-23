@@ -293,3 +293,106 @@ grep -c 'MSI' /tmp/qemu_e2e.log
 | Guest `eth0 not found` | 用 buildroot rootfs（含 virtio_net 驱动），非 Alpine initramfs |
 | `tag mismatch` | 确认 bridge_qemu.c 含 stale cpl drain 循环 |
 | 仿真速度慢 | 正常（RTL 仿真限制），ping 超时设 600s+ |
+
+---
+
+## 八、用户扩展指南
+
+### 8.1 自定义 VCS Testbench
+
+```bash
+# 修改 EP 行为（寄存器/completion 逻辑）
+vi vcs-tb/pcie_ep_stub.sv
+
+# 修改 VIP 顶层（NOTIFY 处理/RX poll/波形 dump）
+vi vcs-tb/cosim_vip_top.sv
+
+# 修改 glue 信号转换
+vi vcs-tb/glue_if_to_stub.sv
+
+# 重编
+make vcs-vip
+```
+
+### 8.2 新增 DPI-C 函数
+
+1. 在 `bridge/vcs/bridge_vcs.c` 添加 C 函数
+2. 在 `bridge/vcs/bridge_vcs.sv` 添加 `import "DPI-C"` 声明
+3. 在 `vcs-tb/cosim_pkg.sv` 导入（`import cosim_bridge_pkg::your_func`）
+4. 在 SV testbench 中调用
+5. `make vcs-vip` 重编
+
+### 8.3 新增 UVM 测试 Sequence
+
+1. 在 `pcie_tl_vip/src/seq/` 下新建 sequence 文件
+2. 在 `pcie_tl_vip/src/pcie_tl_pkg.sv` 中 include
+3. 在 `vcs-tb/cosim_test.sv` 中引用或替换默认 sequence
+4. `make vcs-vip` 重编
+
+### 8.4 自定义 Guest
+
+**方式 A：Buildroot（推荐）**
+```bash
+cd ~/workspace/buildroot
+make menuconfig    # 启用 iperf3/netcat 等工具
+make               # 产出 bzImage + rootfs.ext4
+```
+
+**方式 B：自定义 initramfs**
+```bash
+./scripts/build_guest_initramfs.sh phase4   # 构建特定变体
+```
+
+### 8.5 编译命令速查
+
+| 命令 | 用途 |
+|------|------|
+| `make bridge` | 仅编译 Bridge 共享库 |
+| `make vcs-vip` | 编译 VCS VIP 模式 (UVM + pcie_tl_vip) |
+| `make vcs-vip-perf` | VIP + 性能统计 |
+| `make test-unit` | 运行单元测试 |
+| `make test-integration` | 运行集成测试 |
+| `cmake -B build && cmake --build build` | CMake 编译 Bridge |
+| `cd qemu/build && ninja` | 重编 QEMU |
+
+### 8.6 Bridge C 文件说明
+
+| 文件 | 用途 | 修改场景 |
+|------|------|---------|
+| `bridge/common/cosim_types.h` | TLP/CPL/DMA/MSI 数据结构 | 新增字段 |
+| `bridge/common/cosim_transport.h` | 传输层抽象接口 | 新增传输方式 |
+| `bridge/common/transport_tcp.c` | TCP transport 实现 | 修改 TCP 协议 |
+| `bridge/common/transport_shm.c` | SHM transport 实现 | 修改 SHM 布局 |
+| `bridge/common/ring_buffer.c` | 无锁环形缓冲区 | 调整队列大小 |
+| `bridge/common/shm_layout.c` | SHM 内存布局（4MB） | 修改 SHM 结构 |
+| `bridge/qemu/bridge_qemu.c` | QEMU 侧 bridge API | 修改 TLP 发送/completion 等待 |
+| `bridge/qemu/irq_poller.c` | QEMU IRQ/DMA 轮询线程 | 修改 DMA/MSI 处理 |
+| `bridge/vcs/bridge_vcs.c` | VCS 侧 DPI-C 函数 | 新增 DPI-C 接口 |
+| `bridge/vcs/virtqueue_dma.c` | Virtqueue TX/RX DMA | 修改 virtio 数据面 |
+| `bridge/eth/eth_port.c` | ETH SHM 读写 | 修改以太网处理 |
+| `qemu-plugin/cosim_pcie_rc.c` | QEMU PCIe RC 设备 | 修改 MMIO/DMA/MSI 行为 |
+
+---
+
+## 九、调试
+
+详细 GDB 调试指南参见 [GDB-Debugging-Guide.md](GDB-Debugging-Guide.md)。
+
+### 快速调试技巧
+
+```bash
+# QEMU 侧日志监控
+tail -f /tmp/qemu_e2e.log | grep -E "DMA|MSI|error"
+
+# VCS 侧日志监控
+tail -f /tmp/vcs_e2e.log | grep -E "VQ-TX|VQ-RX|NOTIFY|error"
+
+# 波形调试
+verdi -ssf cosim_wave.fsdb &    # 打开 Verdi 查看波形
+
+# 进程状态
+./cosim.sh status
+
+# 清理环境
+./cosim.sh clean
+```
