@@ -782,30 +782,41 @@ if [ "$NEED_QEMU" = true ]; then
                     warn "build/ 目录已存在但非 QEMU configure 创建，清理..."
                     rm -rf build
                 fi
-                # tarball 解压的 QEMU 可能有空的 subproject 目录（缺 meson.build），
-                # 会导致 meson setup 报 "Subproject exists but has no meson.build file"。
-                # 删除这些空壳目录让 configure 跳过。
-                if [ -d "subprojects" ]; then
-                    for _sp_dir in subprojects/*/; do
-                        if [ -d "$_sp_dir" ] && [ ! -f "$_sp_dir/meson.build" ]; then
-                            warn "删除空 QEMU subproject: $_sp_dir"
-                            rm -rf "$_sp_dir"
+                # 检测网络连通性，决定 subproject 和 fdt 策略
+                local HAS_NETWORK=false
+                if timeout 5 git ls-remote https://gitlab.com/qemu-project/dtc.git HEAD &>/dev/null; then
+                    HAS_NETWORK=true
+                    ok "外网可达，保留 subproject .wrap 文件（meson 可自动下载依赖）"
+                else
+                    warn "外网不可达（内网环境），清理 subproject 防止下载超时"
+                    if [ -d "subprojects" ]; then
+                        # 删除空 subproject 目录
+                        for _sp_dir in subprojects/*/; do
+                            if [ -d "$_sp_dir" ] && [ ! -f "$_sp_dir/meson.build" ]; then
+                                info "  删除空 subproject: $_sp_dir"
+                                rm -rf "$_sp_dir"
+                            fi
+                        done
+                        # 删除 .wrap 文件防止 meson 尝试网络下载
+                        local wrap_count
+                        wrap_count=$(find subprojects -name "*.wrap" 2>/dev/null | wc -l)
+                        if [ "$wrap_count" -gt 0 ]; then
+                            info "  删除 ${wrap_count} 个 .wrap 文件"
+                            find subprojects -name "*.wrap" -delete
                         fi
-                    done
-                fi
-                # 内网环境：删除 .wrap 文件防止 meson 尝试从网上下载 subproject
-                if [ -d "subprojects" ]; then
-                    local wrap_count
-                    wrap_count=$(find subprojects -name "*.wrap" 2>/dev/null | wc -l)
-                    if [ "$wrap_count" -gt 0 ]; then
-                        info "删除 ${wrap_count} 个 subproject .wrap 文件（内网无法下载）"
-                        find subprojects -name "*.wrap" -delete
                     fi
                 fi
+
+                # configure 参数：内网禁用 fdt（避免下载 dtc），外网保留全部功能
+                local QEMU_EXTRA_OPTS=""
+                if [ "$HAS_NETWORK" = false ]; then
+                    QEMU_EXTRA_OPTS="--disable-fdt"
+                fi
+
                 info "配置 QEMU (--target-list=x86_64-softmmu)..."
                 ./configure \
                     --target-list=x86_64-softmmu \
-                    --disable-fdt \
+                    $QEMU_EXTRA_OPTS \
                     --extra-cflags="-I${PROJECT_DIR}/bridge/common -I${PROJECT_DIR}/bridge/qemu" \
                     --extra-ldflags="-L${BRIDGE_LIB_DIR} -lcosim_bridge -Wl,-rpath,${BRIDGE_LIB_DIR}"
             else
