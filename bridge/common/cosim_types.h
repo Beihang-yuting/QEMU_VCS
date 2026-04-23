@@ -4,6 +4,11 @@
 #include <stdint.h>
 #include "compat_atomic.h"
 
+/* _Static_assert 兼容：C11+ 原生支持，C99 下忽略 */
+#if !defined(__cplusplus) && (!defined(__STDC_VERSION__) || __STDC_VERSION__ < 201112L)
+#define _Static_assert(expr, msg)   /* C99: skip */
+#endif
+
 #define COSIM_SHM_MAGIC       0xDEADBEEF
 #define COSIM_PROTOCOL_VER    1
 #define COSIM_TLP_DATA_SIZE   64

@@ -3,6 +3,13 @@
 
 #include <stdint.h>
 
+/* _Static_assert 兼容：C11+ 原生支持，C99 下忽略 */
+#if !defined(__cplusplus) && (!defined(__STDC_VERSION__) || __STDC_VERSION__ < 201112L)
+#ifndef _Static_assert
+#define _Static_assert(expr, msg)   /* C99: skip */
+#endif
+#endif
+
 /* Maximum Ethernet frame payload, including jumbo (9K + overhead) */
 #define ETH_FRAME_MAX_DATA     9216u
 /* Number of slots per direction in ETH SHM (A->B and B->A).
