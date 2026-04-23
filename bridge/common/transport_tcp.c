@@ -288,26 +288,47 @@ static int tcp_recv_dma_req(cosim_transport_t *t, dma_req_t *req) {
     return tcp_recv_all(fd, req, sizeof(*req));
 }
 
+/* 非阻塞 peek aux/data channel 下一条消息类型（不消费 buffer）
+ * 返回: msg_type (>=0), 或 -1=无数据/错误 */
+int tcp_peek_aux_msg_type(int fd) {
+    struct pollfd pfd = { .fd = fd, .events = POLLIN };
+    if (poll(&pfd, 1, 0) <= 0) return -1;
+    if (pfd.revents & (POLLERR | POLLHUP)) return -1;
+    tcp_msg_hdr_t hdr;
+    int n = recv(fd, &hdr, sizeof(hdr), MSG_PEEK);
+    if (n < (int)sizeof(hdr)) return -1;
+    return (int)hdr.msg_type;
+}
+
+/* 跳过 aux channel 上一条不需要的消息（读完整 header+payload 丢弃）
+ * 用于处理 irq_poller 不关心的消息类型（如 ETH_FRAME） */
+int tcp_skip_aux_msg(int fd) {
+    tcp_msg_hdr_t hdr;
+    if (tcp_recv_hdr(fd, &hdr) < 0) return -1;
+    if (hdr.payload_len > 0) {
+        uint8_t discard[4096];
+        uint32_t remaining = hdr.payload_len;
+        while (remaining > 0) {
+            uint32_t chunk = remaining < sizeof(discard) ? remaining : sizeof(discard);
+            if (tcp_recv_all(fd, discard, chunk) < 0) return -1;
+            remaining -= chunk;
+        }
+    }
+    return 0;
+}
+
 static int tcp_recv_dma_req_nb(cosim_transport_t *t, dma_req_t *req) {
     transport_tcp_priv_t *p = (transport_tcp_priv_t *)t->priv;
     int fd = aux_or_data_fd(p);
-    struct pollfd pfd;
-    int ret;
 
-    memset(&pfd, 0, sizeof(pfd));
-    pfd.fd = fd;
-    pfd.events = POLLIN;
-    ret = poll(&pfd, 1, 0);  /* timeout=0: 非阻塞 */
-    if (ret < 0) {
-        if (errno == EINTR) return 1;
-        return -1;
-    }
-    if (ret == 0) return 1;  /* 无数据 */
-    if (pfd.revents & (POLLERR | POLLHUP)) return -1;
+    /* 先 peek 类型，不匹配则不消费，返回 1（无数据） */
+    int msg_type = tcp_peek_aux_msg_type(fd);
+    if (msg_type < 0) return 1;  /* 无数据 */
+    if (msg_type != TCP_MSG_DMA_REQ) return 1;  /* 不是 DMA_REQ，留给其他 recv */
 
+    /* 匹配，正式消费 header + payload */
     tcp_msg_hdr_t hdr;
     if (tcp_recv_hdr(fd, &hdr) < 0) return -1;
-    if (hdr.msg_type != TCP_MSG_DMA_REQ) return -1;
     if (tcp_recv_all(fd, req, sizeof(*req)) < 0) return -1;
     return 0;
 }
@@ -412,23 +433,14 @@ static int tcp_recv_msi(cosim_transport_t *t, msi_event_t *ev) {
 static int tcp_recv_msi_nb(cosim_transport_t *t, msi_event_t *ev) {
     transport_tcp_priv_t *p = (transport_tcp_priv_t *)t->priv;
     int fd = aux_or_data_fd(p);
-    struct pollfd pfd;
-    int ret;
 
-    memset(&pfd, 0, sizeof(pfd));
-    pfd.fd = fd;
-    pfd.events = POLLIN;
-    ret = poll(&pfd, 1, 0);
-    if (ret < 0) {
-        if (errno == EINTR) return 1;
-        return -1;
-    }
-    if (ret == 0) return 1;
-    if (pfd.revents & (POLLERR | POLLHUP)) return -1;
+    /* 先 peek 类型，不匹配则不消费 */
+    int msg_type = tcp_peek_aux_msg_type(fd);
+    if (msg_type < 0) return 1;  /* 无数据 */
+    if (msg_type != TCP_MSG_MSI) return 1;  /* 不是 MSI，留给其他 recv */
 
     tcp_msg_hdr_t hdr;
     if (tcp_recv_hdr(fd, &hdr) < 0) return -1;
-    if (hdr.msg_type != TCP_MSG_MSI) return -1;
     if (tcp_recv_all(fd, ev, sizeof(*ev)) < 0) return -1;
     return 0;
 }
