@@ -1139,6 +1139,9 @@ case "$SETUP_MODE" in
         ;;
 esac
 echo ""
+echo "  功能测试（启动后执行）:"
+echo "    ./cosim.sh test-guide   # 交互式测试向导（ping/iperf/arping/压力测试）"
+echo ""
 echo "  重新编译:"
 echo "    make bridge             # 仅重编译 bridge 库"
 echo "    make test-unit          # 运行单元测试"

@@ -315,6 +315,8 @@ CoSim Platform 统一入口
     integration     仅运行集成测试
     all             按顺序运行所有阶段
 
+  test-guide        交互式功能测试向导（ping/iperf/arping/压力测试）
+
   start <组件>      启动单个组件
     qemu [选项]       SHM: --shm NAME --sock PATH
                       TCP: --transport tcp [--port-base N] [--instance-id N]
@@ -1388,6 +1390,175 @@ cmd_info() {
 }
 
 # ============================================================
+# test-guide: 交互式功能测试（跨机 TCP 模式）
+# ============================================================
+
+cmd_test_guide() {
+    echo ""
+    echo -e "${C_BOLD}============================================================${C_RESET}"
+    echo -e "${C_BOLD}       CoSim 功能测试向导${C_RESET}"
+    echo -e "${C_BOLD}============================================================${C_RESET}"
+    echo ""
+    echo "  前置条件:"
+    echo "    - QEMU 已启动:  ./cosim.sh start qemu --transport tcp --port-base 9100"
+    echo "    - VCS  已启动:  ./cosim.sh start vcs --transport tcp --remote-host <QEMU-IP>"
+    echo "    - TAP  已启动:  ./cosim.sh start tap --eth-shm /cosim_eth0"
+    echo ""
+    echo -e "${C_BOLD}选择测试类型:${C_RESET}"
+    echo ""
+    echo "  1) ping 连通性测试"
+    echo "     从 Guest (10.0.0.2) ping TAP (10.0.0.1)"
+    echo "     验证: virtio TX → VCS VQ → ETH SHM → TAP → 回复 → Guest RX"
+    echo ""
+    echo "  2) iperf3 吞吐量测试"
+    echo "     TAP 侧启动 iperf3 server，Guest 侧作为 client"
+    echo "     验证: 端到端 TCP/UDP 吞吐量"
+    echo ""
+    echo "  3) arping ARP 测试"
+    echo "     从 Guest 发 ARP 请求到 TAP 侧"
+    echo "     验证: L2 层连通性"
+    echo ""
+    echo "  4) 批量 ping 压力测试"
+    echo "     发送 200 个 ping 包（长超时），验证持续稳定性"
+    echo ""
+    echo "  5) 显示测试环境信息"
+    echo ""
+
+    local choice
+    read -rp "请选择 [1-5]: " choice
+
+    case "$choice" in
+        1) test_guide_ping ;;
+        2) test_guide_iperf ;;
+        3) test_guide_arping ;;
+        4) test_guide_ping_stress ;;
+        5) test_guide_info ;;
+        *) log_err "无效选择"; return 1 ;;
+    esac
+}
+
+test_guide_info() {
+    echo ""
+    log_info "测试环境配置:"
+    echo "  Guest IP:  10.0.0.2/24  (virtio-net eth0)"
+    echo "  TAP IP:    10.0.0.1/24  (cosim0)"
+    echo "  Guest MAC: de:ad:be:ef:00:01"
+    echo "  TAP MAC:   由 eth_tap_bridge 自动分配"
+    echo ""
+    echo "  Guest 内部需要执行的配置命令:"
+    echo "    ip addr add 10.0.0.2/24 dev eth0"
+    echo "    ip link set eth0 up"
+    echo "    arp -s 10.0.0.1 <TAP的MAC地址>"
+    echo ""
+    echo "  TAP 侧（VCS 机器）需要执行的配置:"
+    echo "    # 查看 TAP MAC:"
+    echo "    ip link show cosim0"
+    echo "    # 添加静态 ARP（Guest MAC）:"
+    echo "    ip neigh add 10.0.0.2 lladdr de:ad:be:ef:00:01 dev cosim0 nud permanent"
+    echo ""
+    echo "  注意事项:"
+    echo "    - 仿真速度较慢，每个 TLP 往返约 5-10 秒"
+    echo "    - ping 超时建议设为 600 秒以上"
+    echo "    - iperf 测试需要 Guest 中安装 iperf3"
+}
+
+test_guide_ping() {
+    local count="${1:-5}"
+    echo ""
+    log_info "=== Ping 连通性测试 ==="
+    echo ""
+    echo "  测试方案: Guest (10.0.0.2) → TAP (10.0.0.1)"
+    echo "  包数: $count"
+    echo "  超时: 每包 600 秒（仿真速度较慢）"
+    echo ""
+    echo -e "  ${C_BOLD}步骤 1 — 在 Guest 串口中执行:${C_RESET}"
+    echo "    ip addr add 10.0.0.2/24 dev eth0"
+    echo "    ip link set eth0 up"
+    echo "    arp -s 10.0.0.1 <TAP侧cosim0的MAC>  # 通过 ip link show cosim0 查看"
+    echo "    ping -c $count -W 600 10.0.0.1"
+    echo ""
+    echo -e "  ${C_BOLD}步骤 2 — 在 VCS 机器上监控:${C_RESET}"
+    echo "    # 查看 TAP 收发统计"
+    echo "    watch -n 5 'tail -1 /tmp/eth_tap_bridge.log'"
+    echo ""
+    echo "    # 查看 VCS VQ-TX 转发计数"
+    echo "    grep -c 'VQ-TX.*Forwarded' /tmp/vcs_e2e.log"
+    echo ""
+    echo -e "  ${C_BOLD}步骤 3 — 在 QEMU 机器上监控:${C_RESET}"
+    echo "    grep -c 'DMA read OK' /tmp/qemu_e2e.log"
+    echo "    grep -c 'DMA write OK' /tmp/qemu_e2e.log"
+    echo "    grep -c 'MSI' /tmp/qemu_e2e.log"
+    echo ""
+    echo -e "  ${C_BOLD}成功标志:${C_RESET}"
+    echo "    - Guest 收到 ping reply (0% packet loss)"
+    echo "    - VCS VQ-TX Forwarded 计数 >= $count"
+    echo "    - QEMU DMA write 计数递增（RX 注入 Guest）"
+    echo "    - MSI 计数递增（中断通知 Guest）"
+}
+
+test_guide_iperf() {
+    echo ""
+    log_info "=== iperf3 吞吐量测试 ==="
+    echo ""
+    echo "  前置: Guest rootfs 需包含 iperf3（buildroot menuconfig 启用）"
+    echo ""
+    echo -e "  ${C_BOLD}步骤 1 — 在 VCS 机器（TAP 侧）启动 server:${C_RESET}"
+    echo "    iperf3 -s -B 10.0.0.1 -p 5201"
+    echo ""
+    echo -e "  ${C_BOLD}步骤 2 — 在 Guest 串口中执行:${C_RESET}"
+    echo "    ip addr add 10.0.0.2/24 dev eth0"
+    echo "    ip link set eth0 up"
+    echo "    arp -s 10.0.0.1 <TAP侧cosim0的MAC>"
+    echo ""
+    echo "    # TCP 测试（默认 10 秒）"
+    echo "    iperf3 -c 10.0.0.1 -p 5201 -t 10"
+    echo ""
+    echo "    # UDP 测试"
+    echo "    iperf3 -c 10.0.0.1 -p 5201 -u -b 1M -t 10"
+    echo ""
+    echo "  注意:"
+    echo "    - 仿真速度限制，实际吞吐量远低于真实网络"
+    echo "    - 建议先用 ping 确认连通性后再测 iperf"
+    echo "    - 超时可能需要加大: iperf3 -c ... --connect-timeout 60000"
+}
+
+test_guide_arping() {
+    echo ""
+    log_info "=== ARP 连通性测试 ==="
+    echo ""
+    echo "  测试方案: Guest 发 ARP 请求到 TAP 侧"
+    echo ""
+    echo -e "  ${C_BOLD}在 Guest 串口中执行:${C_RESET}"
+    echo "    ip addr add 10.0.0.2/24 dev eth0"
+    echo "    ip link set eth0 up"
+    echo "    arping -c 3 -I eth0 10.0.0.1"
+    echo ""
+    echo -e "  ${C_BOLD}成功标志:${C_RESET}"
+    echo "    - arping 收到 reply"
+    echo "    - VCS 日志出现 VQ-TX Forwarded"
+    echo "    - TAP bridge 日志 SHM->TAP 计数递增"
+}
+
+test_guide_ping_stress() {
+    echo ""
+    log_info "=== 批量 Ping 压力测试（200 包）==="
+    echo ""
+    echo -e "  ${C_BOLD}在 Guest 串口中执行:${C_RESET}"
+    echo "    ip addr add 10.0.0.2/24 dev eth0"
+    echo "    ip link set eth0 up"
+    echo "    arp -s 10.0.0.1 <TAP侧cosim0的MAC>"
+    echo "    ping -c 200 -W 600 -i 0 10.0.0.1 > /tmp/ping200.txt 2>&1 &"
+    echo ""
+    echo -e "  ${C_BOLD}监控进度（在 VCS 机器上）:${C_RESET}"
+    echo "    watch -n 10 'echo \"TX: \$(grep -c VQ-TX.*Forwarded /tmp/vcs_e2e.log)"
+    echo "      RX: \$(grep -c VIP-VQ.*RX.injected /tmp/vcs_e2e.log)"
+    echo "      TAP: \$(tail -1 /tmp/eth_tap_bridge.log)\"'"
+    echo ""
+    echo "  预估时间: 根据仿真速度，可能需要数小时"
+    echo "  成功标志: TX Forwarded >= 200, Guest /tmp/ping200.txt 显示收到 reply"
+}
+
+# ============================================================
 # test 命令路由
 # ============================================================
 
@@ -1477,6 +1648,7 @@ main() {
 
     case "$command" in
         test)    cmd_test "$@" ;;
+        test-guide) cmd_test_guide "$@" ;;
         start)   cmd_start "$@" ;;
         status)  cmd_status ;;
         clean)   cleanup_all ;;
