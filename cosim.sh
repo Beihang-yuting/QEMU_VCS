@@ -321,6 +321,7 @@ CoSim Platform 统一入口
     qemu [选项]       SHM: --shm NAME --sock PATH
                       TCP: --transport tcp [--port-base N] [--instance-id N]
                       Guest: --initrd FILE 或 --drive FILE [--append ARGS]
+                      交互: --serial-sock PATH (串口 socket, 可 python 连接)
     vcs  [选项]       SHM: --shm NAME --sock PATH
                       TCP: --transport tcp --remote-host IP [--port-base N]
                       通用: [--role A|B] [--eth-shm NAME] [--mac-last N]
@@ -1009,6 +1010,7 @@ cmd_start_qemu() {
     local initrd_file=""
     local drive_file=""
     local extra_append=""
+    local serial_sock=""
 
     while [ $# -gt 0 ]; do
         case "$1" in
@@ -1020,6 +1022,7 @@ cmd_start_qemu() {
             --initrd)      initrd_file="$2"; shift 2 ;;
             --drive)       drive_file="$2"; shift 2 ;;
             --append)      extra_append="$2"; shift 2 ;;
+            --serial-sock) serial_sock="$2"; shift 2 ;;
             *) log_err "未知选项: $1"; return 1 ;;
         esac
     done
@@ -1045,8 +1048,21 @@ cmd_start_qemu() {
     local QEMU_ARGS=(
         -M q35 -m "${GUEST_MEMORY}" -smp 1
         -device "$device_arg"
-        -nographic -no-reboot
+        -no-reboot
     )
+
+    # ---- Serial 输出方式 ----
+    if [ -n "$serial_sock" ]; then
+        # 串口通过 Unix socket 输出（可用 python/socat 交互）
+        QEMU_ARGS+=(
+            -display none
+            -chardev "socket,id=serial0,path=$serial_sock,server=on,wait=off"
+            -serial chardev:serial0
+            -monitor "unix:${serial_sock%.sock}-monitor.sock,server,nowait"
+        )
+    else
+        QEMU_ARGS+=(-nographic)
+    fi
 
     # ---- Guest 启动方式: drive 模式 vs initramfs 模式 ----
     local append_str="console=ttyS0"
@@ -1116,6 +1132,10 @@ cmd_start_qemu() {
     fi
     [ -n "${kernel_bin:-}" ] && log_info "  Kernel: $kernel_bin"
     [ -n "$initrd_file" ] && [ -f "$initrd_file" ] && log_info "  Initrd: $initrd_file"
+    if [ -n "$serial_sock" ]; then
+        log_info "  串口:   $serial_sock (python3 连接交互)"
+        log_info "  Monitor: ${serial_sock%.sock}-monitor.sock"
+    fi
 
     exec "$qemu_bin" "${QEMU_ARGS[@]}"
 }
