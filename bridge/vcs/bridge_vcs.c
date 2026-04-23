@@ -86,43 +86,60 @@ int bridge_vcs_poll_tlp(unsigned char *tlp_type, unsigned long long *addr,
                 g_poll_count, tlp_cache_count());
     }
 
-    /* ---- TCP transport path ---- */
+    /* ---- TCP transport path ----
+     *
+     * 分层策略解决 QEMU 实时 vs VCS 仿真时间不匹配：
+     *   Phase 1: 从 TLP 缓存取（DMA 期间缓存的 TLP，零延迟）
+     *   Phase 2: 非阻塞批量 drain ctrl_fd（读取所有已到达的 TLP_READY）
+     *   Phase 3: 缓存非空则返回一个
+     *   Phase 4: 带超时等待（适配跨机 TCP 延迟，避免丢失在途消息）
+     */
     if (g_transport) {
         tlp_entry_t entry;
-
-        /* 优先从 TLP 缓存读取（DMA read 期间缓存的 TLP） */
-        if (tlp_cache_pop(&entry) == 0) {
-            fprintf(stderr, "[VCS poll#%d] cached TLP type=%d tag=%d addr=0x%llx\n",
-                    g_poll_count, entry.type, entry.tag, (unsigned long long)entry.addr);
-            g_last_entry = entry;
-            *tlp_type = entry.type;
-            *addr = entry.addr;
-            *len = entry.len;
-            *tag = entry.tag;
-            int words = (entry.len + 3) / 4;
-            for (int i = 0; i < words && i < 16; i++)
-                memcpy(&data[i], &entry.data[i * 4], 4);
-            return 0;
-        }
-
-        /* Non-blocking check for TLP_READY on ctrl channel */
         sync_msg_t msg;
-        int ret = g_transport->recv_sync_timed(g_transport, &msg, 0);
-        if (ret < 0) return -1;
-        if (ret == 1) return 1;  /* timeout — no TLP */
-        fprintf(stderr, "[VCS poll#%d] recv_sync ret=%d msg.type=%d\n",
-                g_poll_count, ret, msg.type);
-        if (msg.type != SYNC_MSG_TLP_READY) {
+        int ret;
+
+        /* Phase 1: TLP 缓存优先 */
+        if (tlp_cache_pop(&entry) == 0)
+            goto return_entry;
+
+        /* Phase 2: 非阻塞批量 drain — 一次读完 ctrl_fd 中所有 TLP_READY */
+        for (;;) {
+            ret = g_transport->recv_sync_timed(g_transport, &msg, 0);
+            if (ret < 0) return -1;
+            if (ret == 1) break;  /* ctrl_fd 为空，drain 完成 */
             if (msg.type == SYNC_MSG_SHUTDOWN) return -1;
-            fprintf(stderr, "[VCS poll] unexpected msg.type=%d, discarding\n", msg.type);
-            return 1;
+            if (msg.type == SYNC_MSG_TLP_READY) {
+                if (g_transport->recv_tlp(g_transport, &entry) == 0)
+                    tlp_cache_push(&entry);
+                continue;
+            }
+            /* 非 TLP_READY 消息在 poll 中不应出现，记录并跳过 */
+            fprintf(stderr, "[VCS poll] unexpected msg.type=%d in drain, discarding\n", msg.type);
         }
 
-        /* Receive the TLP via transport */
-        if (g_transport->recv_tlp(g_transport, &entry) < 0) return 1;
-        fprintf(stderr, "[VCS poll] got TLP type=%d tag=%d addr=0x%llx\n",
-                entry.type, entry.tag, (unsigned long long)entry.addr);
+        /* Phase 3: drain 后缓存可能有 TLP */
+        if (tlp_cache_pop(&entry) == 0)
+            goto return_entry;
 
+        /* Phase 4: 带超时等待 — 跨机 TCP 传输延迟可达数毫秒
+         * 使用较短超时（5ms）平衡响应速度与仿真推进效率。
+         * 超时期间 VCS 仿真暂停（DPI-C 阻塞），不影响正确性。 */
+        ret = g_transport->recv_sync_timed(g_transport, &msg, 5);
+        if (ret < 0) return -1;
+        if (ret == 1) return 1;  /* 5ms 内无新 TLP */
+        if (msg.type == SYNC_MSG_SHUTDOWN) return -1;
+        if (msg.type == SYNC_MSG_TLP_READY) {
+            if (g_transport->recv_tlp(g_transport, &entry) < 0) return 1;
+            goto return_entry;
+        }
+        fprintf(stderr, "[VCS poll] unexpected msg.type=%d after wait, discarding\n", msg.type);
+        return 1;
+
+    return_entry:
+        fprintf(stderr, "[VCS poll#%d] got TLP type=%d tag=%d addr=0x%llx (cached=%d)\n",
+                g_poll_count, entry.type, entry.tag,
+                (unsigned long long)entry.addr, tlp_cache_count());
         g_last_entry = entry;
         *tlp_type = entry.type;
         *addr = entry.addr;
