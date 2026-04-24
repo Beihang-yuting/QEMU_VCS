@@ -119,6 +119,10 @@ resolve_simv() {
             return 0
         fi
     done
+    echo "  搜索路径:" >&2
+    echo "    ${PROJECT_DIR}/build/simv_vip" >&2
+    echo "  提示: SIMV=/path/to/simv_vip ./cosim.sh ..." >&2
+    echo "  或先运行: make vcs-vip" >&2
     return 1
 }
 
@@ -130,10 +134,24 @@ resolve_tap_bridge() {
 }
 
 resolve_kernel() {
-    find_binary "Guest kernel" \
-        "${KERNEL:-}" \
+    if [ -n "${KERNEL:-}" ] && [ -f "${KERNEL:-}" ]; then
+        echo "$KERNEL"
+        return 0
+    fi
+    for candidate in \
         "${PROJECT_DIR}/guest/bzImage" \
-        "$HOME/workspace/alpine-vmlinuz-new"
+        "$HOME/workspace/alpine-vmlinuz-new" \
+        "$HOME/workspace/buildroot/output/images/bzImage"; do
+        if [ -f "$candidate" ]; then
+            echo "$candidate"
+            return 0
+        fi
+    done
+    echo "  搜索路径:" >&2
+    echo "    ${PROJECT_DIR}/guest/bzImage" >&2
+    echo "    $HOME/workspace/buildroot/output/images/bzImage" >&2
+    echo "  提示: KERNEL=/path/to/bzImage ./cosim.sh ..." >&2
+    return 1
 }
 
 resolve_initrd() {
