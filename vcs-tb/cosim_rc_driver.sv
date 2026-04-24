@@ -202,12 +202,10 @@ class cosim_rc_driver extends pcie_tl_rc_driver;
                     int dw_addr = int'(dpi_addr) >> 2;
                     bit [31:0] wr_data = dpi_data[0];
                     if (config_proxy.handle_cfg_write(dw_addr, wr_data)) begin
-                        // CfgWr 回 Cpl（无数据）
-                        for (int i = 0; i < 16; i++)
-                            bridge_vcs_set_cpl_data(i, 0);
-                        ret = bridge_vcs_send_cpl_scalar(dpi_tag, 0);
+                        // CfgWr 是 fire-and-forget（QEMU 不等 completion），
+                        // 不发 completion 避免 stale cpl 堆积在 ring 中。
                         `uvm_info(get_name(), $sformatf(
-                            "CfgWr BYPASS: addr=0x%03h dw[%0d]=0x%08h tag=%0d",
+                            "CfgWr BYPASS: addr=0x%03h dw[%0d]=0x%08h tag=%0d (no cpl)",
                             dpi_addr, dw_addr, wr_data, dpi_tag), UVM_MEDIUM)
                         total_tlp_count++;
                         continue;

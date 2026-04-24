@@ -101,19 +101,21 @@ class pcie_tl_config_proxy extends uvm_component;
         config_space[15] = 32'h0000_0100;  // INTA
 
         // ---- Capability: MSI (at 0x40 = DW16) ----
-        config_space[16] = 32'h0050_0005;  // Cap ID=05(MSI), Next=0x50
+        // 小端: byte0=cap_id(05), byte1=next_ptr(50), byte2-3=msg_ctrl
+        config_space[16] = 32'h0000_5005;  // Cap ID=05(MSI), Next=0x50
         config_space[17] = 32'h0000_0000;  // MSI Address
         config_space[18] = 32'h0000_0000;  // MSI Data
 
         // ---- Capability: MSI-X (at 0x50 = DW20) ----
-        config_space[20] = {16'h0060, msix_vectors[9:0] - 10'd1, 6'h0, 8'h11};
-        //                  Next=0x60   table_size-1                   Cap ID=0x11
-        config_space[21] = 32'h0000_2000;  // Table offset (BAR0 + 0x2000)
-        config_space[22] = 32'h0000_3000;  // PBA offset (BAR0 + 0x3000)
+        // 小端: byte0=cap_id(11), byte1=next_ptr(60), byte2-3=msg_ctrl(table_size)
+        config_space[20] = {msix_vectors[9:0] - 10'd1, 6'h0, 8'h60, 8'h11};
+        config_space[21] = 32'h0000_2000;  // Table BIR=0, offset=0x2000
+        config_space[22] = 32'h0000_3000;  // PBA BIR=0, offset=0x3000
 
         // ---- Capability: PCIe (at 0x60 = DW24) ----
-        config_space[24] = 32'h0000_0010;  // Cap ID=0x10 (PCI Express), Next=0
-        config_space[25] = 32'h0000_0001;  // PCIe Capabilities: EP, v1
+        // 小端: byte0=cap_id(10), byte1=next_ptr(00)
+        config_space[24] = 32'h0002_0010;  // Cap ID=0x10, Next=0, PCIe Cap v2 EP
+        config_space[25] = 32'h0000_0001;  // Device Capabilities
     endfunction
 
     //=========================================================================
