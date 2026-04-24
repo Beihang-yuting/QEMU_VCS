@@ -407,3 +407,161 @@ verdi -ssf cosim_wave.fsdb &    # 打开 Verdi 查看波形
 # 清理环境
 ./cosim.sh clean
 ```
+
+---
+
+## 十、用户自定义 VCS 环境集成指南
+
+### 10.1 架构概述
+
+将 cosim 平台集成到用户自己的 VCS 验证环境时，**QEMU 侧不需要修改**，只需移植 VCS 侧的 bridge 层并适配用户的 RTL/TB。
+
+```
+QEMU 侧（不改动）              VCS 侧（用户集成）
+┌─────────────────┐            ┌─────────────────────────────┐
+│ Guest Linux      │            │ 用户 UVM 环境                │
+│ cosim-pcie-rc    │  SHM/TCP   │   ├── pcie_tl_vip（复用）     │
+│ libcosim_bridge  │◄──────────►│   ├── bridge DPI-C（复用）    │
+│ irq_poller       │            │   ├── 用户 RTL EP（替换 stub）│
+│                  │            │   └── 用户 tb_top（适配）     │
+└─────────────────┘            └─────────────────────────────┘
+```
+
+### 10.2 必须移植的文件（Bridge C/SV 层）
+
+这些文件提供 QEMU↔VCS 的通信能力，**不需要修改，直接加到 VCS 编译列表**：
+
+```makefile
+# 加到用户 Makefile 的 C 源文件列表
+COSIM_BRIDGE_SRCS = \
+    bridge/vcs/bridge_vcs.c \
+    bridge/vcs/sock_sync_vcs.c \
+    bridge/vcs/virtqueue_dma.c \
+    bridge/common/shm_layout.c \
+    bridge/common/ring_buffer.c \
+    bridge/common/dma_manager.c \
+    bridge/common/trace_log.c \
+    bridge/common/eth_shm.c \
+    bridge/common/link_model.c \
+    bridge/common/transport_shm.c \
+    bridge/common/transport_tcp.c \
+    bridge/eth/eth_mac_dpi.c \
+    bridge/eth/eth_port.c
+
+# VCS 编译参数
+COSIM_CFLAGS = -I bridge/common -I bridge/vcs -I bridge/qemu -I bridge/eth \
+               -std=c99 -D_POSIX_C_SOURCE=200112L
+COSIM_LDFLAGS = -Wl,--no-as-needed -lrt -lpthread
+
+# SV DPI-C 声明（必须 include）
+# bridge/vcs/bridge_vcs.sv
+```
+
+### 10.3 可直接复用的组件
+
+| 组件 | 路径 | 用途 | 复用方式 |
+|------|------|------|---------|
+| PCIe TL VIP | `pcie_tl_vip/` | UVM PCIe TL 验证 IP | `+incdir+pcie_tl_vip/src` |
+| cosim_rc_driver | `vcs-tb/cosim_rc_driver.sv` | DPI-C polling + completion 回传 | 放入用户 UVM env |
+| eth_tap_bridge | `tools/eth_tap_bridge` | TAP↔ETH SHM 桥接 | 直接使用 |
+
+### 10.4 需要用户适配的文件
+
+**替换 EP Stub → 用户真实 RTL：**
+
+```
+当前:  cosim_vip_top → glue_if_to_stub → pcie_ep_stub（软件模拟）
+用户:  user_tb_top   → user_glue       → user_rtl_ep（真实 RTL）
+```
+
+用户需要：
+1. **替换 `pcie_ep_stub.sv`** 为自己的 RTL EP 模块
+2. **修改 `glue_if_to_stub.sv`** 的信号映射，对接 RTL 端口
+3. **修改 `cosim_vip_top.sv`** 的例化连接
+
+### 10.5 用户 tb_top 模板
+
+```systemverilog
+module user_tb_top;
+    import uvm_pkg::*;
+    import pcie_tl_pkg::*;
+    import cosim_bridge_pkg::*;
+
+    logic clk = 0, rst_n = 0;
+    always #5 clk = ~clk;
+
+    // PCIe TL VIP 接口
+    pcie_tl_if rc_if(.clk(clk), .rst_n(rst_n));
+
+    // 用户 RTL EP 实例
+    user_pcie_ep ep (
+        .clk(clk), .rst_n(rst_n)
+        // ... 用户 RTL 端口 ...
+    );
+
+    // VIP ↔ RTL 信号适配（参考 glue_if_to_stub.sv）
+    // ...
+
+    // Bridge DPI-C 初始化 + UVM 启动
+    initial begin
+        uvm_config_db#(virtual pcie_tl_if)::set(null, "*", "vif", rc_if);
+        run_test("user_cosim_test");
+    end
+
+    // 波形 dump（默认开启）
+    initial begin
+        $fsdbDumpfile("user_cosim_wave.fsdb");
+        $fsdbDumpvars(0, user_tb_top);
+    end
+endmodule
+```
+
+### 10.6 编译命令
+
+```bash
+vcs -full64 -sverilog -timescale=1ns/1ps +v2k -debug_access+all -cc gcc \
+    -ntb_opts uvm-1.2 \
+    +define+COSIM_VIP_MODE \
+    -CFLAGS "$(COSIM_CFLAGS)" \
+    -LDFLAGS "$(COSIM_LDFLAGS)" \
+    +incdir+bridge/vcs \
+    +incdir+pcie_tl_vip/src \
+    bridge/vcs/bridge_vcs.sv \
+    pcie_tl_vip/src/pcie_tl_if.sv \
+    pcie_tl_vip/src/pcie_tl_pkg.sv \
+    user_tb_top.sv \
+    user_rtl_ep.sv \
+    $(COSIM_BRIDGE_SRCS) \
+    -o vcs_sim/simv_user
+```
+
+### 10.7 运行命令
+
+```bash
+# SHM 模式
+./vcs_sim/simv_user +SHM_NAME=/cosim0 +SOCK_PATH=/tmp/cosim0.sock \
+    +UVM_TESTNAME=user_cosim_test
+
+# TCP 模式
+./vcs_sim/simv_user +transport=tcp +REMOTE_HOST=<QEMU-IP> +PORT_BASE=9100 \
+    +UVM_TESTNAME=user_cosim_test
+```
+
+### 10.8 PCIe Config Space 说明
+
+QEMU 内部的 PCI 框架自动处理 PCIe 枚举（BAR sizing、Capability 遍历、MSI 配置），**不生成 TLP 到 VCS**。VCS 收到的 TLP 只有 MMIO（BAR0 区域的读写）。
+
+因此：
+- 用户 RTL EP 只需响应 MMIO TLP（MRd/MWr），不需要实现 PCIe config space
+- 如果需要验证 DUT 的 config space 实现，后续可启用 config space bypass 代理（开发中）
+
+### 10.9 集成检查清单
+
+- [ ] Bridge C 文件加到 VCS 编译列表
+- [ ] `bridge_vcs.sv` 通过 `+incdir` 引入
+- [ ] 用户 RTL EP 替换 `pcie_ep_stub.sv`
+- [ ] 信号适配层对接 VIP ↔ RTL（参考 `glue_if_to_stub.sv`）
+- [ ] UVM test 中初始化 bridge（参考 `cosim_test.sv`）
+- [ ] `eth_tap_bridge` 编译 + setcap（如需网络测试）
+- [ ] QEMU 侧启动命令验证（`cosim.sh start qemu`）
+- [ ] 波形 dump 确认（`cosim_wave.fsdb`）
