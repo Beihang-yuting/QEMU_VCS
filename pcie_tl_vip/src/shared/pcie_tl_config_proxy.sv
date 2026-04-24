@@ -73,49 +73,54 @@ class pcie_tl_config_proxy extends uvm_component;
     function void init_config_space();
         foreach (config_space[i]) config_space[i] = 32'h0;
 
-        // DW0: Vendor ID + Device ID
-        config_space[0] = {device_id, vendor_id};
+        // ---- 从 pcie_ep_stub.sv 同步的 config space 布局 ----
+        // DW0: Device ID(virtio-net) | Vendor ID(virtio)
+        config_space[0]  = {device_id, vendor_id};
+        // DW1: Status(cap_list=1) | Command
+        config_space[1]  = {16'h0010, 16'h0007};
+        // DW2: Class=0x020000 | Rev=0x01
+        config_space[2]  = {class_code, revision_id};
+        // DW3: BIST|HdrType=0|LatTimer|CacheLine
+        config_space[3]  = 32'h0000_0010;
+        // DW4-DW10: BAR0-BAR5 (BAR0 用于 MMIO)
+        config_space[4]  = 32'h0000_0000;
+        // DW11: Subsystem ID(net) | Subsystem Vendor ID(virtio)
+        config_space[11] = {16'h0001, vendor_id};
+        // DW13: Capabilities Pointer = 0x40
+        config_space[13] = 32'h0000_0040;
+        // DW15: INT_PIN=INTA(1), INT_LINE=0
+        config_space[15] = 32'h0000_0100;
 
-        // DW1: Command + Status
-        config_space[1] = 32'h0010_0000;  // Status: Capabilities List
+        // ---- Virtio PCI Capabilities（与 pcie_ep_stub 完全一致）----
 
-        // DW2: Revision + Class Code
-        config_space[2] = {class_code, revision_id};
+        // 0x40 (DW16): VIRTIO_PCI_CAP_COMMON_CFG
+        //   cap_vndr=0x09, cap_next=0x54, cap_len=0x10, cfg_type=1
+        config_space[16] = 32'h01_10_54_09;
+        config_space[17] = 32'h00_00_00_00;   // bar=0
+        config_space[18] = 32'h0000_1000;     // offset in BAR = 0x1000
+        config_space[19] = 32'h0000_0038;     // length = 56 bytes
 
-        // DW3: Cache Line, Latency, Header Type, BIST
-        config_space[3] = 32'h0000_0000;  // Type 0 header
+        // 0x54 (DW21): VIRTIO_PCI_CAP_NOTIFY_CFG
+        //   cap_vndr=0x09, cap_next=0x68, cap_len=0x14, cfg_type=2
+        config_space[21] = 32'h02_14_68_09;
+        config_space[22] = 32'h00_00_00_00;   // bar=0
+        config_space[23] = 32'h0000_2000;     // offset = 0x2000
+        config_space[24] = 32'h0000_0004;     // length = 4
+        config_space[25] = 32'h0000_0000;     // notify_off_multiplier = 0
 
-        // DW4: BAR0 (Memory, 32-bit, non-prefetchable)
-        config_space[4] = 32'h0000_0000;
+        // 0x68 (DW26): VIRTIO_PCI_CAP_ISR_CFG
+        //   cap_vndr=0x09, cap_next=0x78, cap_len=0x10, cfg_type=3
+        config_space[26] = 32'h03_10_78_09;
+        config_space[27] = 32'h00_00_00_00;   // bar=0
+        config_space[28] = 32'h0000_3000;     // offset = 0x3000
+        config_space[29] = 32'h0000_0004;     // length = 4
 
-        // DW5: BAR1
-        config_space[5] = 32'h0000_0000;
-
-        // DW11: Subsystem Vendor + Device
-        config_space[11] = {device_id, vendor_id};
-
-        // DW13: Capability Pointer
-        config_space[13] = 32'h0000_0040;  // Cap starts at 0x40
-
-        // DW15: Interrupt Line/Pin
-        config_space[15] = 32'h0000_0100;  // INTA
-
-        // ---- Capability: MSI (at 0x40 = DW16) ----
-        // 小端: byte0=cap_id(05), byte1=next_ptr(50), byte2-3=msg_ctrl
-        config_space[16] = 32'h0000_5005;  // Cap ID=05(MSI), Next=0x50
-        config_space[17] = 32'h0000_0000;  // MSI Address
-        config_space[18] = 32'h0000_0000;  // MSI Data
-
-        // ---- Capability: MSI-X (at 0x50 = DW20) ----
-        // 小端: byte0=cap_id(11), byte1=next_ptr(60), byte2-3=msg_ctrl(table_size)
-        config_space[20] = {msix_vectors[9:0] - 10'd1, 6'h0, 8'h60, 8'h11};
-        config_space[21] = 32'h0000_2000;  // Table BIR=0, offset=0x2000
-        config_space[22] = 32'h0000_3000;  // PBA BIR=0, offset=0x3000
-
-        // ---- Capability: PCIe (at 0x60 = DW24) ----
-        // 小端: byte0=cap_id(10), byte1=next_ptr(00)
-        config_space[24] = 32'h0002_0010;  // Cap ID=0x10, Next=0, PCIe Cap v2 EP
-        config_space[25] = 32'h0000_0001;  // Device Capabilities
+        // 0x78 (DW30): VIRTIO_PCI_CAP_DEVICE_CFG
+        //   cap_vndr=0x09, cap_next=0x00 (end), cap_len=0x10, cfg_type=4
+        config_space[30] = 32'h04_10_00_09;
+        config_space[31] = 32'h00_00_00_00;   // bar=0
+        config_space[32] = 32'h0000_4000;     // offset = 0x4000
+        config_space[33] = 32'h0000_000C;     // length = 12
     endfunction
 
     //=========================================================================
