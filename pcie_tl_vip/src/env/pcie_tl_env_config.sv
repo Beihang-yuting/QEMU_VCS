@@ -75,6 +75,31 @@ class pcie_tl_env_config extends uvm_object;
     int                       ep2rc_latency_max_ns           = 0;
     int                       link_delay_update_interval     = 16;
 
+    //--- Switch ---
+    bit                    switch_enable = 0;
+    pcie_tl_switch_config  switch_cfg;
+
+    //--- SR-IOV / Function ---
+    bit              sriov_enable         = 0;
+    int              num_pfs              = 1;
+    int              max_vfs_per_pf       = 256;
+    int              default_num_vfs      = 0;
+    bit [15:0]       pf_vendor_id         = 16'hABCD;
+    bit [15:0]       pf_device_id         = 16'h1234;
+    bit [15:0]       vf_device_id         = 16'h1235;
+    bit              ari_enable           = 0;
+
+    //--- TLP Prefix ---
+    bit              prefix_enable        = 0;
+    bit              pasid_enable         = 0;
+    int              pasid_width          = 20;
+    bit              pasid_exe_supported  = 0;
+    bit              pasid_priv_supported = 0;
+    bit              ext_tph_enable       = 0;
+    bit              ide_enable           = 0;
+    bit              mriov_enable         = 0;
+    int              max_e2e_prefix       = 4;
+
     function new(string name = "pcie_tl_env_config");
         super.new(name);
     endfunction

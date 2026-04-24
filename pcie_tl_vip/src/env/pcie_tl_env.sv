@@ -32,6 +32,14 @@ class pcie_tl_env extends uvm_env;
     pcie_tl_link_delay_model   rc2ep_delay;
     pcie_tl_link_delay_model   ep2rc_delay;
 
+    //--- Multi-EP (switch mode) ---
+    pcie_tl_switch         sw;
+    pcie_tl_ep_agent       ep_agents[];
+    pcie_tl_if_adapter     ep_adapters[];
+
+    //--- Function Manager (SR-IOV) ---
+    pcie_tl_func_manager   func_mgr_sriov;
+
     //--- Virtual Sequencer ---
     pcie_tl_virtual_sequencer  v_seqr;
 
@@ -78,6 +86,37 @@ class pcie_tl_env extends uvm_env;
             ep_agent = pcie_tl_ep_agent::type_id::create("ep_agent", this);
         end
 
+        // 4c. SR-IOV mode: create function manager
+        if (cfg.sriov_enable) begin
+            func_mgr_sriov = pcie_tl_func_manager::type_id::create("func_mgr_sriov");
+            func_mgr_sriov.build(cfg.num_pfs, cfg.max_vfs_per_pf,
+                                  cfg.pf_vendor_id, cfg.pf_device_id, cfg.vf_device_id);
+            if (cfg.default_num_vfs > 0) begin
+                for (int pf = 0; pf < cfg.num_pfs; pf++)
+                    func_mgr_sriov.enable_vfs(pf, cfg.default_num_vfs);
+            end
+        end
+
+        // 4b. Switch mode: create switch + N EP agents
+        if (cfg.switch_enable && cfg.switch_cfg != null) begin
+            int n = cfg.switch_cfg.num_ds_ports;
+            cfg.switch_cfg.init_defaults();
+
+            sw = pcie_tl_switch::type_id::create("sw", this);
+            sw.sw_cfg = cfg.switch_cfg;
+
+            ep_agents  = new[n];
+            ep_adapters = new[n];
+            for (int i = 0; i < n; i++) begin
+                uvm_config_db#(uvm_active_passive_enum)::set(
+                    this, $sformatf("ep_agent_%0d", i), "is_active", cfg.ep_is_active);
+                ep_agents[i]  = pcie_tl_ep_agent::type_id::create(
+                    $sformatf("ep_agent_%0d", i), this);
+                ep_adapters[i] = pcie_tl_if_adapter::type_id::create(
+                    $sformatf("ep_adapter_%0d", i), this);
+            end
+        end
+
         // 5. Create verification components
         if (cfg.scb_enable)
             scb = pcie_tl_scoreboard::type_id::create("scb", this);
@@ -121,6 +160,10 @@ class pcie_tl_env extends uvm_env;
             if (ep_agent.ep_driver != null) begin
                 ep_agent.ep_driver.mps_bytes = int'(cfg.max_payload_size);
                 ep_agent.ep_driver.rcb_bytes = int'(cfg.read_completion_boundary);
+                if (cfg.sriov_enable && func_mgr_sriov != null) begin
+                    ep_agent.func_manager = func_mgr_sriov;
+                    ep_agent.ep_driver.func_manager = func_mgr_sriov;
+                end
             end
         end
 
@@ -153,17 +196,60 @@ class pcie_tl_env extends uvm_env;
         // 6. Coverage shared component references
         cov.fc_mgr  = fc_mgr;
         cov.tag_mgr = tag_mgr;
+
+        // 7. Switch mode wiring
+        if (cfg.switch_enable && sw != null) begin
+            for (int i = 0; i < cfg.switch_cfg.num_ds_ports; i++) begin
+                ep_agents[i].fc_mgr    = sw.dsp[i].fc_mgr;
+                ep_agents[i].tag_mgr   = tag_mgr;
+                ep_agents[i].ord_eng   = ord_eng;
+                ep_agents[i].cfg_mgr   = cfg_mgr;
+                ep_agents[i].bw_shaper = bw_shaper;
+                ep_agents[i].codec     = codec;
+                ep_agents[i].adapter   = ep_adapters[i];
+                ep_agents[i].inject_shared_components();
+                if (ep_agents[i].ep_driver != null) begin
+                    ep_agents[i].ep_driver.mps_bytes = int'(cfg.max_payload_size);
+                    ep_agents[i].ep_driver.rcb_bytes = int'(cfg.read_completion_boundary);
+                    if (cfg.sriov_enable && func_mgr_sriov != null)
+                        ep_agents[i].ep_driver.func_manager = func_mgr_sriov;
+                end
+                ep_adapters[i].mode   = cfg.if_mode;
+                ep_adapters[i].codec  = codec;
+                ep_adapters[i].fc_mgr = sw.dsp[i].fc_mgr;
+            end
+        end
+
+        // 8. Completion timeout
+        if (rc_agent != null && rc_agent.rc_driver != null)
+            rc_agent.rc_driver.cpl_timeout_ns = cfg.cpl_timeout_ns;
     endfunction
 
     //=========================================================================
     // Run Phase: TLM loopback bridge
     //=========================================================================
     task run_phase(uvm_phase phase);
-        if (cfg.if_mode == TLM_MODE && rc_agent != null && ep_agent != null) begin
-            fork
-                tlm_loopback_rc_to_ep();
-                tlm_loopback_ep_to_rc();
-            join_none
+        if (cfg.if_mode == TLM_MODE && rc_agent != null) begin
+            if (cfg.switch_enable && sw != null) begin
+                // Switch mode: RC <-> Switch <-> EP[N]
+                fork
+                    rc_to_switch_loopback();
+                    switch_to_rc_loopback();
+                    for (int i = 0; i < cfg.switch_cfg.num_ds_ports; i++) begin
+                        automatic int idx = i;
+                        fork
+                            switch_to_ep_loopback(idx);
+                            ep_to_switch_loopback(idx);
+                        join_none
+                    end
+                join_none
+            end else if (ep_agent != null) begin
+                // Direct mode: RC <-> EP (existing)
+                fork
+                    tlm_loopback_rc_to_ep();
+                    tlm_loopback_ep_to_rc();
+                join_none
+            end
         end
     endtask
 
@@ -299,6 +385,74 @@ class pcie_tl_env extends uvm_env;
     endtask
 
     //=========================================================================
+    // Switch Mode Loopback Tasks
+    //=========================================================================
+
+    // RC tx -> Switch USP rx
+    protected task rc_to_switch_loopback();
+        pcie_tl_tlp tlp;
+        forever begin
+            rc_adapter.tlm_tx_fifo.get(tlp);
+            if (scb != null && tlp.requires_completion())
+                scb.register_pending(tlp);
+            replenish_credits(tlp);  // Return RC-side FC credits (TLP delivered to switch)
+            sw.usp.rx_fifo.put(tlp);
+        end
+    endtask
+
+    // Switch USP tx -> RC rx
+    protected task switch_to_rc_loopback();
+        pcie_tl_tlp tlp;
+        forever begin
+            sw.usp.tx_fifo.get(tlp);
+            rc_adapter.tlm_rx_fifo.put(tlp);
+            replenish_credits(tlp);
+            if (tlp.get_category() == TLP_CAT_COMPLETION) begin
+                if (scb != null)
+                    scb.write_rc(tlp);
+                if (rc_agent.rc_driver != null) begin
+                    pcie_tl_cpl_tlp cpl;
+                    if ($cast(cpl, tlp))
+                        void'(rc_agent.rc_driver.handle_completion(cpl));
+                end
+            end
+        end
+    endtask
+
+    // Switch DSP[i] tx -> EP[i] rx (+ EP auto-response)
+    protected task switch_to_ep_loopback(int idx);
+        pcie_tl_tlp tlp;
+        forever begin
+            sw.dsp[idx].tx_fifo.get(tlp);
+            ep_adapters[idx].tlm_rx_fifo.put(tlp);
+            replenish_credits(tlp);
+            if (cfg.ep_auto_response && ep_agents[idx].ep_driver != null) begin
+                if (tlp.kind inside {TLP_MEM_RD, TLP_MEM_RD_LK, TLP_MEM_WR,
+                                     TLP_CFG_RD0, TLP_CFG_WR0, TLP_IO_RD, TLP_IO_WR}) begin
+                    fork
+                        begin
+                            automatic pcie_tl_tlp t = tlp;
+                            automatic int i = idx;
+                            ep_agents[i].ep_driver.handle_request(t);
+                        end
+                    join_none
+                end
+            end
+        end
+    endtask
+
+    // EP[i] tx -> Switch DSP[i] rx
+    protected task ep_to_switch_loopback(int idx);
+        pcie_tl_tlp tlp;
+        forever begin
+            ep_adapters[idx].tlm_tx_fifo.get(tlp);
+            // Replenish EP's per-port FC credits (TLP delivered to switch)
+            replenish_port_credits(sw.dsp[idx].fc_mgr, tlp);
+            sw.dsp[idx].rx_fifo.put(tlp);
+        end
+    endtask
+
+    //=========================================================================
     // Replenish FC credits after TLP delivery (TLM mode only)
     //=========================================================================
     protected function void replenish_credits(pcie_tl_tlp tlp);
@@ -317,6 +471,29 @@ class pcie_tl_env extends uvm_env;
             TLP_CAT_COMPLETION: begin
                 fc_mgr.return_credit(FC_CPL_HDR, 1);
                 fc_mgr.return_credit(FC_CPL_DATA, data_credits);
+            end
+        endcase
+    endfunction
+
+    //=========================================================================
+    // Replenish per-port FC credits (for switch mode)
+    //=========================================================================
+    protected function void replenish_port_credits(pcie_tl_fc_manager port_fc, pcie_tl_tlp tlp);
+        int data_credits;
+        if (!port_fc.fc_enable || port_fc.infinite_credit) return;
+        data_credits = tlp.get_data_credits();
+        case (tlp.get_category())
+            TLP_CAT_POSTED: begin
+                port_fc.return_credit(FC_POSTED_HDR, 1);
+                port_fc.return_credit(FC_POSTED_DATA, data_credits);
+            end
+            TLP_CAT_NON_POSTED: begin
+                port_fc.return_credit(FC_NONPOSTED_HDR, 1);
+                port_fc.return_credit(FC_NONPOSTED_DATA, data_credits);
+            end
+            TLP_CAT_COMPLETION: begin
+                port_fc.return_credit(FC_CPL_HDR, 1);
+                port_fc.return_credit(FC_CPL_DATA, data_credits);
             end
         endcase
     endfunction
@@ -355,12 +532,15 @@ class pcie_tl_env extends uvm_env;
         cov.tag_usage_enable    = cfg.tag_usage_cov;
         cov.ordering_enable     = cfg.ordering_cov;
         cov.error_inject_enable = cfg.error_inject_cov;
+        cov.sriov_enable      = cfg.sriov_enable;
+        cov.prefix_cov_enable = cfg.prefix_enable;
 
         // Scoreboard
         if (scb != null) begin
             scb.ordering_check_enable   = cfg.ordering_check_enable;
             scb.completion_check_enable = cfg.completion_check_enable;
             scb.data_integrity_enable   = cfg.data_integrity_enable;
+            scb.prefix_check_enable = cfg.prefix_enable;
         end
 
         // Adapter mode
@@ -381,6 +561,7 @@ class pcie_tl_env extends uvm_env;
         ep2rc_delay.latency_min_ns  = cfg.ep2rc_latency_min_ns;
         ep2rc_delay.latency_max_ns  = cfg.ep2rc_latency_max_ns;
         ep2rc_delay.update_interval = cfg.link_delay_update_interval;
+
     endfunction
 
 endclass

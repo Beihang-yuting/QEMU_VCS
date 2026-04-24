@@ -9,6 +9,7 @@ package pcie_tl_pkg;
 
     //--- Types ---
     `include "types/pcie_tl_types.sv"
+    `include "types/pcie_tl_prefix.sv"
     `include "types/pcie_tl_tlp.sv"
 
     //--- Shared Components ---
@@ -19,9 +20,17 @@ package pcie_tl_pkg;
     `include "shared/pcie_tl_ordering_engine.sv"
     `include "shared/pcie_tl_cfg_space_manager.sv"
     `include "shared/pcie_tl_link_delay_model.sv"
+    `include "shared/pcie_tl_sriov_cap.sv"
+    `include "shared/pcie_tl_func_manager.sv"
 
     //--- Adapter ---
     `include "adapter/pcie_tl_if_adapter.sv"
+
+    //--- Switch ---
+    `include "switch/pcie_tl_switch_config.sv"
+    `include "switch/pcie_tl_switch_port.sv"
+    `include "switch/pcie_tl_switch_fabric.sv"
+    `include "switch/pcie_tl_switch.sv"
 
     //--- Agent ---
     `include "agent/pcie_tl_base_driver.sv"

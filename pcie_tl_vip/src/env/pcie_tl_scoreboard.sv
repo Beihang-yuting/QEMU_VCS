@@ -30,6 +30,10 @@ class pcie_tl_scoreboard extends uvm_scoreboard;
     bit ordering_check_enable   = 1;
     bit completion_check_enable = 1;
     bit data_integrity_enable   = 1;
+    bit prefix_check_enable     = 0;
+
+    int prefix_format_errors    = 0;
+    int prefix_integrity_errors = 0;
 
     //--- Statistics ---
     int total_requests     = 0;
@@ -94,6 +98,7 @@ class pcie_tl_scoreboard extends uvm_scoreboard;
             check_ordering(tlp, rc_sent_history);
 
         rc_sent_history.push_back(tlp);
+        check_prefix_format(tlp);
         if (rc_sent_history.size() > 64)
             void'(rc_sent_history.pop_front());
     endfunction
@@ -124,6 +129,7 @@ class pcie_tl_scoreboard extends uvm_scoreboard;
             check_ordering(tlp, ep_sent_history);
 
         ep_sent_history.push_back(tlp);
+        check_prefix_format(tlp);
         if (ep_sent_history.size() > 64)
             void'(ep_sent_history.pop_front());
     endfunction
@@ -280,12 +286,94 @@ class pcie_tl_scoreboard extends uvm_scoreboard;
     endfunction
 
     //=========================================================================
+    // Check: TLP Prefix format legality
+    //=========================================================================
+    protected function void check_prefix_format(pcie_tl_tlp tlp);
+        int local_count = 0;
+        bit seen_e2e = 0;
+
+        if (!prefix_check_enable) return;
+        if (tlp.prefixes.size() == 0) return;
+
+        if (tlp.prefixes.size() > 4) begin
+            `uvm_error("SCB_PREFIX", $sformatf(
+                "TLP has %0d prefixes (max 4): tag=0x%03h",
+                tlp.prefixes.size(), tlp.tag))
+            prefix_format_errors++;
+        end
+
+        foreach (tlp.prefixes[i]) begin
+            if (tlp.prefixes[i].is_local()) begin
+                local_count++;
+                if (seen_e2e) begin
+                    `uvm_error("SCB_PREFIX", $sformatf(
+                        "Local prefix at position %0d after E2E prefix: tag=0x%03h",
+                        i, tlp.tag))
+                    prefix_format_errors++;
+                end
+            end else begin
+                seen_e2e = 1;
+            end
+        end
+
+        if (local_count > 1) begin
+            `uvm_error("SCB_PREFIX", $sformatf(
+                "Multiple Local prefixes (%0d) found: tag=0x%03h",
+                local_count, tlp.tag))
+            prefix_format_errors++;
+        end
+    endfunction
+
+    //=========================================================================
+    // Check: E2E Prefix integrity (content unchanged after switch traversal)
+    //=========================================================================
+    function void check_prefix_integrity(pcie_tl_tlp sent, pcie_tl_tlp received);
+        int sent_e2e = 0;
+        int recv_e2e = 0;
+
+        if (!prefix_check_enable) return;
+
+        foreach (sent.prefixes[i])
+            if (sent.prefixes[i].is_e2e()) sent_e2e++;
+        foreach (received.prefixes[i])
+            if (received.prefixes[i].is_e2e()) recv_e2e++;
+
+        if (sent_e2e != recv_e2e) begin
+            `uvm_error("SCB_PREFIX", $sformatf(
+                "E2E prefix count mismatch: sent=%0d received=%0d tag=0x%03h",
+                sent_e2e, recv_e2e, sent.tag))
+            prefix_integrity_errors++;
+            return;
+        end
+
+        begin
+            int si = 0, ri = 0;
+            while (si < sent.prefixes.size() && ri < received.prefixes.size()) begin
+                if (sent.prefixes[si].is_local()) begin si++; continue; end
+                if (received.prefixes[ri].is_local()) begin ri++; continue; end
+                if (sent.prefixes[si].raw_dw != received.prefixes[ri].raw_dw) begin
+                    `uvm_error("SCB_PREFIX", $sformatf(
+                        "E2E prefix content mismatch at index %0d: sent=0x%08h received=0x%08h tag=0x%03h",
+                        si, sent.prefixes[si].raw_dw, received.prefixes[ri].raw_dw, sent.tag))
+                    prefix_integrity_errors++;
+                end
+                si++;
+                ri++;
+            end
+        end
+    endfunction
+
+    //=========================================================================
     // Report
     //=========================================================================
     function void report_phase(uvm_phase phase);
         `uvm_info("SCB", $sformatf("\n========== Scoreboard Report ==========\n  Requests:     %0d\n  Completions:  %0d\n  Matched:      %0d\n  Mismatched:   %0d\n  Unexpected:   %0d\n  Timed Out:    %0d\n========================================",
             total_requests, total_completions, matched, mismatched, unexpected, timed_out
         ), UVM_LOW)
+
+        if (prefix_check_enable)
+            `uvm_info("SCB", $sformatf("  Prefix Format Errors:   %0d\n  Prefix Integrity Errors: %0d",
+                prefix_format_errors, prefix_integrity_errors), UVM_LOW)
 
         // Check for incomplete multi-completion trackers
         if (cpl_trackers.size() > 0) begin

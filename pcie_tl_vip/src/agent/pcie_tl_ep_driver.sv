@@ -20,6 +20,9 @@ class pcie_tl_ep_driver extends pcie_tl_base_driver;
     //--- Internal IO space ---
     bit [7:0] io_space[bit [31:0]];
 
+    //--- Function Manager (set by env when sriov_enable=1) ---
+    pcie_tl_func_manager  func_manager;
+
     function new(string name = "pcie_tl_ep_driver", uvm_component parent = null);
         super.new(name, parent);
     endfunction
@@ -29,12 +32,21 @@ class pcie_tl_ep_driver extends pcie_tl_base_driver;
     //=========================================================================
     virtual task handle_request(pcie_tl_tlp req);
         int delay;
-
         if (!auto_response_enable) return;
-
-        // Random response delay
         delay = $urandom_range(response_delay_max, response_delay_min);
         if (delay > 0) #(delay * 1ns);
+
+        // SR-IOV mode: dispatch config requests by BDF
+        if (func_manager != null) begin
+            if (req.kind inside {TLP_CFG_RD0, TLP_CFG_RD1}) begin
+                handle_cfg_read_sriov(req);
+                return;
+            end
+            if (req.kind inside {TLP_CFG_WR0, TLP_CFG_WR1}) begin
+                handle_cfg_write_sriov(req);
+                return;
+            end
+        end
 
         case (req.kind)
             TLP_CFG_RD0, TLP_CFG_RD1:  handle_cfg_read(req);
@@ -202,6 +214,68 @@ class pcie_tl_ep_driver extends pcie_tl_base_driver;
         end
 
         cpl = generate_completion(req, CPL_STATUS_SC);
+        send_tlp(cpl);
+    endtask
+
+    //=========================================================================
+    // SR-IOV Config Read handler (BDF-dispatched)
+    //=========================================================================
+    protected task handle_cfg_read_sriov(pcie_tl_tlp req);
+        pcie_tl_cfg_tlp cfg_req;
+        pcie_tl_cpl_tlp cpl;
+        pcie_tl_func_context ctx;
+        bit [31:0] data;
+
+        $cast(cfg_req, req);
+        ctx = func_manager.lookup_by_bdf(cfg_req.completer_id);
+
+        if (ctx == null || !ctx.enabled) begin
+            cpl = generate_completion(req, CPL_STATUS_UR);
+            send_tlp(cpl);
+            return;
+        end
+
+        data = ctx.cfg_mgr.read(cfg_req.get_cfg_addr());
+
+        cpl = generate_completion(req, CPL_STATUS_SC);
+        cpl.kind    = TLP_CPLD;
+        cpl.fmt     = FMT_3DW_WITH_DATA;
+        cpl.length  = 1;
+        cpl.payload = new[4];
+        cpl.payload[0] = data[7:0];
+        cpl.payload[1] = data[15:8];
+        cpl.payload[2] = data[23:16];
+        cpl.payload[3] = data[31:24];
+        cpl.completer_id = ctx.bdf;
+
+        send_tlp(cpl);
+    endtask
+
+    //=========================================================================
+    // SR-IOV Config Write handler (BDF-dispatched)
+    //=========================================================================
+    protected task handle_cfg_write_sriov(pcie_tl_tlp req);
+        pcie_tl_cfg_tlp cfg_req;
+        pcie_tl_cpl_tlp cpl;
+        pcie_tl_func_context ctx;
+        bit [31:0] data;
+
+        $cast(cfg_req, req);
+        ctx = func_manager.lookup_by_bdf(cfg_req.completer_id);
+
+        if (ctx == null || !ctx.enabled) begin
+            cpl = generate_completion(req, CPL_STATUS_UR);
+            send_tlp(cpl);
+            return;
+        end
+
+        if (req.payload.size() >= 4)
+            data = {req.payload[3], req.payload[2], req.payload[1], req.payload[0]};
+
+        ctx.cfg_mgr.write(cfg_req.get_cfg_addr(), data, cfg_req.first_be);
+
+        cpl = generate_completion(req, CPL_STATUS_SC);
+        cpl.completer_id = ctx.bdf;
         send_tlp(cpl);
     endtask
 

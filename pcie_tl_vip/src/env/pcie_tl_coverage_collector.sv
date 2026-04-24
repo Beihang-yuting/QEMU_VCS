@@ -13,6 +13,8 @@ class pcie_tl_coverage_collector extends uvm_subscriber #(pcie_tl_tlp);
     bit ordering_enable     = 0;
     bit error_inject_enable = 0;
     bit mps_mrrs_enable     = 0;
+    bit sriov_enable        = 0;
+    bit prefix_cov_enable   = 0;
 
     //--- Shared component references ---
     pcie_tl_fc_manager    fc_mgr;
@@ -120,6 +122,33 @@ class pcie_tl_coverage_collector extends uvm_subscriber #(pcie_tl_tlp);
         }
     endgroup
 
+    //--- Sampled prefix state ---
+    int sampled_prefix_count;
+    bit sampled_has_local;
+    bit sampled_has_e2e;
+    tlp_prefix_type_e sampled_prefix_type;
+
+    covergroup prefix_cg;
+        cp_prefix_count: coverpoint sampled_prefix_count {
+            bins none  = {0};
+            bins one   = {1};
+            bins two   = {2};
+            bins three = {3};
+            bins four  = {4};
+        }
+        cp_has_local: coverpoint sampled_has_local;
+        cp_has_e2e:   coverpoint sampled_has_e2e;
+        cp_prefix_type: coverpoint sampled_prefix_type {
+            bins mriov     = {PREFIX_MRIOV};
+            bins ext_tph   = {PREFIX_EXT_TPH};
+            bins pasid     = {PREFIX_PASID};
+            bins ide       = {PREFIX_IDE};
+            bins local_vnd = {PREFIX_LOCAL_VENDOR};
+            bins e2e_vnd   = {PREFIX_E2E_VENDOR};
+        }
+        cx_type_count: cross cp_prefix_type, cp_prefix_count;
+    endgroup
+
     //--- User callbacks ---
     pcie_tl_coverage_callback user_callbacks[$];
 
@@ -132,6 +161,7 @@ class pcie_tl_coverage_collector extends uvm_subscriber #(pcie_tl_tlp);
         ordering_cg = new();
         error_injection_cg = new();
         mps_mrrs_cg = new();
+        prefix_cg = new();
     endfunction
 
     //=========================================================================
@@ -152,6 +182,8 @@ class pcie_tl_coverage_collector extends uvm_subscriber #(pcie_tl_tlp);
         ordering_enable     = 1;
         error_inject_enable = 1;
         mps_mrrs_enable     = 1;
+        sriov_enable        = 1;
+        prefix_cov_enable   = 1;
     endfunction
 
     function void disable_all();
@@ -162,6 +194,8 @@ class pcie_tl_coverage_collector extends uvm_subscriber #(pcie_tl_tlp);
         ordering_enable     = 0;
         error_inject_enable = 0;
         mps_mrrs_enable     = 0;
+        sriov_enable        = 0;
+        prefix_cov_enable   = 0;
     endfunction
 
     //=========================================================================
@@ -190,6 +224,23 @@ class pcie_tl_coverage_collector extends uvm_subscriber #(pcie_tl_tlp);
             error_injection_cg.sample();
         if (mps_mrrs_enable && mps_mrrs_cg != null)
             mps_mrrs_cg.sample();
+
+        if (prefix_cov_enable && prefix_cg != null && t.prefixes.size() > 0) begin
+            sampled_prefix_count = t.prefixes.size();
+            sampled_has_local = 0;
+            sampled_has_e2e   = 0;
+            foreach (t.prefixes[i]) begin
+                if (t.prefixes[i].is_local()) sampled_has_local = 1;
+                if (t.prefixes[i].is_e2e())   sampled_has_e2e   = 1;
+                sampled_prefix_type = t.prefixes[i].prefix_type;
+                prefix_cg.sample();
+            end
+        end else if (prefix_cov_enable && prefix_cg != null) begin
+            sampled_prefix_count = 0;
+            sampled_has_local = 0;
+            sampled_has_e2e   = 0;
+            prefix_cg.sample();
+        end
 
         prev_category = curr_category;
         is_first_tlp = 0;

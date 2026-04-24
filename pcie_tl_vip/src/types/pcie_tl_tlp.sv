@@ -88,6 +88,10 @@ class pcie_tl_tlp extends uvm_sequence_item;
     rand bit [31:0]             field_bitmask;
     rand tlp_constraint_mode_e  constraint_mode_sel;
 
+    //--- TLP Prefix ---
+    rand pcie_tl_prefix  prefixes[$];
+    rand bit             has_prefix;
+
     //--- Default constraints: no error injection (only in LEGAL mode) ---
     constraint c_no_inject {
         (constraint_mode_sel == CONSTRAINT_LEGAL) -> inject_ecrc_err  == 0;
@@ -99,6 +103,16 @@ class pcie_tl_tlp extends uvm_sequence_item;
 
     constraint c_default_mode {
         soft constraint_mode_sel == CONSTRAINT_LEGAL;
+    }
+
+    //--- Prefix constraints ---
+    constraint c_prefix_count {
+        has_prefix == (prefixes.size() > 0);
+        prefixes.size() <= 4;
+    }
+
+    constraint c_default_no_prefix {
+        soft has_prefix == 0;
     }
 
     //--- Bound payload size regardless of mode ---
@@ -117,6 +131,22 @@ class pcie_tl_tlp extends uvm_sequence_item;
 
     function new(string name = "pcie_tl_tlp");
         super.new(name);
+    endfunction
+
+    function void post_randomize();
+        int local_count = 0;
+        bit seen_e2e = 0;
+        foreach (prefixes[i]) begin
+            if (prefixes[i].is_local()) begin
+                local_count++;
+                if (seen_e2e)
+                    `uvm_error("TLP", "Local TLP Prefix must appear before E2E Prefixes")
+                if (local_count > 1)
+                    `uvm_error("TLP", "At most 1 Local TLP Prefix allowed")
+            end else begin
+                seen_e2e = 1;
+            end
+        end
     endfunction
 
     // Determine TLP category for ordering
@@ -170,6 +200,8 @@ class pcie_tl_tlp extends uvm_sequence_item;
         if (inject_ecrc_err || inject_poisoned || violate_ordering || field_bitmask != 0)
             s = {s, $sformatf(" [ERR_INJ: ecrc=%0b poison=%0b ord_vio=%0b bitmask=0x%08h]",
                                inject_ecrc_err, inject_poisoned, violate_ordering, field_bitmask)};
+        if (prefixes.size() > 0)
+            s = {s, $sformatf(" [PREFIXES: %0d]", prefixes.size())};
         return s;
     endfunction
 
@@ -187,7 +219,8 @@ class pcie_tl_tlp extends uvm_sequence_item;
                 length        == rhs_.length        &&
                 requester_id  == rhs_.requester_id  &&
                 tag           == rhs_.tag           &&
-                payload.size() == rhs_.payload.size());
+                payload.size() == rhs_.payload.size() &&
+                prefixes.size() == rhs_.prefixes.size());
     endfunction
 
     virtual function void do_print(uvm_printer printer);

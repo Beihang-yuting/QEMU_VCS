@@ -5,11 +5,13 @@ class pcie_tl_cfg_rd_seq extends uvm_sequence #(pcie_tl_tlp);
     rand bit [3:0]  first_be;
     rand bit        is_type1;
     rand tlp_constraint_mode_e mode;
+    bit [15:0] completer_id;  // alias for target_bdf (set either one)
     constraint c_default { mode == CONSTRAINT_LEGAL; first_be == 4'hF; }
     function new(string name = "pcie_tl_cfg_rd_seq"); super.new(name); endfunction
     task body();
         pcie_tl_cfg_tlp tlp;
         tlp_kind_e k = is_type1 ? TLP_CFG_RD1 : TLP_CFG_RD0;
+        if (completer_id != 0) target_bdf = completer_id;
         `uvm_do_with(tlp, { tlp.kind == k; tlp.completer_id == local::target_bdf;
             tlp.reg_num == local::reg_num; tlp.first_be == local::first_be;
             tlp.constraint_mode_sel == local::mode; })

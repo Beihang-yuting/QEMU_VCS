@@ -206,5 +206,52 @@ typedef enum bit [15:0] {
     EXT_CAP_ID_ATS     = 16'h000F,
     EXT_CAP_ID_SRIOV   = 16'h0010,
     EXT_CAP_ID_LTR     = 16'h0018,
-    EXT_CAP_ID_VENDOR  = 16'h000B
+    EXT_CAP_ID_VENDOR  = 16'h000B,
+    EXT_CAP_ID_PASID   = 16'h001B,
+    EXT_CAP_ID_TPH     = 16'h0017
 } ext_cap_id_e;
+
+// TLP Prefix type (byte 0 of prefix DW: Fmt[2:0]=100 + Type[4:0])
+typedef enum bit [7:0] {
+    PREFIX_MRIOV         = 8'h80,  // Local:  MR-IOV Routing ID
+    PREFIX_LOCAL_VENDOR  = 8'h8E,  // Local:  Vendor-Defined
+    PREFIX_EXT_TPH       = 8'h90,  // E2E:    Extended TPH
+    PREFIX_PASID         = 8'h91,  // E2E:    PASID
+    PREFIX_IDE           = 8'h92,  // E2E:    IDE
+    PREFIX_E2E_VENDOR    = 8'h9E   // E2E:    Vendor-Defined
+} tlp_prefix_type_e;
+
+// Function locator (for SR-IOV PF/VF identification)
+typedef struct {
+    int        pf_index;    // PF number (0..N-1)
+    int        vf_index;    // VF number within PF (-1 = PF itself)
+    bit [15:0] bdf;         // Full Bus/Device/Function
+    bit        is_vf;
+} func_id_t;
+
+// Switch port role
+typedef enum int {
+    SWITCH_USP,
+    SWITCH_DSP
+} switch_port_role_e;
+
+// Switch routing result
+typedef enum int {
+    SWITCH_ROUTE_USP    = 0,
+    SWITCH_ROUTE_LOCAL  = -1,
+    SWITCH_ROUTE_DROP   = -2,
+    SWITCH_ROUTE_BCAST  = -3
+} switch_route_special_e;
+
+// Switch route table entry (per port)
+typedef struct {
+    bit [7:0]  primary_bus;
+    bit [7:0]  secondary_bus;
+    bit [7:0]  subordinate_bus;
+    bit [31:0] mem_base;
+    bit [31:0] mem_limit;
+    bit [63:0] pref_base;
+    bit [63:0] pref_limit;
+    bit [15:0] io_base;
+    bit [15:0] io_limit;
+} switch_route_entry_t;

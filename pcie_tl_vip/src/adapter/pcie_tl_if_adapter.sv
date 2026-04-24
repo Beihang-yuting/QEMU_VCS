@@ -87,9 +87,8 @@ class pcie_tl_if_adapter extends uvm_component;
         total_beats = (bytes.size() + 31) / 32;  // 256-bit bus = 32 bytes
 
         for (int i = 0; i < total_beats; i++) begin
-            /* CoSim 本地补丁（对应已合入上游前的 ef132f4）：
-               在 negedge 用 blocking (=) 驱动，避免 NBA 与 glue 的 always_ff
-               之间的 delta-cycle race（back-to-back TLP 被丢）。 */
+            /* CoSim 本地补丁：在 negedge 用 blocking (=) 驱动，避免 NBA 与
+               glue 的 always_ff 之间的 delta-cycle race（back-to-back TLP 被丢）。 */
             @(negedge vif.clk);
             vif.tlp_valid = 1;
             vif.tlp_sop   = (i == 0);
