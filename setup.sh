@@ -1207,7 +1207,7 @@ case "$SETUP_MODE" in
         echo ""
         echo "  手动启动 + 串口交互（可在 Guest 中执行 ping/iperf 等测试）:"
         echo "    ./cosim.sh start qemu --shm /cosim0 --sock /tmp/cosim0.sock \\"
-        echo "        --serial-sock /tmp/qemu-serial.sock --drive <rootfs路径>"
+        echo "        --serial-sock /tmp/qemu-serial.sock --drive guest/images/rootfs.ext4"
         echo "    # 然后用 python/socat 连接串口:"
         echo "    python3 -c \"import socket; s=socket.socket(socket.AF_UNIX); s.connect('/tmp/qemu-serial.sock'); ...\""
         ;;
@@ -1217,7 +1217,7 @@ case "$SETUP_MODE" in
             echo "    ./cosim.sh start qemu --transport tcp --port-base 9100"
         else
             echo "    ./cosim.sh start qemu --transport tcp --port-base 9100 \\"
-            echo "        --drive ${IMAGES_DIR}/cosim-guest.qcow2"
+            echo "        --drive guest/images/rootfs.ext4"
         fi
         echo ""
         echo "  提示:"

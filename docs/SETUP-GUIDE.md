@@ -70,7 +70,7 @@ CoSim Platform 支持两种部署模式：
 ```bash
 # 终端 1: QEMU（基础模式，串口输出到终端）
 ./cosim.sh start qemu --shm /cosim0 --sock /tmp/cosim0.sock \
-    --drive /path/to/rootfs.ext4
+    --drive guest/images/rootfs.ext4
 
 # 终端 2: VCS（默认开启波形 dump）
 ./cosim.sh start vcs --shm /cosim0 --sock /tmp/cosim0.sock --role A
@@ -87,7 +87,7 @@ CoSim Platform 支持两种部署模式：
 # 终端 1: QEMU（串口通过 socket 输出）
 ./cosim.sh start qemu --shm /cosim0 --sock /tmp/cosim0.sock \
     --serial-sock /tmp/qemu-serial.sock \
-    --drive /path/to/rootfs.ext4
+    --drive guest/images/rootfs.ext4
 
 # 终端 2: VCS
 ./cosim.sh start vcs --shm /cosim0 --sock /tmp/cosim0.sock --role A
@@ -150,7 +150,7 @@ VCS 默认输出 `cosim_wave.fsdb`（Verdi 打开）：
 
 # full guest（磁盘镜像）
 ./cosim.sh start qemu --transport tcp --port-base 9100 \
-    --drive /path/to/rootfs.ext4
+    --drive guest/images/rootfs.ext4
 ```
 
 **提示：**
