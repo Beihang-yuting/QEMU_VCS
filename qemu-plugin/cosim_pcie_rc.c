@@ -207,16 +207,9 @@ static uint32_t cosim_config_read(PCIDevice *pci_dev, uint32_t address, int len)
         return pci_default_read_config(pci_dev, address, len);
     }
 
-    /* Standard PCI header (0x00-0x3F): QEMU manages locally. */
-    if (address < 0x40) {
-        uint32_t v = pci_default_read_config(pci_dev, address, len);
-        if (address >= 0x34)
-            fprintf(stderr, "[cfg_read] local addr=0x%02x len=%d val=0x%x\n",
-                    address, len, v);
-        return v;
-    }
-
-    /* Capability chain (0x40+): forward to VCS. */
+    /* 全部 config space 转发到 VCS（由 VCS bypass proxy 或 DUT RTL 处理）。
+     * QEMU 本地 config[] 仍由 cosim_config_write 的 pci_default_write_config
+     * 维护，供 QEMU PCI 框架内部使用（不影响 Guest 看到的值）。 */
     fprintf(stderr, "[cfg_read] VCS forward addr=0x%02x len=%d\n", address, len);
     uint32_t dword_addr = address & ~3u;
     uint32_t byte_offset = address & 3u;
