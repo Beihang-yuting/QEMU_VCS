@@ -195,6 +195,7 @@ class cosim_rc_driver extends pcie_tl_rc_driver;
                             "CfgRd BYPASS: addr=0x%03h dw[%0d]=0x%08h tag=%0d",
                             dpi_addr, dw_addr, cfg_data, dpi_tag), UVM_MEDIUM)
                         total_tlp_count++;
+                        #1;  // 仿真时间推进，避免 0 时间处理大量 config TLP 冻结仿真
                         continue;
                     end
                 end
@@ -208,6 +209,7 @@ class cosim_rc_driver extends pcie_tl_rc_driver;
                             "CfgWr BYPASS: addr=0x%03h dw[%0d]=0x%08h tag=%0d (no cpl)",
                             dpi_addr, dw_addr, wr_data, dpi_tag), UVM_MEDIUM)
                         total_tlp_count++;
+                        #1;  // 仿真时间推进
                         continue;
                     end
                 end
