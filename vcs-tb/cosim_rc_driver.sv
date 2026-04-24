@@ -57,6 +57,11 @@ class cosim_rc_driver extends pcie_tl_rc_driver;
     int unsigned     cpl_data_buf[16];
 
     // -----------------------------------------------------------------------
+    // Config Space Bypass Proxy (cosim 模式专用)
+    // -----------------------------------------------------------------------
+    pcie_tl_config_proxy  config_proxy;
+
+    // -----------------------------------------------------------------------
     // Statistics counters
     // -----------------------------------------------------------------------
     int unsigned total_tlp_count;
@@ -106,6 +111,9 @@ class cosim_rc_driver extends pcie_tl_rc_driver;
             `uvm_fatal(get_name(),
                 "Failed to get 'cpl_vif' from config_db. "
                 + "Ensure cosim_vip_top sets it.")
+
+        // Config Space Bypass Proxy（默认开启，+BYPASS_CONFIG=0 关闭）
+        config_proxy = pcie_tl_config_proxy::type_id::create("config_proxy", this);
     endfunction
 
     // -----------------------------------------------------------------------
@@ -171,6 +179,41 @@ class cosim_rc_driver extends pcie_tl_rc_driver;
             dpi_tag  = bridge_vcs_get_poll_tag();
             for (int i = 0; i < 16; i++)
                 dpi_data[i] = bridge_vcs_get_poll_data(i);
+
+            // Config Space Bypass: CfgRd/CfgWr 由 proxy 直接回 completion，不进 VIP pipeline
+            if (config_proxy != null && config_proxy.bypass_enable) begin
+                if (dpi_type == BV_TLP_CFGRD0 || dpi_type == BV_TLP_CFGRD1) begin
+                    bit [31:0] cfg_data;
+                    int dw_addr = int'(dpi_addr) >> 2;
+                    if (config_proxy.handle_cfg_read(dw_addr, cfg_data)) begin
+                        // 直接回 CplD 给 QEMU
+                        for (int i = 0; i < 16; i++)
+                            bridge_vcs_set_cpl_data(i, 0);
+                        bridge_vcs_set_cpl_data(0, cfg_data);
+                        ret = bridge_vcs_send_cpl_scalar(dpi_tag, 1);
+                        `uvm_info(get_name(), $sformatf(
+                            "CfgRd BYPASS: addr=0x%03h dw[%0d]=0x%08h tag=%0d",
+                            dpi_addr, dw_addr, cfg_data, dpi_tag), UVM_MEDIUM)
+                        total_tlp_count++;
+                        continue;
+                    end
+                end
+                if (dpi_type == BV_TLP_CFGWR0 || dpi_type == BV_TLP_CFGWR1) begin
+                    int dw_addr = int'(dpi_addr) >> 2;
+                    bit [31:0] wr_data = dpi_data[0];
+                    if (config_proxy.handle_cfg_write(dw_addr, wr_data)) begin
+                        // CfgWr 回 Cpl（无数据）
+                        for (int i = 0; i < 16; i++)
+                            bridge_vcs_set_cpl_data(i, 0);
+                        ret = bridge_vcs_send_cpl_scalar(dpi_tag, 0);
+                        `uvm_info(get_name(), $sformatf(
+                            "CfgWr BYPASS: addr=0x%03h dw[%0d]=0x%08h tag=%0d",
+                            dpi_addr, dw_addr, wr_data, dpi_tag), UVM_MEDIUM)
+                        total_tlp_count++;
+                        continue;
+                    end
+                end
+            end
 
 `ifdef COSIM_VIP_MODE
             // Extended fields — defaults for P1, P2+ scope
