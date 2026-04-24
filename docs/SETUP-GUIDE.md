@@ -272,8 +272,19 @@ grep -c 'MSI' /tmp/qemu_e2e.log
 - VCS (Synopsys) + License
 
 ### 运行依赖
-- Guest kernel (bzImage) + rootfs（buildroot 或 initramfs）
+- Guest kernel + rootfs 存放在 `guest/images/`（setup.sh 可自动构建 buildroot）
+  - `guest/images/bzImage` — 内核
+  - `guest/images/rootfs.ext4` — 磁盘镜像
 - EDA 环境：VCS 机器需 `source ~/set-env.sh`
+
+### 目录结构
+```
+vcs_sim/          VCS 仿真产物（simv_vip + 波形 + 日志）
+guest/images/     Guest 镜像（bzImage + rootfs.ext4）
+logs/             测试运行日志
+build/            Bridge CMake 产物
+third_party/      QEMU / glib / buildroot 源码
+```
 
 ### 网络配置
 | 角色 | IP | MAC |

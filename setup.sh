@@ -971,97 +971,140 @@ fi
 # [步骤] 准备 Guest 环境
 # ============================================================
 if [ "$NEED_GUEST" = true ]; then
-    next_step "准备 Guest 环境（${GUEST_TYPE}）"
+    next_step "准备 Guest 环境"
 
     mkdir -p "$IMAGES_DIR"
 
-    if [ "$GUEST_TYPE" = "minimal" ]; then
-        info "构建轻量 initramfs（含 virtio 驱动 + 测试工具）"
-        info "  包含: virtio_net.ko, net_failover.ko, failover.ko"
-        info "  工具: ping, iperf3, netcat, arping, ip, dmesg, lspci"
+    # 检查是否已有镜像
+    if [ -f "${IMAGES_DIR}/bzImage" ] && [ -f "${IMAGES_DIR}/rootfs.ext4" ]; then
+        ok "Guest 镜像已存在:"
+        ok "  Kernel: ${IMAGES_DIR}/bzImage"
+        ok "  Rootfs: ${IMAGES_DIR}/rootfs.ext4"
+        PASS_COUNT=$((PASS_COUNT + 1))
+    else
+        echo ""
+        echo -e "${BOLD}选择 Guest 构建方式:${NC}"
+        echo ""
+        echo "  1) 快速构建 — buildroot 默认配置 (qemu_x86_64_defconfig)"
+        echo "     完整 Linux + 常用工具，编译约 30-60 分钟"
+        echo ""
+        echo "  2) 精简构建 — 自定义配置，仅 virtio + 测试工具（推荐）"
+        echo "     含 virtio_net, iperf3, netcat, arping，编译约 10-20 分钟"
+        echo ""
+        echo "  3) 跳过 — 手动准备镜像到 ${IMAGES_DIR}/"
+        echo ""
 
-        HAS_KERNEL=false
-        if ls /boot/vmlinuz-* >/dev/null 2>&1; then
-            HAS_KERNEL=true
+        GUEST_BUILD_CHOICE=""
+        if [ -z "$GUEST_BUILD_CHOICE" ]; then
+            read -rp "请选择 [1/2/3]: " GUEST_BUILD_CHOICE
         fi
 
-        # 兼容两种脚本位置
-        BUILD_INITRAMFS=""
-        for candidate in "${PROJECT_DIR}/build_initramfs.sh" \
-                         "${PROJECT_DIR}/scripts/build_guest_initramfs.sh"; do
-            if [ -x "$candidate" ]; then
-                BUILD_INITRAMFS="$candidate"
-                break
-            fi
-        done
-        if [ "$HAS_KERNEL" = true ] && [ -n "$BUILD_INITRAMFS" ]; then
-            for variant in phase4 phase5 tap; do
-                info "  构建 ${variant}..."
-                if "$BUILD_INITRAMFS" "$variant" 2>&1; then
-                    ok "  initramfs-${variant} 构建成功"
+        case "$GUEST_BUILD_CHOICE" in
+            1|2)
+                # ---- 获取 buildroot 源码 ----
+                BUILDROOT_VER="2024.02.1"
+                BUILDROOT_DIR="${PROJECT_DIR}/third_party/buildroot-${BUILDROOT_VER}"
+                BUILDROOT_TARBALL="${PROJECT_DIR}/third_party/buildroot-${BUILDROOT_VER}.tar.gz"
+                BUILDROOT_URL="https://buildroot.org/downloads/buildroot-${BUILDROOT_VER}.tar.gz"
+
+                if [ -d "$BUILDROOT_DIR" ] && [ -f "$BUILDROOT_DIR/Makefile" ]; then
+                    info "Buildroot 源码已存在: ${BUILDROOT_DIR}"
                 else
-                    warn "  initramfs-${variant} 构建失败（非致命）"
-                    FAIL_COUNT=$((FAIL_COUNT + 1))
-                fi
-            done
-        else
-            if [ "$HAS_KERNEL" = false ]; then
-                warn "未检测到 /boot/vmlinuz，跳过 initramfs 构建"
-                info "  容器中请使用已有的 Alpine 内核和 initramfs 文件"
-            else
-                warn "build_initramfs.sh 不存在或不可执行"
-                warn "  已搜索: ${PROJECT_DIR}/build_initramfs.sh, ${PROJECT_DIR}/scripts/build_guest_initramfs.sh"
-            fi
+                    mkdir -p "${PROJECT_DIR}/third_party"
 
-            FOUND_IMAGES=0
-            for pattern in "$HOME/workspace/custom-initramfs-"*.gz \
-                           "$HOME/workspace/alpine-vmlinuz"* \
-                           "${IMAGES_DIR}"/*.cpio.gz; do
-                for f in $pattern; do
-                    if [ -f "$f" ]; then
-                        info "  发现已有镜像: $f"
-                        FOUND_IMAGES=$((FOUND_IMAGES + 1))
+                    if [ -f "$BUILDROOT_TARBALL" ]; then
+                        info "使用本地 tarball: ${BUILDROOT_TARBALL}"
+                    else
+                        # 检测网络
+                        HAS_NETWORK_BR=false
+                        if timeout 5 wget -q --spider "$BUILDROOT_URL" 2>/dev/null; then
+                            HAS_NETWORK_BR=true
+                        fi
+
+                        if [ "$HAS_NETWORK_BR" = true ]; then
+                            info "下载 buildroot ${BUILDROOT_VER}..."
+                            if ! wget -q --show-progress -O "$BUILDROOT_TARBALL" "$BUILDROOT_URL"; then
+                                fail "下载失败"
+                                fail "  请手动下载: ${BUILDROOT_URL}"
+                                fail "  放置到: ${BUILDROOT_TARBALL}"
+                                SKIP_COUNT=$((SKIP_COUNT + 1))
+                                GUEST_BUILD_CHOICE="skip"
+                            fi
+                        else
+                            fail "无法下载 buildroot（内网环境）"
+                            fail "  请手动下载: ${BUILDROOT_URL}"
+                            fail "  放置到: ${BUILDROOT_TARBALL}"
+                            fail "  然后重新运行 setup.sh"
+                            SKIP_COUNT=$((SKIP_COUNT + 1))
+                            GUEST_BUILD_CHOICE="skip"
+                        fi
                     fi
-                done
-            done
-            if [ "$FOUND_IMAGES" -gt 0 ]; then
-                ok "发现 ${FOUND_IMAGES} 个已有镜像文件"
-            else
-                warn "未找到已有镜像文件，需要手动构建 initramfs"
-            fi
-            SKIP_COUNT=$((SKIP_COUNT + 1))
-        fi
 
-    elif [ "$GUEST_TYPE" = "full" ]; then
-        info "准备完整 Linux 磁盘镜像"
-        QCOW2_IMAGE="${IMAGES_DIR}/cosim-guest.qcow2"
+                    if [ -f "$BUILDROOT_TARBALL" ] && [ "$GUEST_BUILD_CHOICE" != "skip" ]; then
+                        info "解压 buildroot..."
+                        tar xf "$BUILDROOT_TARBALL" -C "${PROJECT_DIR}/third_party/"
+                    fi
+                fi
 
-        if [ -f "$QCOW2_IMAGE" ]; then
-            ok "磁盘镜像已存在: ${QCOW2_IMAGE}"
-            PASS_COUNT=$((PASS_COUNT + 1))
-        else
-            info "================================================"
-            info "完整磁盘镜像需要手动准备"
-            info ""
-            info "推荐步骤:"
-            info "  1. 下载 Ubuntu/Alpine 云镜像:"
-            info "     wget https://cloud-images.ubuntu.com/jammy/current/jammy-server-cloudimg-amd64.img"
-            info "     cp jammy-server-cloudimg-amd64.img ${QCOW2_IMAGE}"
-            info ""
-            info "  2. 调整镜像大小（可选）:"
-            info "     qemu-img resize ${QCOW2_IMAGE} 10G"
-            info ""
-            info "  3. 镜像中需要安装:"
-            info "     - virtio 驱动（通常已内置）"
-            info "     - 自定义 DPU/NIC 驱动"
-            info "     - 测试工具: iperf3, netcat, arping"
-            info ""
-            info "  4. 启动方式（替代 -initrd）:"
-            info "     qemu-system-x86_64 -drive file=${QCOW2_IMAGE},format=qcow2 ..."
-            info "================================================"
-            warn "完整磁盘镜像尚未准备，请按以上步骤操作"
-            SKIP_COUNT=$((SKIP_COUNT + 1))
-        fi
+                # ---- 编译 buildroot ----
+                if [ -d "$BUILDROOT_DIR" ] && [ "$GUEST_BUILD_CHOICE" != "skip" ]; then
+                    cd "$BUILDROOT_DIR"
+
+                    if [ "$GUEST_BUILD_CHOICE" = "1" ]; then
+                        info "使用 buildroot 默认配置 (qemu_x86_64_defconfig)..."
+                        make qemu_x86_64_defconfig
+                    else
+                        if [ -f "${PROJECT_DIR}/guest/buildroot_defconfig" ]; then
+                            info "使用精简自定义配置..."
+                            cp "${PROJECT_DIR}/guest/buildroot_defconfig" .config
+                        else
+                            info "自定义 defconfig 不存在，使用默认配置..."
+                            make qemu_x86_64_defconfig
+                        fi
+                    fi
+
+                    info "编译 buildroot（可能需要 10-60 分钟）..."
+                    if make -j"$(nproc)" 2>&1 | tail -5; then
+                        # 拷贝产出到统一位置
+                        if [ -f "output/images/bzImage" ]; then
+                            cp output/images/bzImage "${IMAGES_DIR}/"
+                            ok "Kernel 拷贝到: ${IMAGES_DIR}/bzImage"
+                        fi
+                        if [ -f "output/images/rootfs.ext4" ]; then
+                            cp output/images/rootfs.ext4 "${IMAGES_DIR}/"
+                            ok "Rootfs 拷贝到: ${IMAGES_DIR}/rootfs.ext4"
+                        elif [ -f "output/images/rootfs.ext2" ]; then
+                            cp output/images/rootfs.ext2 "${IMAGES_DIR}/rootfs.ext4"
+                            ok "Rootfs 拷贝到: ${IMAGES_DIR}/rootfs.ext4"
+                        fi
+                        PASS_COUNT=$((PASS_COUNT + 1))
+                    else
+                        fail "Buildroot 编译失败"
+                        fail "  手动重试: cd ${BUILDROOT_DIR} && make -j\$(nproc)"
+                        FAIL_COUNT=$((FAIL_COUNT + 1))
+                    fi
+
+                    cd "$PROJECT_DIR"
+                fi
+                ;;
+            3|*)
+                info "跳过 Guest 构建"
+                info "  请手动准备以下文件:"
+                info "    ${IMAGES_DIR}/bzImage      — Guest 内核"
+                info "    ${IMAGES_DIR}/rootfs.ext4   — Guest 磁盘镜像"
+                info ""
+                info "  方式 A: 从其他机器拷贝 buildroot 产出"
+                info "    scp <源机>:~/workspace/buildroot/output/images/bzImage ${IMAGES_DIR}/"
+                info "    scp <源机>:~/workspace/buildroot/output/images/rootfs.ext4 ${IMAGES_DIR}/"
+                info ""
+                info "  方式 B: 本地构建 buildroot"
+                info "    wget https://buildroot.org/downloads/buildroot-2024.02.1.tar.gz"
+                info "    tar xf buildroot-2024.02.1.tar.gz && cd buildroot-2024.02.1"
+                info "    make qemu_x86_64_defconfig && make -j\$(nproc)"
+                info "    cp output/images/bzImage output/images/rootfs.ext4 ${IMAGES_DIR}/"
+                SKIP_COUNT=$((SKIP_COUNT + 1))
+                ;;
+        esac
     fi
 fi
 
