@@ -15,6 +15,7 @@ Makefile.cmake
 *.dylib
 
 # VCS simulation artifacts
+vcs_sim/
 simv
 simv.daidir/
 csrc/
@@ -23,6 +24,15 @@ vc_hdrs.h
 *.vpd
 *.fsdb
 *.vcd
+
+# Guest images (built, not committed)
+guest/images/
+
+# Runtime logs
+logs/
+
+# Third-party sources
+third_party/
 
 # SHM / socket runtime files
 /tmp/cosim*.sock

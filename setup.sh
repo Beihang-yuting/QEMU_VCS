@@ -310,7 +310,7 @@ QEMU_DIR="${PROJECT_DIR}/third_party/qemu"
 BUILD_DIR="${PROJECT_DIR}/build"
 BRIDGE_LIB_DIR="${BUILD_DIR}/bridge"
 VCS_SIM_DIR="${PROJECT_DIR}/vcs-tb/sim_build"
-IMAGES_DIR="${PROJECT_DIR}/images"
+IMAGES_DIR="${PROJECT_DIR}/guest/images"
 
 info "项目目录: ${PROJECT_DIR}"
 info "部署模式: ${SETUP_MODE}"
@@ -923,7 +923,7 @@ if [ "$NEED_VCS" = true ]; then
             fail "  手动重试: make vcs-vip"
         fi
 
-        VCS_VIP_BIN="${BUILD_DIR}/simv_vip"
+        VCS_VIP_BIN="${PROJECT_DIR}/vcs_sim/simv_vip"
         if [ -f "$VCS_VIP_BIN" ]; then
             ok "simv_vip 编译成功: ${VCS_VIP_BIN}"
             PASS_COUNT=$((PASS_COUNT + 1))
@@ -1134,7 +1134,7 @@ if [ "$NEED_QEMU" = true ]; then
     check_artifact "qemu-system-x86_64" "${QEMU_DIR}/build/qemu-system-x86_64"
 fi
 if [ "$NEED_VCS" = true ]; then
-    check_artifact "simv_vip (VCS)" "${BUILD_DIR}/simv_vip"
+    check_artifact "simv_vip (VCS)" "${PROJECT_DIR}/vcs_sim/simv_vip"
 fi
 if [ "$NEED_TAP_BRIDGE" = true ]; then
     check_artifact "eth_tap_bridge" "${PROJECT_DIR}/tools/eth_tap_bridge"

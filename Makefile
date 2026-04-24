@@ -1,6 +1,7 @@
 .PHONY: all bridge test-unit test-integration clean
 
-BUILD_DIR := build
+BUILD_DIR     := build
+VCS_SIM_DIR   := vcs_sim
 
 all: bridge
 
@@ -52,6 +53,7 @@ VCS_LDFLAGS = -Wl,--no-as-needed -lrt -lpthread
 # Legacy 模式
 .PHONY: vcs-legacy
 vcs-legacy:
+	mkdir -p $(VCS_SIM_DIR)
 	vcs $(VCS_FLAGS) $(VCS_UVM) \
 		-CFLAGS "$(VCS_CFLAGS)" \
 		-LDFLAGS "$(VCS_LDFLAGS)" \
@@ -59,11 +61,12 @@ vcs-legacy:
 		bridge/vcs/bridge_vcs.sv \
 		vcs-tb/tb_top.sv vcs-tb/pcie_ep_stub.sv \
 		$(BRIDGE_C_SRCS) \
-		-o $(BUILD_DIR)/simv_legacy
+		-o $(VCS_SIM_DIR)/simv_legacy
 
 # VIP 模式
 .PHONY: vcs-vip
 vcs-vip:
+	mkdir -p $(VCS_SIM_DIR)
 	vcs $(VCS_FLAGS) $(VCS_UVM) \
 		+define+COSIM_VIP_MODE \
 		-CFLAGS "$(VCS_CFLAGS)" \
@@ -79,11 +82,12 @@ vcs-vip:
 		vcs-tb/cosim_pkg.sv \
 		vcs-tb/cosim_vip_top.sv \
 		$(BRIDGE_C_SRCS) \
-		-o $(BUILD_DIR)/simv_vip
+		-o $(VCS_SIM_DIR)/simv_vip
 
 # VIP + 性能统计
 .PHONY: vcs-vip-perf
 vcs-vip-perf:
+	mkdir -p $(VCS_SIM_DIR)
 	vcs $(VCS_FLAGS) $(VCS_UVM) \
 		+define+COSIM_VIP_MODE +define+COSIM_PERF_EN \
 		-CFLAGS "$(VCS_CFLAGS)" \
@@ -99,26 +103,26 @@ vcs-vip-perf:
 		vcs-tb/cosim_pkg.sv \
 		vcs-tb/cosim_vip_top.sv \
 		$(BRIDGE_C_SRCS) \
-		-o $(BUILD_DIR)/simv_vip_perf
+		-o $(VCS_SIM_DIR)/simv_vip_perf
 
 # 运行目标
 .PHONY: run-legacy run-vip
 run-legacy: vcs-legacy
-	$(BUILD_DIR)/simv_legacy +SHM_NAME=/cosim0 +SOCK_PATH=/tmp/cosim.sock
+	$(VCS_SIM_DIR)/simv_legacy +SHM_NAME=/cosim0 +SOCK_PATH=/tmp/cosim.sock
 
 run-vip: vcs-vip
-	$(BUILD_DIR)/simv_vip +SHM_NAME=/cosim0 +SOCK_PATH=/tmp/cosim.sock \
+	$(VCS_SIM_DIR)/simv_vip +SHM_NAME=/cosim0 +SOCK_PATH=/tmp/cosim.sock \
 		+UVM_TESTNAME=cosim_test
 
 # ===== TCP 跨机模式 =====
 # QEMU 侧 (server, listen)
 .PHONY: run-vip-tcp-server
 run-vip-tcp-server: vcs-vip
-	$(BUILD_DIR)/simv_vip +transport=tcp +LISTEN=0.0.0.0 +PORT_BASE=9100 +INSTANCE_ID=0 \
+	$(VCS_SIM_DIR)/simv_vip +transport=tcp +LISTEN=0.0.0.0 +PORT_BASE=9100 +INSTANCE_ID=0 \
 		+UVM_TESTNAME=cosim_test
 
 # VCS 侧 (client, connect) — 用法: make run-vip-tcp-client REMOTE_HOST=192.168.1.100
 .PHONY: run-vip-tcp-client
 run-vip-tcp-client: vcs-vip
-	$(BUILD_DIR)/simv_vip +transport=tcp +REMOTE_HOST=$(REMOTE_HOST) +PORT_BASE=9100 +INSTANCE_ID=0 \
+	$(VCS_SIM_DIR)/simv_vip +transport=tcp +REMOTE_HOST=$(REMOTE_HOST) +PORT_BASE=9100 +INSTANCE_ID=0 \
 		+UVM_TESTNAME=cosim_test

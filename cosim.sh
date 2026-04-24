@@ -110,17 +110,19 @@ resolve_simv() {
         return 0
     fi
     for candidate in \
+        "${PROJECT_DIR}/vcs_sim/simv_vip" \
         "${PROJECT_DIR}/build/simv_vip" \
         "${PROJECT_DIR}/vcs-tb/sim_build/simv" \
-        "$HOME/workspace/cosim-platform/build/simv_vip" \
-        "$HOME/cosim-platform/build/simv_vip"; do
+        "$HOME/workspace/cosim-platform/vcs_sim/simv_vip" \
+        "$HOME/cosim-platform/vcs_sim/simv_vip"; do
         if [ -f "$candidate" ]; then
             echo "$candidate"
             return 0
         fi
     done
     echo "  搜索路径:" >&2
-    echo "    ${PROJECT_DIR}/build/simv_vip" >&2
+    echo "    ${PROJECT_DIR}/vcs_sim/simv_vip" >&2
+    echo "    ${PROJECT_DIR}/build/simv_vip (兼容旧)" >&2
     echo "  提示: SIMV=/path/to/simv_vip ./cosim.sh ..." >&2
     echo "  或先运行: make vcs-vip" >&2
     return 1
@@ -139,17 +141,18 @@ resolve_kernel() {
         return 0
     fi
     for candidate in \
+        "${PROJECT_DIR}/guest/images/bzImage" \
         "${PROJECT_DIR}/guest/bzImage" \
-        "$HOME/workspace/alpine-vmlinuz-new" \
-        "$HOME/workspace/buildroot/output/images/bzImage"; do
+        "$HOME/workspace/buildroot/output/images/bzImage" \
+        "$HOME/workspace/alpine-vmlinuz-new"; do
         if [ -f "$candidate" ]; then
             echo "$candidate"
             return 0
         fi
     done
     echo "  搜索路径:" >&2
-    echo "    ${PROJECT_DIR}/guest/bzImage" >&2
-    echo "    $HOME/workspace/buildroot/output/images/bzImage" >&2
+    echo "    ${PROJECT_DIR}/guest/images/bzImage" >&2
+    echo "    ${PROJECT_DIR}/guest/bzImage (兼容旧)" >&2
     echo "  提示: KERNEL=/path/to/bzImage ./cosim.sh ..." >&2
     return 1
 }
@@ -404,7 +407,7 @@ run_single_phase() {
     rm -f "$SOCK" 2>/dev/null || true
 
     # 日志目录
-    local LOGDIR="/tmp/cosim_${phase}_$(date +%Y%m%d_%H%M%S)"
+    local LOGDIR="${PROJECT_DIR}/logs/${phase}_$(date +%Y%m%d_%H%M%S)"
     mkdir -p "$LOGDIR"
     log_info "日志目录: $LOGDIR/"
 
@@ -536,7 +539,7 @@ run_dual_phase() {
     rm -f "$SOCK1" "$SOCK2" 2>/dev/null || true
 
     # 日志目录
-    local LOGDIR="/tmp/cosim_${phase}_$(date +%Y%m%d_%H%M%S)"
+    local LOGDIR="${PROJECT_DIR}/logs/${phase}_$(date +%Y%m%d_%H%M%S)"
     mkdir -p "$LOGDIR"
     log_info "日志目录: $LOGDIR/"
 
@@ -728,7 +731,7 @@ run_tap_test() {
     fi
 
     # 日志目录
-    local LOGDIR="/tmp/cosim_tap_$(date +%Y%m%d_%H%M%S)"
+    local LOGDIR="${PROJECT_DIR}/logs/tap_$(date +%Y%m%d_%H%M%S)"
     mkdir -p "$LOGDIR"
     log_info "日志目录: $LOGDIR/"
 
@@ -1326,10 +1329,10 @@ cmd_log() {
 
     # 找到最新的日志目录
     local latest_dir
-    latest_dir=$(ls -dt /tmp/cosim_*/ 2>/dev/null | head -1)
+    latest_dir=$(ls -dt "${PROJECT_DIR}/logs"/*/ 2>/dev/null | head -1)
 
     if [ -z "$latest_dir" ]; then
-        log_warn "没有找到日志目录 (/tmp/cosim_*/)"
+        log_warn "没有找到日志目录 (${PROJECT_DIR}/logs/)"
         return 1
     fi
 
