@@ -23,6 +23,9 @@ class pcie_tl_ep_driver extends pcie_tl_base_driver;
     //--- Function Manager (set by env when sriov_enable=1) ---
     pcie_tl_func_manager  func_manager;
 
+    //--- Config Space Bypass Proxy (set by ep_agent) ---
+    pcie_tl_config_proxy  config_proxy;
+
     function new(string name = "pcie_tl_ep_driver", uvm_component parent = null);
         super.new(name, parent);
     endfunction
@@ -35,6 +38,19 @@ class pcie_tl_ep_driver extends pcie_tl_base_driver;
         if (!auto_response_enable) return;
         delay = $urandom_range(response_delay_max, response_delay_min);
         if (delay > 0) #(delay * 1ns);
+
+        // Config Space Bypass: CfgRd/CfgWr 由 proxy 直接回 completion
+        if (config_proxy != null && config_proxy.bypass_enable) begin
+            bit bypassed;
+            if (req.kind inside {TLP_CFG_RD0, TLP_CFG_RD1}) begin
+                handle_cfg_read_bypass(req, bypassed);
+                if (bypassed) return;
+            end
+            if (req.kind inside {TLP_CFG_WR0, TLP_CFG_WR1}) begin
+                handle_cfg_write_bypass(req, bypassed);
+                if (bypassed) return;
+            end
+        end
 
         // SR-IOV mode: dispatch config requests by BDF
         if (func_manager != null) begin
@@ -345,6 +361,68 @@ class pcie_tl_ep_driver extends pcie_tl_base_driver;
         tlp.payload[3] = msi_data[31:24];
 
         send_tlp(tlp);
+    endtask
+
+    //=========================================================================
+    // Config Bypass: CfgRd via proxy (返回 1=已拦截, 0=穿透)
+    //=========================================================================
+    protected task handle_cfg_read_bypass(pcie_tl_tlp req, output bit intercepted);
+        pcie_tl_cfg_tlp cfg_req;
+        bit [31:0] data;
+        int dw_addr;
+
+        intercepted = 0;
+        if (!$cast(cfg_req, req)) return;
+        dw_addr = cfg_req.get_cfg_addr() >> 2;
+
+        if (!config_proxy.handle_cfg_read(dw_addr, data)) return;
+
+        // 生成 CplD 回 RC
+        begin
+            pcie_tl_cpl_tlp cpl;
+            cpl = generate_completion(req, CPL_STATUS_SC);
+            cpl.kind    = TLP_CPLD;
+            cpl.fmt     = FMT_3DW_WITH_DATA;
+            cpl.length  = 1;
+            cpl.payload = new[4];
+            cpl.payload[0] = data[7:0];
+            cpl.payload[1] = data[15:8];
+            cpl.payload[2] = data[23:16];
+            cpl.payload[3] = data[31:24];
+            send_tlp(cpl);
+        end
+        intercepted = 1;
+    endtask
+
+    //=========================================================================
+    // Config Bypass: CfgWr via proxy (intercepted=1 已拦截, 0 穿透)
+    //=========================================================================
+    protected task handle_cfg_write_bypass(pcie_tl_tlp req, output bit intercepted);
+        pcie_tl_cfg_tlp cfg_req;
+        bit [31:0] data;
+        int dw_addr;
+
+        intercepted = 0;
+        if (!$cast(cfg_req, req)) return;
+        dw_addr = cfg_req.get_cfg_addr() >> 2;
+
+        if (req.payload.size() >= 4)
+            data = {req.payload[3], req.payload[2], req.payload[1], req.payload[0]};
+        else
+            data = 32'h0;
+
+        if (!config_proxy.handle_cfg_write(dw_addr, data)) return;
+
+        // CfgWr 回 Cpl（无数据）
+        begin
+            pcie_tl_cpl_tlp cpl;
+            cpl = generate_completion(req, CPL_STATUS_SC);
+            cpl.kind   = TLP_CPL;
+            cpl.fmt    = FMT_3DW_NO_DATA;
+            cpl.length = 0;
+            send_tlp(cpl);
+        end
+        intercepted = 1;
     endtask
 
 endclass
