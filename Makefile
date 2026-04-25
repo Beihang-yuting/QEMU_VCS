@@ -188,13 +188,13 @@ else
 endif
 	@echo "  Guest: $(GUEST_IP) ($(ROLE))  Peer: $(PEER_IP)"
 	@echo "  日志: $(LOG_DIR)/qemu.log"
-	@echo "  提示: 阻塞等待 VCS 连接，Ctrl+C 可退出"
+	@echo "  提示: 阻塞等待 VCS 连接，Ctrl+A X 退出 QEMU"
 	@echo "============================================"
 	$(QEMU) -M q35 -m $(GUEST_MEMORY) -smp 1 \
 		-kernel $(KERNEL) $(_GUEST_ARGS) \
 		-append '$(strip $(_QEMU_APPEND))' \
 		-device '$(strip $(_QEMU_DEV))' \
-		-nographic -no-reboot \
+		-nographic -no-reboot -action panic=shutdown \
 		-d unimp -D $(LOG_DIR)/qemu_debug.log \
 		2>&1 | tee $(LOG_DIR)/qemu.log
 
