@@ -3,6 +3,8 @@
 # 统一编译 + 运行 + 测试入口
 # 用法: make help
 # ============================================================
+SHELL := /bin/bash
+
 .PHONY: all help bridge vcs-vip vcs-legacy vcs-vip-perf tap-bridge \
         run-qemu run-vcs run-dual run-tap tap-check \
         test-unit test-integration test \
@@ -147,6 +149,16 @@ endif
 _QEMU_APPEND = console=ttyS0 init=/init guest_ip=$(GUEST_IP) peer_ip=$(PEER_IP) role=$(ROLE) wait_sec=$(WAIT_SEC)
 
 run-qemu:
+	@if [ ! -f '$(QEMU)' ]; then \
+		echo "[错误] QEMU 未找到: $(QEMU)"; \
+		echo "  请指定: make run-qemu QEMU=/path/to/qemu-system-x86_64"; \
+		exit 1; \
+	fi
+	@if [ ! -f '$(KERNEL)' ]; then \
+		echo "[错误] Kernel 未找到: $(KERNEL)"; \
+		echo "  请指定: make run-qemu KERNEL=/path/to/bzImage"; \
+		exit 1; \
+	fi
 	@mkdir -p $(LOG_DIR) $(RUN_DIR)
 	@echo "============================================"
 	@echo " QEMU ($(TRANSPORT) 模式)"
@@ -160,9 +172,9 @@ endif
 	@echo "  提示: 阻塞等待 VCS 连接，Ctrl+C 可退出"
 	@echo "============================================"
 	$(QEMU) -M q35 -m $(GUEST_MEMORY) -smp 1 \
-		-kernel $(KERNEL) -initrd $(INITRD) \
-		-append "$(_QEMU_APPEND)" \
-		-device "$(_QEMU_DEV)" \
+		-kernel $(KERNEL) $(if $(INITRD),-initrd $(INITRD)) \
+		-append '$(strip $(_QEMU_APPEND))' \
+		-device '$(strip $(_QEMU_DEV))' \
 		-nographic -no-reboot \
 		-d unimp -D $(LOG_DIR)/qemu_debug.log \
 		2>&1 | tee $(LOG_DIR)/qemu.log
@@ -199,12 +211,17 @@ endif
 # 运行 — 双实例对打
 # ============================================================
 run-dual:
+	@if [ ! -f '$(QEMU)' ]; then \
+		echo "[错误] QEMU 未找到: $(QEMU)"; exit 1; \
+	fi
+	@if [ ! -f '$(KERNEL)' ]; then \
+		echo "[错误] Kernel 未找到: $(KERNEL)"; exit 1; \
+	fi
 	@mkdir -p $(RUN_DIR)
 	@LOGDIR=$(LOG_DIR)/dual_$$(date +%Y%m%d_%H%M%S); \
 	mkdir -p $$LOGDIR; \
 	PIDS=""; \
-	_cleanup() { echo ""; echo "清理进程..."; kill $$PIDS 2>/dev/null; wait 2>/dev/null; }; \
-	trap '_cleanup' INT TERM; \
+	trap 'echo ""; echo "清理进程..."; kill $$PIDS 2>/dev/null; wait 2>/dev/null' INT TERM; \
 	echo "============================================"; \
 	echo " 双实例对打 ($(TRANSPORT))  日志: $$LOGDIR/"; \
 	echo "============================================"; \
@@ -220,14 +237,16 @@ run-dual:
 		VT1="+SHM_NAME=/cosim_d0 +SOCK_PATH=$(RUN_DIR)/cosim_d0.sock"; \
 		VT2="+SHM_NAME=/cosim_d1 +SOCK_PATH=$(RUN_DIR)/cosim_d1.sock"; \
 	fi; \
-	$(QEMU) -M q35 -m $(GUEST_MEMORY) -smp 1 -kernel $(KERNEL) -initrd $(INITRD) \
-		-append "console=ttyS0 init=/init guest_ip=10.0.0.1 peer_ip=10.0.0.2 role=server wait_sec=$(WAIT_SEC)" \
+	INITRD_OPT=""; \
+	if [ -f '$(INITRD)' ]; then INITRD_OPT="-initrd $(INITRD)"; fi; \
+	$(QEMU) -M q35 -m $(GUEST_MEMORY) -smp 1 -kernel $(KERNEL) $$INITRD_OPT \
+		-append 'console=ttyS0 init=/init guest_ip=10.0.0.1 peer_ip=10.0.0.2 role=server wait_sec=$(WAIT_SEC)' \
 		-device "$$DEV1" -nographic -no-reboot \
 		-d unimp -D $$LOGDIR/qemu1_debug.log > $$LOGDIR/qemu1.log 2>&1 & \
 	PIDS="$$PIDS $$!"; sleep 2; \
 	echo "[2/4] QEMU2 (10.0.0.2, client)..."; \
-	$(QEMU) -M q35 -m $(GUEST_MEMORY) -smp 1 -kernel $(KERNEL) -initrd $(INITRD) \
-		-append "console=ttyS0 init=/init guest_ip=10.0.0.2 peer_ip=10.0.0.1 role=client wait_sec=$(WAIT_SEC)" \
+	$(QEMU) -M q35 -m $(GUEST_MEMORY) -smp 1 -kernel $(KERNEL) $$INITRD_OPT \
+		-append 'console=ttyS0 init=/init guest_ip=10.0.0.2 peer_ip=10.0.0.1 role=client wait_sec=$(WAIT_SEC)' \
 		-device "$$DEV2" -nographic -no-reboot \
 		-d unimp -D $$LOGDIR/qemu2_debug.log > $$LOGDIR/qemu2.log 2>&1 & \
 	PIDS="$$PIDS $$!"; sleep 2; \
@@ -323,7 +342,7 @@ info:
 	@echo "  QEMU:   $(QEMU)  $$(test -f '$(QEMU)' && echo [OK] || echo [缺失])"
 	@echo "  SIMV:   $(SIMV)  $$(test -f '$(SIMV)' && echo [OK] || echo [缺失])"
 	@echo "  Kernel: $(KERNEL)  $$(test -f '$(KERNEL)' && echo [OK] || echo [缺失])"
-	@echo "  Initrd: $(INITRD)  $$(test -f '$(INITRD)' && echo [OK] || echo [缺失])"
+	@echo "  Initrd: $(if $(INITRD),$(INITRD)  $$(test -f '$(INITRD)' && echo [OK] || echo [缺失]),(未配置，可选))"
 	@echo "  TAP:    $(TAP_BRIDGE)  $$(test -f '$(TAP_BRIDGE)' && echo [OK] || echo [缺失])"
 	@echo "  日志:   $(LOG_DIR)/"
 	@echo "  运行:   $(RUN_DIR)/"
