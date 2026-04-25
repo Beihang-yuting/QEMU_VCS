@@ -37,32 +37,34 @@ make test   # 需要 cmake >= 3.16, gcc >= 9, pthread/librt
 | 集成 ETH（P3） | `test_eth_loopback`, `test_link_drop`, `test_mac_stub_e2e`, `test_time_sync_loose` |
 | 工具（P4） | `test_cli_smoke`, `test_launch_smoke` |
 
-### 2. 集成到 QEMU 源码树
+### 2. 构建 Guest 系统
 
 ```bash
-export QEMU_SRC=./third_party/qemu        # 指向你的 QEMU 源码
-./scripts/setup_cosim_qemu.sh $QEMU_SRC   # 自动复制 cosim_pcie_rc.{c,h}
-cd $QEMU_SRC && ./configure --target-list=x86_64-softmmu --enable-kvm && make -j$(nproc)
+# Alpine (推荐，轻量快速)
+./setup.sh --mode local --guest alpine
+
+# Debian (完整工具链，支持 Guest 内编译驱动)
+./setup.sh --mode local --guest debian
 ```
 
-### 3. 编译 VCS 侧
-
-```bash
-vcs -full64 -sverilog \
-    -CFLAGS  "-I bridge/common -I bridge/vcs" \
-    -LDFLAGS "-L build/bridge -lcosim_bridge_vcs -lrt -lpthread" \
-    bridge/vcs/bridge_vcs.sv vcs-tb/*.sv -o simv
-```
-
-### 4. 启动联合仿真
+### 3. 启动联合仿真
 
 ```bash
 # 终端 A：启 QEMU
-export GUEST_KERNEL=/path/to/bzImage
-./scripts/run_cosim.sh
+make run-qemu
 
 # 终端 B：启 VCS
-./simv +SHM_NAME=/cosim0 +SOCK_PATH=/tmp/cosim.sock
+make run-vcs
+
+# 回到终端 A，登录 root，然后:
+cosim-start          # 配网
+ping 10.0.0.2        # 测试连通
+cosim-stop           # 退出
+```
+
+调试模式（显示详细日志）:
+```bash
+make run-qemu VERBOSE=1
 ```
 
 ---
