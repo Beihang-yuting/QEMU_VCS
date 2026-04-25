@@ -1056,7 +1056,7 @@ if [ "$NEED_GUEST" = true ]; then
                     else
                         if [ -f "${PROJECT_DIR}/guest/buildroot_defconfig" ]; then
                             info "使用精简自定义配置..."
-                            cp "${PROJECT_DIR}/guest/buildroot_defconfig" .config
+                            make BR2_DEFCONFIG="${PROJECT_DIR}/guest/buildroot_defconfig" defconfig
                         else
                             info "自定义 defconfig 不存在，使用默认配置..."
                             make qemu_x86_64_defconfig
