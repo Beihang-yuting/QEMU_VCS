@@ -63,8 +63,9 @@ CoSim Platform 安装脚本
   vcs-only    仅 VCS 侧  — 编译 VCS + Bridge，QEMU 在远程机器（TCP 通信）
 
 Guest 环境 (--guest, 仅 local/qemu-only 模式):
-  minimal     轻量 initramfs — virtio 驱动 + ping/iperf/netcat（基础测试）
-  full        完整磁盘镜像  — 可安装自定义驱动、扩展业务测试
+  alpine      Alpine Linux — 轻量快速，apk 包管理（推荐）
+  debian      Debian 精简版 — 完整工具链，apt 包管理
+  skip        跳过 Guest 构建，手动准备镜像
 
 QEMU 源码 (--qemu-src, 仅 local/qemu-only 模式):
   download    从 GitHub 下载 QEMU v9.2.0
@@ -76,9 +77,9 @@ QEMU 源码 (--qemu-src, 仅 local/qemu-only 模式):
 
 示例:
   ./setup.sh                                          # 交互式菜单
-  ./setup.sh --mode local --guest minimal             # 本地全栈 + 轻量测试
-  ./setup.sh --mode local --guest full                # 本地全栈 + 完整镜像
-  ./setup.sh --mode qemu-only --guest minimal         # QEMU 侧远程部署
+  ./setup.sh --mode local --guest alpine              # 本地全栈 + Alpine（推荐）
+  ./setup.sh --mode local --guest debian              # 本地全栈 + Debian 完整工具链
+  ./setup.sh --mode qemu-only --guest alpine          # QEMU 侧远程部署
   ./setup.sh --mode vcs-only                          # VCS 侧远程部署
 USAGE
     exit 0
@@ -149,21 +150,21 @@ interactive_menu() {
     if [ "$SETUP_MODE" != "vcs-only" ]; then
         echo -e "${BOLD}[2] 选择 Guest 环境${NC}"
         echo ""
-        echo "  1) minimal  — 轻量 initramfs"
-        echo "                 包含: virtio 驱动、ping、iperf3、netcat、arping"
-        echo "                 适用于: 基础网络功能测试、打流测试"
+        echo "  1) Alpine Linux  — 轻量快速，apk 包管理（推荐）"
+        echo "     镜像 ~50MB，启动 ~3 秒"
         echo ""
-        echo "  2) full     — 完整 Linux 磁盘镜像 (qcow2)"
-        echo "                 包含: 完整包管理器，可安装自定义驱动"
-        echo "                 适用于: 全能力测试、驱动开发、业务扩展"
+        echo "  2) Debian 精简版 — 完整工具链，apt 包管理"
+        echo "     镜像 ~500MB，启动 ~15 秒"
         echo ""
+        echo "  3) 跳过 — 手动准备 rootfs 到 guest/images/"
 
         while true; do
-            read -rp "请选择 [1/2]: " choice
+            read -rp "请选择 [1/2/3]: " choice
             case "$choice" in
-                1) GUEST_TYPE="minimal"; break ;;
-                2) GUEST_TYPE="full"; break ;;
-                *) echo "  无效选择，请输入 1 或 2" ;;
+                1) GUEST_TYPE="alpine"; break ;;
+                2) GUEST_TYPE="debian"; break ;;
+                3) GUEST_TYPE="skip"; break ;;
+                *) echo "  无效选择，请输入 1、2 或 3" ;;
             esac
         done
         ok "Guest 环境: ${GUEST_TYPE}"
@@ -215,14 +216,14 @@ esac
 
 # QEMU 相关模式需要 guest 类型
 if [ "$SETUP_MODE" != "vcs-only" ]; then
-    GUEST_TYPE="${GUEST_TYPE:-minimal}"
+    GUEST_TYPE="${GUEST_TYPE:-alpine}"
     QEMU_SRC_OPT="${QEMU_SRC_OPT:-download}"
 
     case "$GUEST_TYPE" in
-        minimal|full) ;;
+        alpine|debian|skip) ;;
         *)
             fail "无效的 Guest 类型: ${GUEST_TYPE}"
-            fail "可选: minimal, full"
+            fail "可选: alpine, debian, skip"
             exit 1
             ;;
     esac
@@ -980,139 +981,45 @@ if [ "$NEED_GUEST" = true ]; then
 
     mkdir -p "$IMAGES_DIR"
 
-    # 检查是否已有镜像
     if [ -f "${IMAGES_DIR}/bzImage" ] && [ -f "${IMAGES_DIR}/rootfs.ext4" ]; then
         ok "Guest 镜像已存在:"
         ok "  Kernel: ${IMAGES_DIR}/bzImage"
         ok "  Rootfs: ${IMAGES_DIR}/rootfs.ext4"
         PASS_COUNT=$((PASS_COUNT + 1))
+    elif [ "$GUEST_TYPE" = "skip" ]; then
+        info "跳过 Guest 构建"
+        info "  请手动准备:"
+        info "    ${IMAGES_DIR}/bzImage      -- Guest 内核"
+        info "    ${IMAGES_DIR}/rootfs.ext4   -- Guest 磁盘镜像"
+        SKIP_COUNT=$((SKIP_COUNT + 1))
     else
-        echo ""
-        echo -e "${BOLD}选择 Guest 构建方式:${NC}"
-        echo ""
-        echo "  1) 快速构建 — buildroot 默认配置 (qemu_x86_64_defconfig)"
-        echo "     完整 Linux + 常用工具，编译约 30-60 分钟"
-        echo ""
-        echo "  2) 精简构建 — 自定义配置，仅 virtio + 测试工具（推荐）"
-        echo "     含 virtio_net, iperf3, netcat, arping，编译约 10-20 分钟"
-        echo ""
-        echo "  3) 跳过 — 手动准备镜像到 ${IMAGES_DIR}/"
-        echo ""
-
-        GUEST_BUILD_CHOICE=""
-        if [ -z "$GUEST_BUILD_CHOICE" ]; then
-            read -rp "请选择 [1/2/3]: " GUEST_BUILD_CHOICE
+        if ! sudo -n true 2>/dev/null; then
+            warn "构建 rootfs 需要 sudo 权限（mount/chroot）"
+            sudo true || { fail "无法获取 sudo 权限"; FAIL_COUNT=$((FAIL_COUNT + 1)); }
         fi
 
-        case "$GUEST_BUILD_CHOICE" in
-            1|2)
-                # ---- 获取 buildroot 源码 ----
-                BUILDROOT_VER="2024.02.1"
-                BUILDROOT_DIR="${PROJECT_DIR}/third_party/buildroot-${BUILDROOT_VER}"
-                BUILDROOT_TARBALL="${PROJECT_DIR}/third_party/buildroot-${BUILDROOT_VER}.tar.gz"
-                BUILDROOT_URL="https://buildroot.org/downloads/buildroot-${BUILDROOT_VER}.tar.gz"
+        info "编译自定义测试工具..."
+        "${PROJECT_DIR}/scripts/build_guest_tools.sh" || warn "部分工具编译失败"
 
-                if [ -d "$BUILDROOT_DIR" ] && [ -f "$BUILDROOT_DIR/Makefile" ]; then
-                    info "Buildroot 源码已存在: ${BUILDROOT_DIR}"
-                else
-                    mkdir -p "${PROJECT_DIR}/third_party"
+        if [ "$GUEST_TYPE" = "alpine" ]; then
+            header "构建 Alpine rootfs"
+            sudo "${PROJECT_DIR}/scripts/build_rootfs_alpine.sh" "$IMAGES_DIR"
+        elif [ "$GUEST_TYPE" = "debian" ]; then
+            header "构建 Debian rootfs"
+            sudo "${PROJECT_DIR}/scripts/build_rootfs_debian.sh" "$IMAGES_DIR"
+        fi
 
-                    if [ -f "$BUILDROOT_TARBALL" ]; then
-                        info "使用本地 tarball: ${BUILDROOT_TARBALL}"
-                    else
-                        # 检测网络
-                        HAS_NETWORK_BR=false
-                        if timeout 5 wget -q --spider "$BUILDROOT_URL" 2>/dev/null; then
-                            HAS_NETWORK_BR=true
-                        fi
+        if [ -f "${IMAGES_DIR}/rootfs.ext4" ]; then
+            ok "Rootfs 构建完成: ${IMAGES_DIR}/rootfs.ext4"
+            PASS_COUNT=$((PASS_COUNT + 1))
+        else
+            fail "Rootfs 构建失败"
+            FAIL_COUNT=$((FAIL_COUNT + 1))
+        fi
 
-                        if [ "$HAS_NETWORK_BR" = true ]; then
-                            info "下载 buildroot ${BUILDROOT_VER}..."
-                            if ! wget -q --show-progress -O "$BUILDROOT_TARBALL" "$BUILDROOT_URL"; then
-                                fail "下载失败"
-                                fail "  请手动下载: ${BUILDROOT_URL}"
-                                fail "  放置到: ${BUILDROOT_TARBALL}"
-                                SKIP_COUNT=$((SKIP_COUNT + 1))
-                                GUEST_BUILD_CHOICE="skip"
-                            fi
-                        else
-                            fail "无法下载 buildroot（内网环境）"
-                            fail "  请手动下载: ${BUILDROOT_URL}"
-                            fail "  放置到: ${BUILDROOT_TARBALL}"
-                            fail "  然后重新运行 setup.sh"
-                            SKIP_COUNT=$((SKIP_COUNT + 1))
-                            GUEST_BUILD_CHOICE="skip"
-                        fi
-                    fi
-
-                    if [ -f "$BUILDROOT_TARBALL" ] && [ "$GUEST_BUILD_CHOICE" != "skip" ]; then
-                        info "解压 buildroot..."
-                        tar xf "$BUILDROOT_TARBALL" -C "${PROJECT_DIR}/third_party/"
-                    fi
-                fi
-
-                # ---- 编译 buildroot ----
-                if [ -d "$BUILDROOT_DIR" ] && [ "$GUEST_BUILD_CHOICE" != "skip" ]; then
-                    cd "$BUILDROOT_DIR"
-
-                    if [ "$GUEST_BUILD_CHOICE" = "1" ]; then
-                        info "使用 buildroot 默认配置 (qemu_x86_64_defconfig)..."
-                        make qemu_x86_64_defconfig
-                    else
-                        if [ -f "${PROJECT_DIR}/guest/buildroot_defconfig" ]; then
-                            info "使用精简自定义配置..."
-                            make BR2_DEFCONFIG="${PROJECT_DIR}/guest/buildroot_defconfig" defconfig
-                        else
-                            info "自定义 defconfig 不存在，使用默认配置..."
-                            make qemu_x86_64_defconfig
-                        fi
-                    fi
-
-                    BR_LOG="${PROJECT_DIR}/logs/buildroot_build.log"
-                    mkdir -p "${PROJECT_DIR}/logs"
-                    info "编译 buildroot（可能需要 10-60 分钟）..."
-                    info "  完整日志: ${BR_LOG}"
-                    if make -j"$(nproc)" 2>&1 | tee "${BR_LOG}" | tail -20; then
-                        # 拷贝产出到统一位置
-                        if [ -f "output/images/bzImage" ]; then
-                            cp output/images/bzImage "${IMAGES_DIR}/"
-                            ok "Kernel 拷贝到: ${IMAGES_DIR}/bzImage"
-                        fi
-                        if [ -f "output/images/rootfs.ext4" ]; then
-                            cp output/images/rootfs.ext4 "${IMAGES_DIR}/"
-                            ok "Rootfs 拷贝到: ${IMAGES_DIR}/rootfs.ext4"
-                        elif [ -f "output/images/rootfs.ext2" ]; then
-                            cp output/images/rootfs.ext2 "${IMAGES_DIR}/rootfs.ext4"
-                            ok "Rootfs 拷贝到: ${IMAGES_DIR}/rootfs.ext4"
-                        fi
-                        PASS_COUNT=$((PASS_COUNT + 1))
-                    else
-                        fail "Buildroot 编译失败"
-                        fail "  手动重试: cd ${BUILDROOT_DIR} && make -j\$(nproc)"
-                        FAIL_COUNT=$((FAIL_COUNT + 1))
-                    fi
-
-                    cd "$PROJECT_DIR"
-                fi
-                ;;
-            3|*)
-                info "跳过 Guest 构建"
-                info "  请手动准备以下文件:"
-                info "    ${IMAGES_DIR}/bzImage      — Guest 内核"
-                info "    ${IMAGES_DIR}/rootfs.ext4   — Guest 磁盘镜像"
-                info ""
-                info "  方式 A: 从其他机器拷贝 buildroot 产出"
-                info "    scp <源机>:~/workspace/buildroot/output/images/bzImage ${IMAGES_DIR}/"
-                info "    scp <源机>:~/workspace/buildroot/output/images/rootfs.ext4 ${IMAGES_DIR}/"
-                info ""
-                info "  方式 B: 本地构建 buildroot"
-                info "    wget https://buildroot.org/downloads/buildroot-2024.02.1.tar.gz"
-                info "    tar xf buildroot-2024.02.1.tar.gz && cd buildroot-2024.02.1"
-                info "    make qemu_x86_64_defconfig && make -j\$(nproc)"
-                info "    cp output/images/bzImage output/images/rootfs.ext4 ${IMAGES_DIR}/"
-                SKIP_COUNT=$((SKIP_COUNT + 1))
-                ;;
-        esac
+        if [ ! -f "${IMAGES_DIR}/bzImage" ]; then
+            warn "bzImage 不存在，请手动准备: ${IMAGES_DIR}/bzImage"
+        fi
     fi
 fi
 
@@ -1191,12 +1098,8 @@ if [ "$NEED_TAP_BRIDGE" = true ]; then
     check_artifact "eth_tap_bridge" "${PROJECT_DIR}/tools/eth_tap_bridge"
 fi
 if [ "$NEED_GUEST" = true ]; then
-    if [ "$GUEST_TYPE" = "minimal" ]; then
-        for img in "${IMAGES_DIR}"/*.cpio.gz; do
-            [ -f "$img" ] && check_artifact "initramfs" "$img"
-        done
-    elif [ "$GUEST_TYPE" = "full" ]; then
-        check_artifact "cosim-guest.qcow2" "${IMAGES_DIR}/cosim-guest.qcow2"
+    if [ "$GUEST_TYPE" != "skip" ]; then
+        check_artifact "rootfs.ext4" "${IMAGES_DIR}/rootfs.ext4"
     fi
 fi
 
