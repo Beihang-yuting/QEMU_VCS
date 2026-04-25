@@ -69,6 +69,11 @@ package cosim_bridge_pkg;
     import "DPI-C" function int bridge_vcs_get_poll_len();
     import "DPI-C" function int bridge_vcs_get_poll_tag();
     import "DPI-C" function int unsigned bridge_vcs_get_poll_data(input int index);
+    import "DPI-C" function byte unsigned bridge_vcs_get_poll_first_be();
+    import "DPI-C" function byte unsigned bridge_vcs_get_poll_last_be();
+    import "DPI-C" function void bridge_vcs_set_bar_base(input int idx,
+                                                          input longint unsigned base);
+    import "DPI-C" function longint unsigned bridge_vcs_get_bar_base(input int idx);
     import "DPI-C" function void bridge_vcs_set_cpl_data(input int index,
                                                           input int unsigned value);
     import "DPI-C" function int bridge_vcs_send_cpl_scalar(input int tag,

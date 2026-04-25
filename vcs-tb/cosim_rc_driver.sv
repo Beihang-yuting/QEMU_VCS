@@ -195,14 +195,20 @@ class cosim_rc_driver extends pcie_tl_rc_driver;
                             "CfgRd BYPASS: addr=0x%03h dw[%0d]=0x%08h tag=%0d",
                             dpi_addr, dw_addr, cfg_data, dpi_tag), UVM_MEDIUM)
                         total_tlp_count++;
-                        #1;  // 仿真时间推进，避免 0 时间处理大量 config TLP 冻结仿真
+                        @(posedge cpl_vif.clk);  // 等一个时钟周期，让 glue FSM 有时间恢复
                         continue;
                     end
                 end
                 if (dpi_type == BV_TLP_CFGWR0 || dpi_type == BV_TLP_CFGWR1) begin
                     int dw_addr = int'(dpi_addr) >> 2;
+                    int byte_off = int'(dpi_addr) & 3;
                     bit [31:0] wr_data = dpi_data[0];
-                    if (config_proxy.handle_cfg_write(dw_addr, wr_data)) begin
+                    if (config_proxy.handle_cfg_write(dw_addr, wr_data, byte_off, dpi_len)) begin
+                        // BAR 赋值同步到 DPI-C 全局变量（glue BAR 匹配需要）
+                        if (dw_addr == 4 && wr_data != 32'hFFFF_FFFF)
+                            bridge_vcs_set_bar_base(0, {32'h0, config_proxy.bar0_addr[31:0]});
+                        if (dw_addr == 5)
+                            bridge_vcs_set_bar_base(0, config_proxy.bar0_addr);
                         // CfgWr 是 fire-and-forget（QEMU 不等 completion），
                         // 不发 completion 避免 stale cpl 堆积在 ring 中。
                         `uvm_info(get_name(), $sformatf(
@@ -216,12 +222,12 @@ class cosim_rc_driver extends pcie_tl_rc_driver;
             end
 
 `ifdef COSIM_VIP_MODE
-            // Extended fields — defaults for P1, P2+ scope
+            // Extended fields — from DPI-C TLP entry
             ext_msg_code       = 0;
             ext_atomic_op_size = 0;
             ext_vendor_id      = 0;
-            ext_first_be       = 8'hF;
-            ext_last_be        = 8'hF;
+            ext_first_be       = bridge_vcs_get_poll_first_be();
+            ext_last_be        = bridge_vcs_get_poll_last_be();
 `endif
 
 `ifdef COSIM_VIP_MODE

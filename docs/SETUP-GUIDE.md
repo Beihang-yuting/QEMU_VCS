@@ -186,6 +186,100 @@ VCS 默认输出 `cosim_wave.fsdb`（Verdi 打开）：
 ./cosim.sh start tap --eth-shm /cosim_eth0
 ```
 
+### 3.5 双实例对打（TCP 模式，ping / iperf 验证）
+
+两组 QEMU + VCS 通过 ETH SHM 互联，验证端到端双向网络。
+不依赖 TAP / eth_tap_bridge，纯 Guest-to-Guest。
+
+**拓扑：**
+
+```
+Guest1 (10.0.0.1)                                  Guest2 (10.0.0.2)
+  virtio-net                                          virtio-net
+     │                                                   │
+  QEMU1 (TCP:9100)                                  QEMU2 (TCP:9200)
+     │ PCIe TLP                                         │ PCIe TLP
+  VCS1 (RoleA, MAC=01)  ──── ETH SHM ────  VCS2 (RoleB, MAC=02)
+```
+
+**启动顺序（严格按此顺序）：**
+
+```
+1. QEMU1 (server, listen:9100)
+2. QEMU2 (server, listen:9200)
+3. VCS1  (client, connect QEMU1, 创建 ETH SHM)
+4. VCS2  (client, connect QEMU2, 加入 ETH SHM)
+```
+
+#### 同机运行（4 个终端）
+
+```bash
+# 终端 1: QEMU1 — Server 10.0.0.1
+./cosim.sh start qemu --transport tcp --port-base 9100 \
+    --append "guest_ip=10.0.0.1 peer_ip=10.0.0.2 role=server wait_sec=60"
+
+# 终端 2: QEMU2 — Client 10.0.0.2
+./cosim.sh start qemu --transport tcp --port-base 9200 \
+    --append "guest_ip=10.0.0.2 peer_ip=10.0.0.1 role=client wait_sec=60"
+
+# 终端 3: VCS1 — Role A, MAC=01, 创建 ETH SHM
+./cosim.sh start vcs --transport tcp --remote-host 127.0.0.1 --port-base 9100 \
+    --role A --mac-last 1 --eth-shm /cosim_eth_dual
+
+# 终端 4: VCS2 — Role B, MAC=02, 加入 ETH SHM
+./cosim.sh start vcs --transport tcp --remote-host 127.0.0.1 --port-base 9200 \
+    --role B --mac-last 2 --eth-shm /cosim_eth_dual
+```
+
+#### 跨机运行（QEMU 在 A 机，VCS 在 B 机）
+
+```bash
+# === A 机 (QEMU, 例如 10.11.10.53) ===
+
+# 终端 1: QEMU1
+./cosim.sh start qemu --transport tcp --port-base 9100 \
+    --append "guest_ip=10.0.0.1 peer_ip=10.0.0.2 role=server wait_sec=60"
+
+# 终端 2: QEMU2
+./cosim.sh start qemu --transport tcp --port-base 9200 \
+    --append "guest_ip=10.0.0.2 peer_ip=10.0.0.1 role=client wait_sec=60"
+
+# === B 机 (VCS, 例如 10.11.10.61) ===
+
+# 终端 3: VCS1
+./cosim.sh start vcs --transport tcp --remote-host 10.11.10.53 --port-base 9100 \
+    --role A --mac-last 1 --eth-shm /cosim_eth_dual
+
+# 终端 4: VCS2
+./cosim.sh start vcs --transport tcp --remote-host 10.11.10.53 --port-base 9200 \
+    --role B --mac-last 2 --eth-shm /cosim_eth_dual
+```
+
+#### 一键脚本
+
+```bash
+# 同机全自动（启动 4 个进程，等待结果）
+bash scripts/run_tcp_iperf_test.sh [超时秒数]
+# 默认 180 秒，日志输出到 /tmp/cosim_tcp_iperf_<timestamp>/
+```
+
+**关键参数说明：**
+
+| 参数 | 含义 | 注意 |
+|------|------|------|
+| `--port-base` | QEMU 监听端口起始（占用 N, N+1, N+2） | 两组 QEMU 必须用不同 port-base |
+| `--role A/B` | ETH SHM 角色 | A 创建 SHM，B 加入 |
+| `--mac-last` | MAC 地址末字节 | 两组 VCS 必须不同，否则 ARP 冲突 |
+| `--eth-shm` | ETH 共享内存名 | 两组 VCS 必须相同（它们通过此 SHM 交换帧） |
+| `wait_sec` | Guest init 等待对端就绪的秒数 | 协仿环境建议 >= 60 |
+
+**成功指标：**
+
+- 两个 Guest 的 `eth0` 均 UP 且有 IP 地址
+- VCS1/VCS2 日志中出现 `TX notify` 和 `RX injected`（双向）
+- Guest `rx_packets > 0`（通过 `/sys/class/net/eth0/statistics/rx_packets`）
+- ping 可能因协仿延迟超时，但数据面已打通
+
 ---
 
 ## 四、功能测试

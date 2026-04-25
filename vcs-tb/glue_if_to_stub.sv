@@ -51,6 +51,9 @@ module glue_if_to_stub (
     output logic         vip_cpl_sop,
     output logic         vip_cpl_eop,
 
+    // BAR base addresses for address matching (from DPI-C via cosim_vip_top)
+    input  logic [63:0]  bar_base [0:5],
+
     // Stub side - same as pcie_ep_stub ports
     output logic         stub_tlp_valid,
     output logic [2:0]   stub_tlp_type,
@@ -58,6 +61,8 @@ module glue_if_to_stub (
     output logic [31:0]  stub_tlp_wdata,
     output logic [15:0]  stub_tlp_len,
     output logic [7:0]   stub_tlp_tag,
+    output logic [3:0]   stub_first_be,
+    output logic [2:0]   stub_bar_index,
     input  logic         stub_cpl_valid,
     input  logic [7:0]   stub_cpl_tag,
     input  logic [31:0]  stub_cpl_rdata,
@@ -133,6 +138,8 @@ module glue_if_to_stub (
     logic        hdr_has_data;
     logic [63:0] hdr_addr;
     logic [31:0] hdr_wdata;
+    logic [3:0]  hdr_first_be;
+    logic [3:0]  hdr_last_be;
 
     always_comb begin
         // bytes[0] = data[7:0] = {Fmt[2:0], Type[4:0]}
@@ -150,6 +157,10 @@ module glue_if_to_stub (
         // Fmt bit[0] selects 3DW vs 4DW; Fmt bit[1] indicates data present
         hdr_is_4dw   = hdr_fmt[0];
         hdr_has_data = hdr_fmt[1];
+
+        // bytes[7] = data[63:56] = {LastBE[3:0], FirstBE[3:0]}
+        hdr_first_be = beat0_q[59:56];
+        hdr_last_be  = beat0_q[63:60];
 
         // Address extraction (PCIe big-endian byte order within each DW):
         //   3DW: bytes[8..11] = Addr[31:0]
@@ -226,6 +237,46 @@ module glue_if_to_stub (
                 decoded_stub_type   = STUB_MRD;
             end
         endcase
+    end
+
+    // =========================================================================
+    // BAR matching: compute BAR offset from full PCIe address
+    // For Config TLP, address is register offset (no BAR matching needed).
+    // For Memory TLP, match against bar_base[] to find BAR index and offset.
+    // =========================================================================
+    logic [63:0] bar_offset;
+    logic [2:0]  matched_bar;
+    logic        bar_hit;
+    logic [1:0]  be_byte_off;
+    logic        is_config_tlp;
+
+    always_comb begin
+        bar_offset    = hdr_addr;
+        matched_bar   = 3'd0;
+        bar_hit       = 1'b0;
+        is_config_tlp = (hdr_type == TYPE_CFG0 || hdr_type == TYPE_CFG1);
+
+        // Compute byte offset from FirstBE (lowest set bit)
+        casez (hdr_first_be)
+            4'b???1: be_byte_off = 2'd0;
+            4'b??10: be_byte_off = 2'd1;
+            4'b?100: be_byte_off = 2'd2;
+            4'b1000: be_byte_off = 2'd3;
+            default: be_byte_off = 2'd0;
+        endcase
+
+        if (!is_config_tlp) begin
+            // Memory TLP: match against BAR base addresses
+            for (int i = 0; i < 6; i++) begin
+                if (bar_base[i] != 64'h0 && hdr_addr >= bar_base[i]) begin
+                    bar_hit     = 1'b1;
+                    matched_bar = i[2:0];
+                    // BAR offset = PCIe addr - BAR base, restore byte_off from FirstBE
+                    bar_offset  = (hdr_addr - bar_base[i]) | {62'd0, be_byte_off};
+                end
+            end
+        end
+        // Config TLP: address is register offset, pass through as-is
     end
 
     // =========================================================================
@@ -317,16 +368,21 @@ module glue_if_to_stub (
             stub_tlp_wdata <= 32'd0;
             stub_tlp_len   <= 16'd0;
             stub_tlp_tag   <= 8'd0;
+            stub_first_be  <= 4'hF;
+            stub_bar_index <= 3'd0;
         end else begin
             stub_tlp_valid <= 1'b0;  // default: deassert each cycle
 
             if (state == ST_DECODE && !decoded_unsupported) begin
                 stub_tlp_valid <= 1'b1;
                 stub_tlp_type  <= decoded_stub_type;
-                stub_tlp_addr  <= hdr_addr;
+                // Memory TLP: use BAR-matched offset; Config TLP: pass address as-is
+                stub_tlp_addr  <= is_config_tlp ? hdr_addr : bar_offset;
                 stub_tlp_wdata <= hdr_wdata;
                 stub_tlp_len   <= decoded_len_bytes;
                 stub_tlp_tag   <= hdr_tag;
+                stub_first_be  <= hdr_first_be;
+                stub_bar_index <= is_config_tlp ? 3'd0 : matched_bar;
             end
         end
     end

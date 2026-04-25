@@ -34,6 +34,8 @@ module cosim_vip_top;
     logic [31:0] stub_tlp_wdata;
     logic [15:0] stub_tlp_len;
     logic [7:0]  stub_tlp_tag;
+    logic [3:0]  stub_first_be;
+    logic [2:0]  stub_bar_index;
     logic        stub_cpl_valid;
     logic [7:0]  stub_cpl_tag;
     logic [31:0] stub_cpl_rdata;
@@ -42,6 +44,13 @@ module cosim_vip_top;
     logic        stub_notify_valid;
     logic [15:0] stub_notify_queue;
     logic        stub_isr_set;
+
+    /* === BAR base addresses (from DPI-C, updated by cosim_rc_driver bypass) === */
+    logic [63:0] bar_base_regs [0:5];
+    always_ff @(posedge clk) begin
+        for (int i = 0; i < 6; i++)
+            bar_base_regs[i] <= bridge_vcs_get_bar_base(i);
+    end
 
     /* === Glue 层 === */
     glue_if_to_stub glue (
@@ -63,13 +72,15 @@ module cosim_vip_top;
         .vip_cplh_credit (rc_if.cplh_credit),
         .vip_cpld_credit (rc_if.cpld_credit),
         .vip_fc_update   (rc_if.fc_update),
-        /* VIP 侧 - completion 回传 (通过 cpl_if 走 VIP 链路) */
+        /* VIP 侧 - completion 回传 */
         .vip_cpl_data    (cpl_if.tlp_data),
         .vip_cpl_strb    (cpl_if.tlp_strb),
         .vip_cpl_valid   (cpl_if.tlp_valid),
         .vip_cpl_ready   (cpl_if.tlp_ready),
         .vip_cpl_sop     (cpl_if.tlp_sop),
         .vip_cpl_eop     (cpl_if.tlp_eop),
+        /* BAR base 输入 */
+        .bar_base        (bar_base_regs),
         /* Stub 侧 */
         .stub_tlp_valid  (stub_tlp_valid),
         .stub_tlp_type   (stub_tlp_type),
@@ -77,6 +88,8 @@ module cosim_vip_top;
         .stub_tlp_wdata  (stub_tlp_wdata),
         .stub_tlp_len    (stub_tlp_len),
         .stub_tlp_tag    (stub_tlp_tag),
+        .stub_first_be   (stub_first_be),
+        .stub_bar_index  (stub_bar_index),
         .stub_cpl_valid  (stub_cpl_valid),
         .stub_cpl_tag    (stub_cpl_tag),
         .stub_cpl_rdata  (stub_cpl_rdata),
@@ -97,6 +110,8 @@ module cosim_vip_top;
         .tlp_wdata    (stub_tlp_wdata),
         .tlp_len      (stub_tlp_len),
         .tlp_tag      (stub_tlp_tag),
+        .first_be     (stub_first_be),
+        .bar_index    (stub_bar_index),
         .cpl_valid    (stub_cpl_valid),
         .cpl_tag      (stub_cpl_tag),
         .cpl_rdata    (stub_cpl_rdata),
@@ -250,14 +265,18 @@ module cosim_vip_top;
     event        notify_event;
     logic [15:0] notify_event_queue;
 
-    always_ff @(posedge clk or negedge rst_n) begin
+    /* NOTE: notify_event_queue 必须用 blocking assignment（=），确保
+     * -> notify_event 触发时 initial 块读到的是当前值而非上一拍的旧值。
+     * 原 always_ff + NBA(<=) 导致 queue_idx 滞后一拍：第一次读到 X，
+     * 后续每次读到上一次的 queue index，TX notify 被误判为 RX。 */
+    always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
             stub_notify_valid_q <= 1'b0;
         end else begin
             stub_notify_valid_q <= stub_notify_valid;
             if (stub_notify_valid && !stub_notify_valid_q) begin
-                notify_event_queue <= stub_notify_queue;
-                -> notify_event;
+                notify_event_queue = stub_notify_queue;  /* blocking: 先赋值 */
+                -> notify_event;                         /* 再触发 event */
             end
         end
     end
@@ -299,6 +318,35 @@ module cosim_vip_top;
         end
     end
 `endif  /* !COSIM_VIRTIO_REAL_IP */
+
+    /* === INTx 去断言：Guest 读 ISR(0x3000) 后自动 deassert ===
+     * INTx 是电平触发。VCS 注入 RX 后 pci_set_irq(1) 拉高中断线，
+     * Guest 中断处理读 ISR → EP stub 清零 ISR → 中断条件消除。
+     * 此时必须发 0xFFFE 去断言中断线，否则线持续高电平，后续
+     * pci_set_irq(1) 无边沿变化，Guest 不再收到中断。
+     * legacy 模式 (tb_top.sv) 已有此逻辑，VIP 模式此前遗漏。 */
+    wire is_isr_read = stub_tlp_valid && (stub_tlp_type == 3'd1) &&
+                       (stub_tlp_addr[15:0] >= 16'h3000) &&
+                       (stub_tlp_addr[15:0] <  16'h3004);
+    event isr_read_event;
+
+    always @(posedge clk) begin
+        if (rst_n && is_isr_read)
+            -> isr_read_event;
+    end
+
+    initial begin
+        @(posedge rst_n);
+        forever begin
+            @(isr_read_event);
+            @(posedge clk);  /* 等 completion 传播 */
+            @(posedge clk);
+            begin
+                int msi_rc;
+                msi_rc = bridge_vcs_raise_msi(16'hFFFE);
+            end
+        end
+    end
 
     /* === Virtio 数据面 TLP 计数提前终止 ===
      * 真正的 "virtio 发包" = Guest 驱动和 device 在 virtqueue 层交换数据时触

@@ -15,8 +15,7 @@
 #define COSIM_PCI_DEVICE_ID    0x1041
 #define COSIM_PCI_REVISION     0x01
 
-/* BAR0 大小：64KB */
-#define COSIM_BAR0_SIZE        (64 * 1024)
+#define COSIM_MAX_BARS         6
 
 #define TYPE_COSIM_PCIE_RC     "cosim-pcie-rc"
 
@@ -25,10 +24,18 @@ OBJECT_DECLARE_SIMPLE_TYPE(CosimPCIeRC, COSIM_PCIE_RC)
 /* MSI 延迟处理队列大小 */
 #define COSIM_MSI_QUEUE_SIZE 256
 
+/* 每个 BAR 的 MMIO callback opaque，携带 BAR index */
+typedef struct CosimBarContext {
+    struct CosimPCIeRC *dev;
+    int bar_index;
+} CosimBarContext;
+
 struct CosimPCIeRC {
     PCIDevice parent_obj;
 
-    MemoryRegion bar0;
+    MemoryRegion bars[COSIM_MAX_BARS];
+    CosimBarContext bar_ctx[COSIM_MAX_BARS];
+    int num_bars;
 
     /* Bridge 连接参数（QEMU 命令行 -device 属性） */
     char *shm_name;

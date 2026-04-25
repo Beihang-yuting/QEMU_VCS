@@ -35,6 +35,10 @@ module pcie_ep_stub (
     input  logic [31:0] tlp_wdata,
     input  logic [15:0] tlp_len,
     input  logic [7:0]  tlp_tag,
+    /* PCIe byte enables (from glue FirstBE extraction) */
+    input  logic [3:0]  first_be,
+    /* BAR index (from glue BAR matching) */
+    input  logic [2:0]  bar_index,
     /* TLP 完成接口 */
     output logic        cpl_valid,
     output logic [7:0]  cpl_tag,
@@ -260,43 +264,48 @@ module pcie_ep_stub (
                 vio_q_dev_hi[q]  <= 32'd0;
             end
 
-            /* --- Config Space 初始化 --- */
+            /* --- Config Space 初始化 (与 config_proxy 布局完全一致) --- */
             for (int i = 0; i < 64; i++) cfg_space[i] <= 32'd0;
 
             /* PCI Header */
-            cfg_space[0]  <= {16'h1041, 16'h1AF4};     /* Device ID(virtio-net) | Vendor ID(virtio) */
+            cfg_space[0]  <= {16'h1041, 16'h1AF4};     /* Device ID | Vendor ID */
             cfg_space[1]  <= {16'h0010, 16'h0007};     /* Status(cap_list=1) | Command */
             cfg_space[2]  <= {8'h02, 8'h00, 8'h00, 8'h01}; /* Class=0x020000 | Rev=0x01 */
             cfg_space[3]  <= 32'h0000_0010;             /* BIST|HdrType=0|LatTimer|CacheLine */
-            cfg_space[11] <= {16'h0001, 16'h1AF4};     /* Subsystem ID(net) | Subsystem Vendor ID(virtio) */
-            cfg_space[13] <= 32'h0000_0040;             /* Capabilities Pointer = 0x40 */
-            cfg_space[15] <= 32'h0000_0100;             /* INT_PIN=INTA(1), INT_LINE=0(TBD by BIOS) */
+            cfg_space[4]  <= 32'h0000_0004;             /* BAR0_lo: type=10(64-bit) */
+            cfg_space[5]  <= 32'h0000_0000;             /* BAR0_hi */
+            cfg_space[11] <= {16'h0001, 16'h1AF4};     /* Subsystem ID | Subsystem Vendor ID */
+            cfg_space[13] <= 32'h0000_0038;             /* Capabilities Pointer → 0x38 (MSI) */
+            cfg_space[15] <= 32'h0000_0100;             /* INT_PIN=INTA */
 
-            /* Virtio PCI Capability: COMMON_CFG at config offset 0x40 (16 bytes) */
-            /* cfg_space[16]: {cfg_type=1, cap_len=0x10, cap_next=0x54, cap_vndr=0x09} */
-            cfg_space[16] <= 32'h01_10_54_09;
-            cfg_space[17] <= 32'h00_00_00_00;           /* bar=0 */
-            cfg_space[18] <= 32'h0000_1000;             /* offset in BAR */
-            cfg_space[19] <= 32'h0000_0038;             /* length = 56 */
+            /* MSI Capability stub at 0x38 (DW14) */
+            cfg_space[14] <= 32'h0080_50_05;            /* msg_ctrl=0x0080, next=0x50, id=0x05 */
+            /* DW15(0x3C)=MSI addr_lo, DW16(0x40)=MSI addr_hi, DW17(0x44)=MSI data — 初始 0 */
 
-            /* Virtio PCI Capability: NOTIFY_CFG at config offset 0x54 (20 bytes) */
-            cfg_space[21] <= 32'h02_14_68_09;           /* cfg_type=2, len=0x14, next=0x68 */
-            cfg_space[22] <= 32'h00_00_00_00;           /* bar=0 */
-            cfg_space[23] <= 32'h0000_2000;             /* offset */
-            cfg_space[24] <= 32'h0000_0004;             /* length */
-            cfg_space[25] <= 32'h0000_0000;             /* notify_off_multiplier = 0 */
+            /* VIRTIO_PCI_CAP_COMMON_CFG at 0x50 (DW20) */
+            cfg_space[20] <= 32'h01_10_64_09;           /* type=1, len=0x10, next=0x64, vndr=0x09 */
+            cfg_space[21] <= 32'h00_00_00_00;           /* bar=0 */
+            cfg_space[22] <= 32'h0000_1000;             /* offset = 0x1000 */
+            cfg_space[23] <= 32'h0000_0038;             /* length = 56 */
 
-            /* Virtio PCI Capability: ISR_CFG at config offset 0x68 (16 bytes) */
-            cfg_space[26] <= 32'h03_10_78_09;           /* cfg_type=3, len=0x10, next=0x78 */
-            cfg_space[27] <= 32'h00_00_00_00;           /* bar=0 */
-            cfg_space[28] <= 32'h0000_3000;             /* offset */
-            cfg_space[29] <= 32'h0000_0004;             /* length */
+            /* VIRTIO_PCI_CAP_NOTIFY_CFG at 0x64 (DW25) */
+            cfg_space[25] <= 32'h02_14_78_09;           /* type=2, len=0x14, next=0x78 */
+            cfg_space[26] <= 32'h00_00_00_00;           /* bar=0 */
+            cfg_space[27] <= 32'h0000_2000;             /* offset = 0x2000 */
+            cfg_space[28] <= 32'h0000_0004;             /* length = 4 */
+            cfg_space[29] <= 32'h0000_0000;             /* notify_off_multiplier = 0 */
 
-            /* Virtio PCI Capability: DEVICE_CFG at config offset 0x78 (16 bytes) */
-            cfg_space[30] <= 32'h04_10_00_09;           /* cfg_type=4, len=0x10, next=0 (end) */
+            /* VIRTIO_PCI_CAP_ISR_CFG at 0x78 (DW30) */
+            cfg_space[30] <= 32'h03_10_88_09;           /* type=3, len=0x10, next=0x88 */
             cfg_space[31] <= 32'h00_00_00_00;           /* bar=0 */
-            cfg_space[32] <= 32'h0000_4000;             /* offset */
-            cfg_space[33] <= 32'h0000_0010;             /* length = 16 */
+            cfg_space[32] <= 32'h0000_3000;             /* offset = 0x3000 */
+            cfg_space[33] <= 32'h0000_0004;             /* length = 4 */
+
+            /* VIRTIO_PCI_CAP_DEVICE_CFG at 0x88 (DW34) */
+            cfg_space[34] <= 32'h04_10_00_09;           /* type=4, len=0x10, next=0x00 */
+            cfg_space[35] <= 32'h00_00_00_00;           /* bar=0 */
+            cfg_space[36] <= 32'h0000_4000;             /* offset = 0x4000 */
+            cfg_space[37] <= 32'h0000_0010;             /* length = 16 */
 
         end else begin
             /* cpl_valid: hold until consumer acks (cpl_ack) or a new TLP
@@ -330,46 +339,38 @@ module pcie_ep_stub (
                         else if (is_dma_len)    dma_len      <= tlp_wdata;
                         else if (is_dma_door)   dma_doorbell <= tlp_wdata;
                         else if (is_tx_buf)     tx_buf[txbuf_idx] <= tlp_wdata;
-                        /* --- Virtio common_cfg MWr --- */
+                        /* --- Virtio common_cfg MWr (FirstBE 字节级写入) --- */
                         else if (is_vio_common) begin
                             case (vio_common_dwoff)
                                 4'd0: vio_dev_feat_sel <= tlp_wdata;
                                 /* 4'd1: device_feature 只读 */
                                 4'd2: vio_drv_feat_sel <= tlp_wdata;
                                 4'd3: vio_drv_feat[vio_drv_feat_sel[0]] <= tlp_wdata;
-                                4'd4: vio_msix_config <= tlp_wdata[15:0];
+                                /* DW4: {num_queues[15:0](RO), msix_config[15:0]} */
+                                4'd4: begin
+                                    if (first_be[0]) vio_msix_config[7:0]  <= tlp_wdata[7:0];
+                                    if (first_be[1]) vio_msix_config[15:8] <= tlp_wdata[15:8];
+                                    // first_be[2:3]: num_queues 只读
+                                end
+                                /* DW5: {queue_select[15:0], config_gen[7:0](RO), device_status[7:0]} */
                                 4'd5: begin
-                                    /* Virtio common_cfg dword 5 布局：
-                                     *   byte 0 = device_status (writeb)
-                                     *   byte 1 = config_generation (driver 只读)
-                                     *   byte 2-3 = queue_select (writew)
-                                     * Linux virtio-pci modern 用 writeb/writew，但
-                                     * 我们的 bridge+VIP codec 在 sub-DW 写时把 addr
-                                     * 强制 DW 对齐 + payload pad 成 4 字节，bus 上
-                                     * undefined bytes 导致 byte_off 和 BE 信息丢失。
-                                     *
-                                     * 启发式解码：
-                                     *   writeb(status, 0x1014): tlp_wdata[7:0]=status
-                                     *   writew(qsel,  0x1016): Linux 只把 qsel 放在
-                                     *     bytes 2-3，但桥 codec 也可能放低 16 位或
-                                     *     跨 byte_off 重组；因此：
-                                     *     - byte_off==0 & tlp_wdata[31:16]!=0 认为是
-                                     *       full-DW writel 里的 qsel 高 16 位
-                                     *     - byte_off==2 时直接用 tlp_wdata[15:0]
-                                     *   status write 时 tlp_wdata[31:16] 为 0 不更新
-                                     *   qsel（Linux 初始化后 qsel 不会再置 0）。 */
-                                    if (byte_off == 0) vio_dev_status <= tlp_wdata[7:0];
-                                    if (byte_off == 2) vio_queue_sel  <= tlp_wdata[15:0];
-                                    if (byte_off == 0 && tlp_wdata[31:16] != 16'h0)
-                                        vio_queue_sel <= tlp_wdata[31:16];
+                                    if (first_be[0]) vio_dev_status      <= tlp_wdata[7:0];
+                                    // first_be[1]: config_generation 只读
+                                    if (first_be[2]) vio_queue_sel[7:0]  <= tlp_wdata[23:16];
+                                    if (first_be[3]) vio_queue_sel[15:8] <= tlp_wdata[31:24];
                                 end
+                                /* DW6: {queue_msix_vector[15:0], queue_size[15:0]} */
                                 4'd6: begin
-                                    if (byte_off == 0) vio_q_size[qsel] <= tlp_wdata[15:0];
-                                    if (byte_off == 2 || (byte_off == 0 && tlp_len >= 4))
-                                        vio_q_msix[qsel] <= (byte_off == 2) ? tlp_wdata[15:0] : tlp_wdata[31:16];
+                                    if (first_be[0]) vio_q_size[qsel][7:0]  <= tlp_wdata[7:0];
+                                    if (first_be[1]) vio_q_size[qsel][15:8] <= tlp_wdata[15:8];
+                                    if (first_be[2]) vio_q_msix[qsel][7:0]  <= tlp_wdata[23:16];
+                                    if (first_be[3]) vio_q_msix[qsel][15:8] <= tlp_wdata[31:24];
                                 end
+                                /* DW7: {queue_notify_off[15:0](RO), queue_enable[15:0]} */
                                 4'd7: begin
-                                    if (byte_off == 0) vio_q_enable[qsel] <= tlp_wdata[15:0];
+                                    if (first_be[0]) vio_q_enable[qsel][7:0]  <= tlp_wdata[7:0];
+                                    if (first_be[1]) vio_q_enable[qsel][15:8] <= tlp_wdata[15:8];
+                                    // first_be[2:3]: notify_off 只读
                                 end
                                 4'd8:  vio_q_desc_lo[qsel] <= tlp_wdata;
                                 4'd9:  vio_q_desc_hi[qsel] <= tlp_wdata;
@@ -379,8 +380,8 @@ module pcie_ep_stub (
                                 4'd13: vio_q_dev_hi[qsel]  <= tlp_wdata;
                                 default: ;
                             endcase
-                            $display("[EP-VIO] common_cfg WR dwoff=%0d byte_off=%0d data=0x%08h status=0x%02h",
-                                     vio_common_dwoff, byte_off, tlp_wdata, vio_dev_status);
+                            $display("[EP-VIO] common_cfg WR dwoff=%0d first_be=0x%01h data=0x%08h status=0x%02h",
+                                     vio_common_dwoff, first_be, tlp_wdata, vio_dev_status);
                         end
                         /* --- Virtio notify MWr --- */
                         else if (is_vio_notify) begin
@@ -406,11 +407,10 @@ module pcie_ep_stub (
                         else if (is_dma_door)    cpl_rdata <= dma_doorbell;
                         else if (is_dma_status)  cpl_rdata <= dma_status;
                         else if (is_tx_buf)      cpl_rdata <= tx_buf[txbuf_idx];
-                        /* --- Virtio common_cfg MRd (带字节偏移) --- */
+                        /* --- Virtio common_cfg MRd --- */
+                        /* 返回整个 DW，RC 侧根据 FirstBE/byte_offset 提取 */
                         else if (is_vio_common) begin
-                            logic [31:0] raw;
-                            raw = vio_common_read(vio_common_dwoff, qsel);
-                            cpl_rdata <= raw >> ({3'b0, byte_off} * 8);
+                            cpl_rdata <= vio_common_read(vio_common_dwoff, qsel);
                         end
                         /* --- Virtio ISR MRd (read-clear) --- */
                         else if (is_vio_isr) begin
@@ -420,9 +420,7 @@ module pcie_ep_stub (
                         end
                         /* --- Virtio device_cfg MRd --- */
                         else if (is_vio_devcfg) begin
-                            logic [31:0] raw;
-                            raw = vio_devcfg_read(vio_devcfg_dwoff);
-                            cpl_rdata <= raw >> ({3'b0, byte_off} * 8);
+                            cpl_rdata <= vio_devcfg_read(vio_devcfg_dwoff);
                         end
                         else cpl_rdata <= 32'hBAD_ACC55;
                     end

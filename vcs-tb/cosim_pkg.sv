@@ -33,6 +33,10 @@ package cosim_pkg;
     import cosim_bridge_pkg::bridge_vcs_get_poll_data;
     import cosim_bridge_pkg::bridge_vcs_set_cpl_data;
     import cosim_bridge_pkg::bridge_vcs_send_cpl_scalar;
+    import cosim_bridge_pkg::bridge_vcs_get_poll_first_be;
+    import cosim_bridge_pkg::bridge_vcs_get_poll_last_be;
+    import cosim_bridge_pkg::bridge_vcs_set_bar_base;
+    import cosim_bridge_pkg::bridge_vcs_get_bar_base;
 `ifdef COSIM_VIP_MODE
     import cosim_bridge_pkg::bridge_vcs_poll_tlp_ext;
 `endif

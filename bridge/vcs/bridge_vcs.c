@@ -951,6 +951,22 @@ unsigned int bridge_vcs_get_poll_data(int index) {
     return g_poll_data_buf[index];
 }
 
+/* FirstBE / LastBE getters from last polled TLP */
+unsigned char bridge_vcs_get_poll_first_be(void) { return g_last_entry.first_be; }
+unsigned char bridge_vcs_get_poll_last_be(void)  { return g_last_entry.last_be; }
+
+/* BAR base address synchronization (bypass mode: config_proxy → EP stub) */
+static uint64_t g_bar_base[6] = {0};
+
+void bridge_vcs_set_bar_base(int idx, unsigned long long base) {
+    if (idx >= 0 && idx < 6) g_bar_base[idx] = base;
+}
+
+unsigned long long bridge_vcs_get_bar_base(int idx) {
+    if (idx >= 0 && idx < 6) return g_bar_base[idx];
+    return 0;
+}
+
 /* Set one word in the completion data buffer */
 void bridge_vcs_set_cpl_data(int index, unsigned int value) {
     if (index >= 0 && index < 16)

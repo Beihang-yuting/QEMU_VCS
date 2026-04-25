@@ -25,7 +25,8 @@
 
 static uint64_t cosim_mmio_read(void *opaque, hwaddr addr, unsigned size)
 {
-    CosimPCIeRC *s = COSIM_PCIE_RC(opaque);
+    CosimBarContext *bc = (CosimBarContext *)opaque;
+    CosimPCIeRC *s = bc->dev;
     bridge_ctx_t *ctx = (bridge_ctx_t *)s->bridge_ctx;
 
     if (!ctx) {
@@ -33,10 +34,19 @@ static uint64_t cosim_mmio_read(void *opaque, hwaddr addr, unsigned size)
         return 0xFFFFFFFF;
     }
 
+    /* 重建完整 PCIe 地址: BAR base + offset, DW 对齐 */
+    uint64_t bar_base   = pci_get_bar_addr(&s->parent_obj, bc->bar_index);
+    uint64_t pcie_addr  = bar_base + addr;
+    uint32_t byte_off   = pcie_addr & 3u;
+    uint64_t dw_addr    = pcie_addr & ~3ULL;
+    uint8_t  first_be   = (uint8_t)(((1u << size) - 1) << byte_off);
+
     tlp_entry_t req = {0};
-    req.type = TLP_MRD;
-    req.addr = addr;
-    req.len = size;
+    req.type     = TLP_MRD;
+    req.addr     = dw_addr;
+    req.len      = 4;  /* 始终读整个 DWORD */
+    req.first_be = first_be;
+    req.last_be  = 0;
 
     cpl_entry_t cpl = {0};
     int ret = bridge_send_tlp_and_wait(ctx, &req, &cpl);
@@ -46,21 +56,27 @@ static uint64_t cosim_mmio_read(void *opaque, hwaddr addr, unsigned size)
         return 0xFFFFFFFF;
     }
 
-    /* 从 completion 数据中提取返回值 */
-    uint64_t val = 0;
-    for (unsigned i = 0; i < size && i < COSIM_TLP_DATA_SIZE; i++) {
-        val |= ((uint64_t)cpl.data[i]) << (i * 8);
+    /* CplD 返回整个 DWORD，按 byte_off 提取请求的字节 */
+    uint32_t dword = 0;
+    for (int i = 0; i < 4 && i < COSIM_TLP_DATA_SIZE; i++) {
+        dword |= ((uint32_t)cpl.data[i]) << (i * 8);
+    }
+    uint64_t val = dword >> (byte_off * 8);
+    if (size < 4) {
+        val &= (1ULL << (size * 8)) - 1;
     }
 
-    qemu_log_mask(LOG_UNIMP, "cosim: MRd addr=0x%04lx size=%u val=0x%lx\n",
-                  (unsigned long)addr, size, (unsigned long)val);
+    fprintf(stderr, "cosim: MRd bar%d off=0x%04lx pcie=0x%lx be=0x%x val=0x%lx\n",
+            bc->bar_index, (unsigned long)addr, (unsigned long)pcie_addr,
+            first_be, (unsigned long)val);
     return val;
 }
 
 static void cosim_mmio_write(void *opaque, hwaddr addr, uint64_t val,
                               unsigned size)
 {
-    CosimPCIeRC *s = COSIM_PCIE_RC(opaque);
+    CosimBarContext *bc = (CosimBarContext *)opaque;
+    CosimPCIeRC *s = bc->dev;
     bridge_ctx_t *ctx = (bridge_ctx_t *)s->bridge_ctx;
 
     if (!ctx) {
@@ -68,12 +84,24 @@ static void cosim_mmio_write(void *opaque, hwaddr addr, uint64_t val,
         return;
     }
 
+    /* 重建完整 PCIe 地址: BAR base + offset, DW 对齐 */
+    uint64_t bar_base   = pci_get_bar_addr(&s->parent_obj, bc->bar_index);
+    uint64_t pcie_addr  = bar_base + addr;
+    uint32_t byte_off   = pcie_addr & 3u;
+    uint64_t dw_addr    = pcie_addr & ~3ULL;
+    uint8_t  first_be   = (uint8_t)(((1u << size) - 1) << byte_off);
+
+    /* 数据放到 DW 内正确的字节位置 */
+    uint32_t shifted_val = (uint32_t)val << (byte_off * 8);
+
     tlp_entry_t req = {0};
-    req.type = TLP_MWR;
-    req.addr = addr;
-    req.len = size;
-    for (unsigned i = 0; i < size && i < COSIM_TLP_DATA_SIZE; i++) {
-        req.data[i] = (val >> (i * 8)) & 0xFF;
+    req.type     = TLP_MWR;
+    req.addr     = dw_addr;
+    req.len      = 4;
+    req.first_be = first_be;
+    req.last_be  = 0;
+    for (int i = 0; i < 4; i++) {
+        req.data[i] = (shifted_val >> (i * 8)) & 0xFF;
     }
 
     int ret = bridge_send_tlp_fire(ctx, &req);
@@ -82,8 +110,9 @@ static void cosim_mmio_write(void *opaque, hwaddr addr, uint64_t val,
                       (unsigned long)addr);
     }
 
-    qemu_log_mask(LOG_UNIMP, "cosim: MWr addr=0x%04lx size=%u val=0x%lx\n",
-                  (unsigned long)addr, size, (unsigned long)val);
+    fprintf(stderr, "cosim: MWr bar%d off=0x%04lx pcie=0x%lx be=0x%x val=0x%lx\n",
+            bc->bar_index, (unsigned long)addr, (unsigned long)pcie_addr,
+            first_be, (unsigned long)val);
 }
 
 /* ========== P2: DMA / MSI 回调 ========== */
@@ -204,13 +233,15 @@ static uint32_t cosim_config_read(PCIDevice *pci_dev, uint32_t address, int len)
 
     /* Bridge 未连接时，使用 QEMU 本地 config space */
     if (!ctx) {
-        return pci_default_read_config(pci_dev, address, len);
+        uint32_t local_val = pci_default_read_config(pci_dev, address, len);
+        fprintf(stderr, "[cfg_read] LOCAL(no bridge) addr=0x%02x len=%d → 0x%x\n",
+                address, len, local_val);
+        return local_val;
     }
 
     /* 全部 config space 转发到 VCS（由 VCS bypass proxy 或 DUT RTL 处理）。
      * QEMU 本地 config[] 仍由 cosim_config_write 的 pci_default_write_config
      * 维护，供 QEMU PCI 框架内部使用（不影响 Guest 看到的值）。 */
-    fprintf(stderr, "[cfg_read] VCS forward addr=0x%02x len=%d\n", address, len);
     uint32_t dword_addr = address & ~3u;
     uint32_t byte_offset = address & 3u;
 
@@ -222,7 +253,10 @@ static uint32_t cosim_config_read(PCIDevice *pci_dev, uint32_t address, int len)
     cpl_entry_t cpl = {0};
     int ret = bridge_send_tlp_and_wait(ctx, &req, &cpl);
     if (ret < 0) {
-        return pci_default_read_config(pci_dev, address, len);
+        uint32_t fallback = pci_default_read_config(pci_dev, address, len);
+        fprintf(stderr, "[cfg_read] addr=0x%02x len=%d VCS_FAIL → local=0x%x\n",
+                address, len, fallback);
+        return fallback;
     }
 
     uint32_t dword = 0;
@@ -235,6 +269,8 @@ static uint32_t cosim_config_read(PCIDevice *pci_dev, uint32_t address, int len)
         val &= (1u << (len * 8)) - 1;
     }
 
+    fprintf(stderr, "[cfg_read] addr=0x%02x len=%d → 0x%x (dw=0x%08x off=%u)\n",
+            address, len, val, dword, byte_offset);
     return val;
 }
 
@@ -271,99 +307,75 @@ static void cosim_config_write(PCIDevice *pci_dev, uint32_t address,
                   address, len, data);
 }
 
+/* ========== 设备发现: 从 VCS EP 查询配置 ========== */
+
+static uint32_t cosim_cfgrd(bridge_ctx_t *ctx, uint32_t reg) {
+    tlp_entry_t req = {0};
+    req.type = TLP_CFGRD;
+    req.addr = reg & ~3u;
+    req.len  = 4;
+    req.first_be = 0xF;
+    cpl_entry_t cpl = {0};
+    if (bridge_send_tlp_and_wait(ctx, &req, &cpl) < 0) return 0xFFFFFFFF;
+    uint32_t dw = 0;
+    for (int i = 0; i < 4; i++) dw |= ((uint32_t)cpl.data[i]) << (i * 8);
+    return dw;
+}
+
+static void cosim_cfgwr(bridge_ctx_t *ctx, uint32_t reg, uint32_t data) {
+    tlp_entry_t req = {0};
+    req.type = TLP_CFGWR;
+    req.addr = reg;
+    req.len  = 4;
+    req.first_be = 0xF;
+    for (int i = 0; i < 4; i++) req.data[i] = (data >> (i * 8)) & 0xFF;
+    bridge_send_tlp_fire(ctx, &req);
+}
+
+/* BAR sizing: 写 0xFFFFFFFF → 读回 mask → 恢复 → 计算大小 */
+static uint32_t cosim_query_bar_size(bridge_ctx_t *ctx, int bar) {
+    uint32_t reg = 0x10 + bar * 4;  /* PCI_BASE_ADDRESS_0 = 0x10 */
+    uint32_t orig = cosim_cfgrd(ctx, reg);
+    cosim_cfgwr(ctx, reg, 0xFFFFFFFF);
+    uint32_t mask = cosim_cfgrd(ctx, reg);
+    cosim_cfgwr(ctx, reg, orig);  /* 恢复 */
+    if (mask == 0 || mask == 0xFFFFFFFF) return 0;
+    /* 清除低 4 位 (type/prefetch bits) */
+    mask &= ~0xFu;
+    return ~mask + 1;
+}
+
+/* 遍历 capability 链找 MSI */
+static void cosim_discover_caps(bridge_ctx_t *ctx,
+                                 int *msi_offset, int *msi_vectors) {
+    *msi_offset = -1;
+    *msi_vectors = 0;
+    uint32_t status_cmd = cosim_cfgrd(ctx, 0x04);
+    if (!((status_cmd >> 20) & 1)) return;  /* CAP_LIST bit in Status */
+    uint8_t ptr = cosim_cfgrd(ctx, 0x34) & 0xFC;
+    int safety = 48;  /* 防止无限循环 */
+    while (ptr && safety-- > 0) {
+        uint32_t dw = cosim_cfgrd(ctx, ptr);
+        uint8_t cap_id = dw & 0xFF;
+        if (cap_id == 0x05) {  /* PCI_CAP_ID_MSI */
+            *msi_offset = ptr;
+            uint16_t msg_ctrl = (dw >> 16) & 0xFFFF;
+            *msi_vectors = 1 << ((msg_ctrl >> 1) & 0x7);
+            fprintf(stderr, "[discover] MSI cap at 0x%02x, vectors=%d, ctrl=0x%04x\n",
+                    ptr, *msi_vectors, msg_ctrl);
+        }
+        ptr = (dw >> 8) & 0xFC;
+    }
+}
+
 /* ========== 设备生命周期 ========== */
 
 static void cosim_pcie_rc_realize(PCIDevice *pci_dev, Error **errp)
 {
     CosimPCIeRC *s = COSIM_PCIE_RC(pci_dev);
+    s->num_bars = 0;
 
-    /* 注册 BAR0 */
-    memory_region_init_io(&s->bar0, OBJECT(s), &cosim_mmio_ops, s,
-                          "cosim-bar0", COSIM_BAR0_SIZE);
-    pci_register_bar(pci_dev, 0, PCI_BASE_ADDRESS_SPACE_MEMORY, &s->bar0);
-
-    /* Enable bus mastering so pci_dma_read/write can access guest memory */
-    pci_set_word(pci_dev->config + PCI_COMMAND,
-                 PCI_COMMAND_MEMORY | PCI_COMMAND_MASTER);
-
-    /* 配置 INTx 中断引脚 (INTA) — 需要在 msi_init 之前设置 */
-    pci_config_set_interrupt_pin(pci_dev->config, 1);  /* INTA */
-
-    /* 初始化 MSI — auto-allocate offset.
-     * Note: msi_init sets *errp on failure and returns non-zero.
-     * We clear errp before calling so a failure doesn't abort realize. */
-    {
-        Error *msi_err = NULL;
-        int ret = msi_init(pci_dev, 0, 1, true, false, &msi_err);
-        if (ret != 0) {
-            fprintf(stderr, "[realize] msi_init failed (ret=%d): %s\n",
-                    ret, msi_err ? error_get_pretty(msi_err) : "unknown");
-            error_free(msi_err);
-            /* Continue without MSI — set cap_pointer directly to virtio chain */
-            pci_set_word(pci_dev->config + PCI_STATUS,
-                         pci_get_word(pci_dev->config + PCI_STATUS) | PCI_STATUS_CAP_LIST);
-            pci_set_byte(pci_dev->config + PCI_CAPABILITY_LIST, 0x50);
-        } else {
-            /* MSI succeeded — find where it was placed and link to virtio caps */
-            uint8_t msi_cap = pci_dev->config[PCI_CAPABILITY_LIST];
-            fprintf(stderr, "[realize] MSI at 0x%02x, linking next→0x50\n", msi_cap);
-            /* Walk to end of MSI capability chain and append 0x50 */
-            while (pci_dev->config[msi_cap + 1] != 0)
-                msi_cap = pci_dev->config[msi_cap + 1];
-            pci_set_byte(pci_dev->config + msi_cap + 1, 0x50);
-        }
-    }
-
-    /* Virtio PCI capabilities in local config space.
-     * Linux reads config via MMCONFIG (direct memory map of config[]),
-     * bypassing config_read callback. Layout must also match VCS
-     * ep_stub for CfgRd TLP forwarding consistency.
-     *
-     * Capability offsets (after MSI at 0x38-0x45):
-     *   0x50: COMMON_CFG (16B) → next=0x64
-     *   0x64: NOTIFY_CFG (20B) → next=0x78
-     *   0x78: ISR_CFG    (16B) → next=0x88
-     *   0x88: DEVICE_CFG (16B) → next=0 (end)
-     */
-    uint8_t *c = pci_dev->config;
-
-    /* COMMON_CFG at 0x50 */
-    c[0x50] = 0x09; c[0x51] = 0x64; c[0x52] = 0x10; c[0x53] = 0x01;
-    c[0x54] = 0x00; c[0x55] = 0x00; c[0x56] = 0x00; c[0x57] = 0x00;
-    pci_set_long(c + 0x58, 0x1000);  /* offset in BAR0 */
-    pci_set_long(c + 0x5C, 0x0038);  /* length = 56 */
-
-    /* NOTIFY_CFG at 0x64 */
-    c[0x64] = 0x09; c[0x65] = 0x78; c[0x66] = 0x14; c[0x67] = 0x02;
-    c[0x68] = 0x00; c[0x69] = 0x00; c[0x6A] = 0x00; c[0x6B] = 0x00;
-    pci_set_long(c + 0x6C, 0x2000);  /* offset */
-    pci_set_long(c + 0x70, 0x0004);  /* length */
-    pci_set_long(c + 0x74, 0x0000);  /* notify_off_multiplier */
-
-    /* ISR_CFG at 0x78 */
-    c[0x78] = 0x09; c[0x79] = 0x88; c[0x7A] = 0x10; c[0x7B] = 0x03;
-    c[0x7C] = 0x00; c[0x7D] = 0x00; c[0x7E] = 0x00; c[0x7F] = 0x00;
-    pci_set_long(c + 0x80, 0x3000);  /* offset */
-    pci_set_long(c + 0x84, 0x0004);  /* length */
-
-    /* DEVICE_CFG at 0x88 */
-    c[0x88] = 0x09; c[0x89] = 0x00; c[0x8A] = 0x10; c[0x8B] = 0x04;
-    c[0x8C] = 0x00; c[0x8D] = 0x00; c[0x8E] = 0x00; c[0x8F] = 0x00;
-    pci_set_long(c + 0x90, 0x4000);  /* offset */
-    pci_set_long(c + 0x94, 0x0010);  /* length = 16 */
-
-    /* Debug: dump capability chain */
-    fprintf(stderr, "[realize] cap_ptr=0x%02x status=0x%04x\n",
-            c[PCI_CAPABILITY_LIST], pci_get_word(c + PCI_STATUS));
-    fprintf(stderr, "[realize] config[0x34-0x3F]: ");
-    for (int i = 0x34; i < 0x40; i++) fprintf(stderr, "%02x ", c[i]);
-    fprintf(stderr, "\n[realize] config[0x38-0x4F]: ");
-    for (int i = 0x38; i < 0x50; i++) fprintf(stderr, "%02x ", c[i]);
-    fprintf(stderr, "\n[realize] config[0x50-0x5F]: ");
-    for (int i = 0x50; i < 0x60; i++) fprintf(stderr, "%02x ", c[i]);
-    fprintf(stderr, "\n");
-
-    /* 初始化 Bridge */
+    /* ======== 第一步: 建立 Bridge 连接 ======== */
     if (s->transport && strcmp(s->transport, "tcp") == 0) {
         /* TCP mode */
         transport_cfg_t cfg = {
@@ -409,6 +421,77 @@ static void cosim_pcie_rc_realize(PCIDevice *pci_dev, Error **errp)
     }
 
     bridge_ctx_t *ctx = (bridge_ctx_t *)s->bridge_ctx;
+
+    /* ======== 第二步: 从 VCS EP 发现设备配置 (标准 PCIe 枚举) ======== */
+
+    /* BAR sizing — 查询 BAR0 大小 */
+    uint32_t bar0_size = cosim_query_bar_size(ctx, 0);
+    if (bar0_size == 0) bar0_size = 64 * 1024;  /* fallback 64KB */
+    fprintf(stderr, "[realize] Discovered BAR0 size: %u bytes (0x%x)\n",
+            bar0_size, bar0_size);
+
+    /* Capability 链遍历 — 找 MSI cap */
+    int msi_offset = -1, msi_vectors = 0;
+    cosim_discover_caps(ctx, &msi_offset, &msi_vectors);
+
+    /* ======== 第三步: 基于发现结果初始化 QEMU 框架 ======== */
+
+    /* 注册 BAR0 — opaque 指向 CosimBarContext（携带 bar_index） */
+    s->bar_ctx[0].dev = s;
+    s->bar_ctx[0].bar_index = 0;
+    memory_region_init_io(&s->bars[0], OBJECT(s), &cosim_mmio_ops,
+                          &s->bar_ctx[0], "cosim-bar0", bar0_size);
+    pci_register_bar(pci_dev, 0, PCI_BASE_ADDRESS_SPACE_MEMORY, &s->bars[0]);
+    s->num_bars = 1;
+
+    /* Enable bus mastering */
+    pci_set_word(pci_dev->config + PCI_COMMAND,
+                 PCI_COMMAND_MEMORY | PCI_COMMAND_MASTER);
+
+    /* INTx 中断引脚 */
+    pci_config_set_interrupt_pin(pci_dev->config, 1);
+
+    /* MSI 初始化 — 使用从 VCS EP 发现的 offset */
+    if (msi_offset >= 0) {
+        Error *msi_err = NULL;
+        if (msi_vectors < 1) msi_vectors = 1;
+        int ret = msi_init(pci_dev, msi_offset, msi_vectors, true, false, &msi_err);
+        if (ret != 0) {
+            fprintf(stderr, "[realize] msi_init at 0x%02x failed: %s\n",
+                    msi_offset, msi_err ? error_get_pretty(msi_err) : "?");
+            error_free(msi_err);
+        } else {
+            fprintf(stderr, "[realize] MSI initialized at 0x%02x, %d vectors\n",
+                    msi_offset, msi_vectors);
+        }
+    } else {
+        fprintf(stderr, "[realize] No MSI capability found in EP config\n");
+    }
+
+    /* NOTE: Virtio vendor caps 不需要在 QEMU 侧注册，不影响架构。
+     *
+     * 设计说明：virtio caps 是 EP（VCS 侧）的属性。Guest 的所有 config 读取
+     * 通过 cosim_config_read → CfgRd TLP → VCS config_proxy 返回，不读 QEMU
+     * 本地 config[]。QEMU 只需注册 MSI cap（上面 msi_init 已完成），因为
+     * msi_enabled()/msi_notify() 依赖本地 config[] 中的 MSI 字段。
+     *
+     * 真正让 Guest 发现 virtio caps 的关键修复在 VCS 侧：
+     *   1. MSI cap offset 从 0x38 → 0x40（Linux 要求 cap ptr >= 0x40）
+     *   2. config_proxy CfgWr 字节级合并（防止覆盖 INT_PIN）
+     */
+
+    /* Debug: dump final config bytes around cap chain */
+    {
+        uint8_t *c = pci_dev->config;
+        fprintf(stderr, "[realize] FINAL config dump:\n");
+        fprintf(stderr, "  [0x34]=0x%02x (cap_ptr)\n", c[0x34]);
+        fprintf(stderr, "  [0x38..0x3B]=%02x %02x %02x %02x (MSI cap)\n",
+                c[0x38], c[0x39], c[0x3a], c[0x3b]);
+        fprintf(stderr, "  [0x50..0x53]=%02x %02x %02x %02x (virtio COMMON)\n",
+                c[0x50], c[0x51], c[0x52], c[0x53]);
+        fprintf(stderr, "  [0x64..0x67]=%02x %02x %02x %02x (virtio NOTIFY)\n",
+                c[0x64], c[0x65], c[0x66], c[0x67]);
+    }
 
     /* 创建 MSI bottom-half（在主循环中处理 MSI，避免 BQL 死锁） */
     s->msi_queue_head = 0;

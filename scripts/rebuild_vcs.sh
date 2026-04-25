@@ -47,6 +47,7 @@ $VCS_BIN -full64 -sverilog \
     ../../bridge/qemu/sock_sync.c \
     ../../bridge/eth/eth_mac_dpi.c \
     ../../bridge/vcs/bridge_vcs.sv \
+    ../../pcie_tl_vip/src/shared/pcie_tl_config_proxy.sv \
     ../*.sv \
     -LDFLAGS "-lrt -lpthread" \
     -o simv 2>&1 | tail -20
