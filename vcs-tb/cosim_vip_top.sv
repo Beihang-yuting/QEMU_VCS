@@ -176,13 +176,16 @@ module cosim_vip_top;
         run_test("cosim_test");
     end
 
-    /* === 超时保护 === */
+    /* === 超时保护（安全网） ===
+     * 正常退出路径: QEMU 退出 → bridge_destroy 发 SHUTDOWN → VCS poll 返回 -1
+     *   → cosim_rc_driver 触发 shutdown_event → cosim_test drop objection → $finish
+     * 超时仅在 QEMU 异常断连时兜底。默认 10 分钟，可通过 +SIM_TIMEOUT_MS=N 调整。 */
     initial begin
         int timeout_ms;
         if (!$value$plusargs("SIM_TIMEOUT_MS=%d", timeout_ms))
-            timeout_ms = 200;
+            timeout_ms = 600000;  /* 默认 10 分钟 */
         repeat (timeout_ms) #1_000_000;
-        $display("[VIP-TOP] TIMEOUT after %0d ms", timeout_ms);
+        $display("[VIP-TOP] TIMEOUT after %0d ms (safety net)", timeout_ms);
         $finish;
     end
 

@@ -230,6 +230,18 @@ int bridge_advance_clock(bridge_ctx_t *ctx, uint64_t cycles) {
 
 void bridge_destroy(bridge_ctx_t *ctx) {
     if (!ctx) return;
+
+    /* 通知 VCS 优雅退出 */
+    if (ctx->transport) {
+        sync_msg_t msg = { .type = SYNC_MSG_SHUTDOWN };
+        ctx->transport->send_sync(ctx->transport, &msg);
+        fprintf(stderr, "[bridge] Sent SHUTDOWN to VCS (TCP)\n");
+    } else if (ctx->client_fd >= 0) {
+        sync_msg_t msg = { .type = SYNC_MSG_SHUTDOWN };
+        sock_sync_send(ctx->client_fd, &msg);
+        fprintf(stderr, "[bridge] Sent SHUTDOWN to VCS (SHM)\n");
+    }
+
     if (ctx->trace_enabled) {
         trace_log_close(&ctx->trace);
         ctx->trace_enabled = 0;

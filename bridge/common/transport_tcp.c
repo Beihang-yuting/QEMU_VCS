@@ -161,6 +161,25 @@ static int tcp_listen_port(const char *addr, int port) {
     return fd;
 }
 
+/* accept with poll loop: 每 2 秒检查一次，支持 Ctrl+C 中断 */
+static int tcp_accept_poll(int listen_fd, const char *label) {
+    struct pollfd pfd = { .fd = listen_fd, .events = POLLIN };
+    while (1) {
+        int ret = poll(&pfd, 1, 2000);
+        if (ret > 0) {
+            int fd = accept(listen_fd, NULL, NULL);
+            if (fd < 0) { perror(label); return -1; }
+            return fd;
+        }
+        if (ret < 0) {
+            if (errno == EINTR) return -1;
+            perror(label);
+            return -1;
+        }
+        fprintf(stderr, "%s: waiting for connection...\n", label);
+    }
+}
+
 static int tcp_connect_host(const char *host, int port) {
     int fd = socket(AF_INET, SOCK_STREAM, 0);
     if (fd < 0) { perror("[tcp] socket"); return -1; }
@@ -696,13 +715,13 @@ cosim_transport_t *transport_tcp_create(const transport_cfg_t *cfg) {
         fprintf(stderr, "[tcp] Server listening on ctrl=%d data=%d aux=%d, waiting for client...\n",
                 p->ctrl_port, p->data_port, p->aux_port);
 
-        /* 接受 ctrl 和 data (必须) */
-        p->ctrl_fd = accept(p->ctrl_listen_fd, NULL, NULL);
-        if (p->ctrl_fd < 0) { perror("[tcp] accept ctrl"); goto fail; }
+        /* 接受 ctrl 和 data (必须，poll 循环支持 Ctrl+C) */
+        p->ctrl_fd = tcp_accept_poll(p->ctrl_listen_fd, "[tcp] accept ctrl");
+        if (p->ctrl_fd < 0) goto fail;
         tcp_set_opts(p->ctrl_fd);
 
-        p->data_fd = accept(p->data_listen_fd, NULL, NULL);
-        if (p->data_fd < 0) { perror("[tcp] accept data"); goto fail; }
+        p->data_fd = tcp_accept_poll(p->data_listen_fd, "[tcp] accept data");
+        if (p->data_fd < 0) goto fail;
         tcp_set_opts(p->data_fd);
 
         /* 尝试接受 aux (非阻塞等待短暂时间，v1 客户端不会连接此端口) */

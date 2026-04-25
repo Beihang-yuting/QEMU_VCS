@@ -28,9 +28,22 @@ int sock_sync_listen(const char *path) {
 }
 
 int sock_sync_accept(int listen_fd) {
-    int fd = accept(listen_fd, NULL, NULL);
-    if (fd < 0) perror("accept");
-    return fd;
+    /* poll 循环：每 2 秒检查一次，允许 Ctrl+C (SIGINT) 中断 */
+    struct pollfd pfd = { .fd = listen_fd, .events = POLLIN };
+    while (1) {
+        int ret = poll(&pfd, 1, 2000);
+        if (ret > 0) {
+            int fd = accept(listen_fd, NULL, NULL);
+            if (fd < 0) perror("accept");
+            return fd;
+        }
+        if (ret < 0) {
+            if (errno == EINTR) return -1;  /* 收到信号，允许退出 */
+            perror("poll");
+            return -1;
+        }
+        fprintf(stderr, "[bridge] Waiting for VCS connection...\n");
+    }
 }
 
 int sock_sync_connect(const char *path) {
