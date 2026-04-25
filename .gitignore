@@ -54,3 +54,4 @@ venv/
 
 # Logs
 *.log
+run/

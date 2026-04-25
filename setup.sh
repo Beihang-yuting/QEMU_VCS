@@ -927,76 +927,16 @@ if [ "$NEED_QEMU" = true ]; then
 fi
 
 # ============================================================
-# [步骤] 编译 VCS simv（vcs-tb + pcie_tl_vip）
+# [步骤] VCS 编译提示（不在 setup 中编译，由用户单独执行 make vcs-vip）
 # ============================================================
 if [ "$NEED_VCS" = true ]; then
-    next_step "编译 VCS simv（vcs-tb + pcie_tl_vip）"
-
-    VCS_BIN=""
-
-    if command -v vcs &>/dev/null; then
-        VCS_BIN="$(command -v vcs)"
-    elif [ -n "$VCS_HOME" ] && [ -x "${VCS_HOME}/bin/vcs" ]; then
-        VCS_BIN="${VCS_HOME}/bin/vcs"
-    else
-        for pattern in /opt/synopsys/vcs/*/bin/vcs /eda/synopsys/vcs/*/bin/vcs /eda/*/vcs/*/bin/vcs; do
-            for p in $pattern; do
-                if [ -x "$p" ]; then
-                    VCS_BIN="$p"
-                    break 2
-                fi
-            done
-        done
-    fi
-
-    if [ -z "$VCS_BIN" ]; then
-        warn "未找到 VCS 编译器"
-        warn "  VCS 未安装或不在 PATH 中"
-        warn "  请设置 VCS_HOME 环境变量或将 VCS 加入 PATH"
-        warn "  跳过 VCS 编译，其他组件继续..."
-        SKIP_COUNT=$((SKIP_COUNT + 1))
-    else
-        info "使用 VCS: ${VCS_BIN}"
-
-        if [ -z "${VCS_HOME:-}" ]; then
-            VCS_HOME="$(cd "$(dirname "$VCS_BIN")/.." && pwd)"
-            export VCS_HOME
-            info "自动设置 VCS_HOME=${VCS_HOME}"
-        fi
-        export PATH="${VCS_HOME}/bin:$PATH"
-
-        for envfile in "$HOME/set-env.sh" "$HOME/.set-env.sh"; do
-            if [ -f "$envfile" ]; then
-                info "加载 EDA 环境: ${envfile}"
-                set +eu
-                source "$envfile" 2>/dev/null
-                set -eu
-                break
-            fi
-        done
-
-        # 使用 Makefile 的 vcs-vip 目标编译（VIP 模式，含 UVM + pcie_tl_vip）
-        info "编译 VCS VIP 模式 (make vcs-vip)..."
-        set +e
-        make -C "$PROJECT_DIR" vcs-vip 2>&1
-        VCS_RET=$?
-        set -e
-
-        if [ "$VCS_RET" -ne 0 ]; then
-            fail "VCS 编译失败 (exit code: $VCS_RET)"
-            fail "  请检查 VCS 许可证和环境设置"
-            fail "  手动重试: make vcs-vip"
-        fi
-
-        VCS_VIP_BIN="${PROJECT_DIR}/vcs_sim/simv_vip"
-        if [ -f "$VCS_VIP_BIN" ]; then
-            ok "simv_vip 编译成功: ${VCS_VIP_BIN}"
-            PASS_COUNT=$((PASS_COUNT + 1))
-        else
-            fail "simv_vip 未生成"
-            FAIL_COUNT=$((FAIL_COUNT + 1))
-        fi
-    fi
+    next_step "VCS 编译说明"
+    info "VCS 编译不在 setup 中执行（需要 Synopsys VCS 工具链）"
+    info "请在有 VCS 环境的机器上手动编译:"
+    info "  source ~/set-env.sh    # 加载 VCS 环境变量"
+    info "  make vcs-vip           # 编译 VIP 模式"
+    info "  产出: vcs_sim/simv_vip"
+    SKIP_COUNT=$((SKIP_COUNT + 1))
 fi
 
 # ============================================================
@@ -1264,80 +1204,57 @@ echo ""
 echo -e "${BOLD}-------- 使用方法 --------${NC}"
 case "$SETUP_MODE" in
     local)
-        echo "  自动编排测试（推荐，自动管理 QEMU + VCS 生命周期）:"
-        echo "    ./cosim.sh test phase4     # Phase 4: 双向 Ping（SHM 模式）"
-        echo "    ./cosim.sh test phase5     # Phase 5: iperf 吞吐（SHM 模式）"
+        echo "  双实例对打（自动启动 4 个进程，Guest↔Guest 网络验证）:"
+        echo "    make run-dual                     # SHM 模式"
+        echo "    make run-dual TRANSPORT=tcp        # TCP 模式"
         echo ""
-        echo "  TCP 双实例对打（4 个终端，Guest-to-Guest 网络验证）:"
-        echo "    # 终端 1: QEMU1 (server, 10.0.0.1)"
-        echo "    ./cosim.sh start qemu --transport tcp --port-base 9100 \\"
-        echo "        --append \"guest_ip=10.0.0.1 peer_ip=10.0.0.2 role=server wait_sec=60\""
-        echo "    # 终端 2: QEMU2 (client, 10.0.0.2)"
-        echo "    ./cosim.sh start qemu --transport tcp --port-base 9200 \\"
-        echo "        --append \"guest_ip=10.0.0.2 peer_ip=10.0.0.1 role=client wait_sec=60\""
-        echo "    # 终端 3: VCS1 (RoleA, MAC=01, 创建 ETH SHM)"
-        echo "    ./cosim.sh start vcs --transport tcp --remote-host 127.0.0.1 --port-base 9100 \\"
-        echo "        --role A --mac-last 1 --eth-shm /cosim_eth_dual"
-        echo "    # 终端 4: VCS2 (RoleB, MAC=02, 加入 ETH SHM)"
-        echo "    ./cosim.sh start vcs --transport tcp --remote-host 127.0.0.1 --port-base 9200 \\"
-        echo "        --role B --mac-last 2 --eth-shm /cosim_eth_dual"
-        echo "    # 或一键脚本: bash scripts/run_tcp_iperf_test.sh"
+        echo "  单实例手动启动（2 个终端，先 QEMU 再 VCS）:"
+        echo "    终端1: make run-qemu"
+        echo "    终端2: make run-vcs"
         echo ""
-        echo "  SHM 单实例手动启动（需 2 个终端，按此顺序）:"
-        echo "    # 终端 1: 先启 QEMU（会阻塞等待 VCS 连接，终端无输出是正常行为）"
-        echo "    ./cosim.sh start qemu --shm /cosim0 --sock /tmp/cosim0.sock"
-        echo "    # 终端 2: 再启 VCS（连接后双方开始运行）"
-        echo "    ./cosim.sh start vcs  --shm /cosim0 --sock /tmp/cosim0.sock --role A"
+        echo "  TCP 模式单实例:"
+        echo "    终端1: make run-qemu TRANSPORT=tcp"
+        echo "    终端2: make run-vcs  TRANSPORT=tcp REMOTE_HOST=127.0.0.1"
         echo ""
-        echo "  提示:"
-        echo "    - 启动顺序: 先 QEMU → 再 VCS（QEMU 阻塞等 VCS 是正常设计）"
-        echo "    - TCP 模式两组 QEMU 用不同 --port-base（如 9100 和 9200）"
-        echo "    - 两组 VCS 用不同 --mac-last 但相同 --eth-shm"
-        echo "    - 详细文档: docs/SETUP-GUIDE.md 第 3.5 节"
+        echo "  TAP 桥接（Guest↔主机网络）:"
+        echo "    make tap-check                    # 检查 CAP_NET_ADMIN 权限"
+        echo "    make run-tap                      # 启动 TAP bridge"
         ;;
     qemu-only)
-        echo "  启动 QEMU 侧（TCP server，监听等待 VCS 连接）:"
-        if [ "$GUEST_TYPE" = "minimal" ]; then
-            echo "    ./cosim.sh start qemu --transport tcp --port-base 9100"
-        else
-            echo "    ./cosim.sh start qemu --transport tcp --port-base 9100 \\"
-            echo "        --drive guest/images/rootfs.ext4"
-        fi
+        echo "  启动 QEMU（TCP server，等待 VCS 连接）:"
+        echo "    make run-qemu TRANSPORT=tcp"
         echo ""
         echo "  提示:"
-        echo "    - QEMU 启动后阻塞等待 VCS 连接（端口 9100-9102），终端无输出是正常的"
-        echo "    - 确认防火墙已放行 TCP 9100-9102"
-        echo "    - 本机 TCP 测试: VCS 用 --remote-host 127.0.0.1"
+        echo "    - QEMU 启动后阻塞等待 VCS，Ctrl+C 可退出"
+        echo "    - 确认防火墙放行 TCP 9100-9102"
         echo ""
-        echo "  远程 VCS 机器需运行:"
-        echo "    ./setup.sh --mode vcs-only"
-        echo "    ./cosim.sh start vcs --transport tcp --remote-host <本机IP> --port-base 9100"
+        echo "  远程 VCS 机器需执行:"
+        echo "    make vcs-vip                      # 编译 VCS"
+        echo "    make run-vcs TRANSPORT=tcp REMOTE_HOST=<本机IP>"
         ;;
     vcs-only)
-        echo "  步骤 1 — 启动 VCS 仿真（TCP client，连接远程 QEMU）:"
-        echo "    ./cosim.sh start vcs --transport tcp --remote-host <QEMU机器IP> --port-base 9100"
+        echo "  步骤 1 — 编译 VCS:"
+        echo "    source ~/set-env.sh               # 加载 VCS 环境"
+        echo "    make vcs-vip"
         echo ""
-        echo "  步骤 2 — 启动 TAP 桥接（VCS 侧，将 ETH SHM 桥接到主机网络）:"
-        echo "    ./cosim.sh start tap --eth-shm /cosim_eth0"
+        echo "  步骤 2 — 运行 VCS（连接远程 QEMU）:"
+        echo "    make run-vcs TRANSPORT=tcp REMOTE_HOST=<QEMU机器IP>"
+        echo ""
+        echo "  步骤 3（可选）— TAP 桥接:"
+        echo "    make tap-check && make run-tap"
         echo ""
         echo "  远程 QEMU 机器需先启动:"
-        echo "    ./setup.sh --mode qemu-only --guest minimal"
-        echo "    ./cosim.sh start qemu --transport tcp --port-base 9100"
-        echo ""
-        echo "  提示:"
-        echo "    - 启动顺序: 先 QEMU（listen）→ 再 VCS（connect）→ 再 TAP bridge"
-        echo "    - VCS 侧 connect 会自动重试 15 秒，请确保 QEMU 已在监听"
-        echo "    - eth_tap_bridge 需要 CAP_NET_ADMIN: sudo setcap cap_net_admin+ep tools/eth_tap_bridge"
+        echo "    make run-qemu TRANSPORT=tcp"
         ;;
 esac
 echo ""
-echo "  功能测试（启动后执行）:"
-echo "    ./cosim.sh test-guide   # 交互式测试向导（ping/iperf/arping/压力测试）"
+echo "  更多命令: make help"
+echo "  详细文档: docs/SETUP-GUIDE.md"
 echo ""
 echo "  重新编译:"
-echo "    make bridge             # 仅重编译 bridge 库"
-echo "    make test-unit          # 运行单元测试"
-echo "    ./setup.sh              # 重新运行安装向导"
+echo "    make bridge             # Bridge 库"
+echo "    make vcs-vip            # VCS（需 VCS 工具链）"
+echo "    make test               # 单元+集成测试"
 echo ""
 
 # 警告汇总
