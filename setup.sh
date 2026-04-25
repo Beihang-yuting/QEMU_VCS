@@ -340,14 +340,18 @@ install_deps() {
             gcc g++ make cmake git
             meson ninja-build pkg-config
             python3 python3-pip python3-venv
-            cpio gzip wget
+            cpio gzip wget bc flex bison
+            libelf-dev libssl-dev
         )
         if [ "$NEED_QEMU" = true ]; then
-            PKGS+=(libglib2.0-dev libpixman-1-dev libslirp-dev)
+            PKGS+=(libglib2.0-dev libpixman-1-dev libslirp-dev zlib1g-dev)
+        fi
+        if [ "$NEED_GUEST" = true ]; then
+            PKGS+=(rsync unzip file)
         fi
         local MISSING=()
         for pkg in "${PKGS[@]}"; do
-            if ! dpkg -l "$pkg" &>/dev/null; then
+            if ! dpkg -l "$pkg" 2>/dev/null | grep -q "^ii"; then
                 MISSING+=("$pkg")
             fi
         done
@@ -364,10 +368,14 @@ install_deps() {
             gcc gcc-c++ make cmake git
             meson ninja-build pkgconfig
             python3 python3-pip
-            cpio gzip wget
+            cpio gzip wget bc flex bison
+            elfutils-libelf-devel openssl-devel
         )
         if [ "$NEED_QEMU" = true ]; then
-            PKGS+=(glib2-devel pixman-devel libslirp-devel)
+            PKGS+=(glib2-devel pixman-devel libslirp-devel zlib-devel)
+        fi
+        if [ "$NEED_GUEST" = true ]; then
+            PKGS+=(rsync unzip file)
         fi
         local MISSING=()
         for pkg in "${PKGS[@]}"; do
@@ -390,16 +398,73 @@ install_deps() {
     fi
 }
 
+# ---- 无 sudo 时：检查关键依赖是否已预装，缺失则阻止继续 ----
+check_deps_no_sudo() {
+    local MISSING_CMDS=()
+    local MISSING_LIBS=()
+
+    # 关键命令检查
+    for cmd in gcc g++ make cmake python3 bc flex bison; do
+        command -v "$cmd" &>/dev/null || MISSING_CMDS+=("$cmd")
+    done
+
+    # 关键头文件/库检查（通过编译测试）
+    local tmpfile
+    tmpfile=$(mktemp /tmp/depcheck_XXXXXX.c)
+
+    # libelf (gelf.h) — buildroot/kernel 编译必需
+    echo '#include <gelf.h>' > "$tmpfile"
+    echo 'int main(){return 0;}' >> "$tmpfile"
+    if ! gcc -c "$tmpfile" -o /dev/null 2>/dev/null; then
+        MISSING_LIBS+=("libelf-dev")
+    fi
+
+    # libssl (openssl/evp.h) — kernel 签名模块需要
+    echo '#include <openssl/evp.h>' > "$tmpfile"
+    echo 'int main(){return 0;}' >> "$tmpfile"
+    if ! gcc -c "$tmpfile" -o /dev/null 2>/dev/null; then
+        MISSING_LIBS+=("libssl-dev")
+    fi
+
+    if [ "$NEED_QEMU" = true ]; then
+        if ! pkg-config --exists pixman-1 2>/dev/null; then
+            MISSING_LIBS+=("libpixman-1-dev")
+        fi
+        if ! pkg-config --exists glib-2.0 2>/dev/null; then
+            MISSING_LIBS+=("libglib2.0-dev")
+        fi
+    fi
+
+    rm -f "$tmpfile" 2>/dev/null
+
+    # 汇总：有缺失则阻止继续
+    if [ ${#MISSING_CMDS[@]} -gt 0 ] || [ ${#MISSING_LIBS[@]} -gt 0 ]; then
+        echo ""
+        fail "=========================================="
+        fail "  检测到缺失依赖，无法继续安装"
+        fail "=========================================="
+        [ ${#MISSING_CMDS[@]} -gt 0 ] && fail "  缺失命令:   ${MISSING_CMDS[*]}"
+        [ ${#MISSING_LIBS[@]} -gt 0 ] && fail "  缺失开发库: ${MISSING_LIBS[*]}"
+        echo ""
+        info "请让管理员先安装依赖，然后重新运行 setup.sh:"
+        if [ -f /etc/debian_version ]; then
+            local ALL=("${MISSING_CMDS[@]}" "${MISSING_LIBS[@]}")
+            info "  sudo apt-get install -y ${ALL[*]}"
+        elif [ -f /etc/redhat-release ]; then
+            info "  sudo yum install -y ${MISSING_CMDS[*]} elfutils-libelf-devel openssl-devel ..."
+        fi
+        echo ""
+        exit 1
+    else
+        ok "依赖检查通过（无 sudo 模式）"
+    fi
+}
+
 if [ "$HAS_SUDO" = true ]; then
     install_deps
 else
-    info "跳过系统包安装（无 sudo 权限）"
-    info "如果编译失败，请检查以下开发库是否已安装:"
-    if [ "$NEED_QEMU" = true ]; then
-        info "  - glib2-devel / libglib2.0-dev (>= 2.66.0)"
-        info "  - pixman-devel / libpixman-1-dev (>= 0.21.8)"
-    fi
-    info "  - python3 (>= 3.8), meson, ninja, cmake (>= 3.16)"
+    info "无 sudo 权限，检查依赖是否已预装..."
+    check_deps_no_sudo
 fi
 
 # ============================================================
@@ -1064,7 +1129,8 @@ if [ "$NEED_GUEST" = true ]; then
                     fi
 
                     info "编译 buildroot（可能需要 10-60 分钟）..."
-                    if make -j"$(nproc)" 2>&1 | tail -5; then
+                    info "  完整日志: /tmp/buildroot_build.log"
+                    if make -j"$(nproc)" 2>&1 | tee /tmp/buildroot_build.log | tail -20; then
                         # 拷贝产出到统一位置
                         if [ -f "output/images/bzImage" ]; then
                             cp output/images/bzImage "${IMAGES_DIR}/"
