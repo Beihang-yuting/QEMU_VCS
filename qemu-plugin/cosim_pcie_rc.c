@@ -16,6 +16,13 @@
 #include "hw/qdev-properties.h"
 #include "qapi/error.h"
 
+/* Debug 打印：编译时 -DCOSIM_DEBUG 开启 */
+#ifdef COSIM_DEBUG
+#define COSIM_DPRINTF(fmt, ...) fprintf(stderr, "cosim: " fmt, ##__VA_ARGS__)
+#else
+#define COSIM_DPRINTF(fmt, ...) do {} while (0)
+#endif
+
 /* Bridge API — 通过动态链接使用 */
 #include "bridge_qemu.h"
 #include "cosim_transport.h"
@@ -66,7 +73,7 @@ static uint64_t cosim_mmio_read(void *opaque, hwaddr addr, unsigned size)
         val &= (1ULL << (size * 8)) - 1;
     }
 
-    fprintf(stderr, "cosim: MRd bar%d off=0x%04lx pcie=0x%lx be=0x%x val=0x%lx\n",
+    COSIM_DPRINTF("MRd bar%d off=0x%04lx pcie=0x%lx be=0x%x val=0x%lx\n",
             bc->bar_index, (unsigned long)addr, (unsigned long)pcie_addr,
             first_be, (unsigned long)val);
     return val;
@@ -110,7 +117,7 @@ static void cosim_mmio_write(void *opaque, hwaddr addr, uint64_t val,
                       (unsigned long)addr);
     }
 
-    fprintf(stderr, "cosim: MWr bar%d off=0x%04lx pcie=0x%lx be=0x%x val=0x%lx\n",
+    COSIM_DPRINTF("MWr bar%d off=0x%04lx pcie=0x%lx be=0x%x val=0x%lx\n",
             bc->bar_index, (unsigned long)addr, (unsigned long)pcie_addr,
             first_be, (unsigned long)val);
 }
