@@ -1128,7 +1128,7 @@ if [ "$NEED_GUEST" = true ]; then
                         fi
                     fi
 
-                    local BR_LOG="${PROJECT_DIR}/logs/buildroot_build.log"
+                    BR_LOG="${PROJECT_DIR}/logs/buildroot_build.log"
                     mkdir -p "${PROJECT_DIR}/logs"
                     info "编译 buildroot（可能需要 10-60 分钟）..."
                     info "  完整日志: ${BR_LOG}"
