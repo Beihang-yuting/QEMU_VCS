@@ -47,6 +47,9 @@ struct CosimPCIeRC {
     uint32_t port_base;    /* TCP: port base (default 9100) */
     uint32_t instance_id;  /* TCP: instance ID (default 0) */
 
+    /* 运行时 debug 开关 -- -device cosim-pcie-rc,...,debug=on */
+    bool debug;
+
     /* Bridge 上下文 — 使用 opaque 指针避免在 QEMU 编译环境中引入 bridge 头文件 */
     void *bridge_ctx;
 
