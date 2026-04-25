@@ -17,7 +17,9 @@ SIMV=~/workspace/cosim-platform/vcs_sim/simv_vip
 ETH_SHM=/cosim_eth_tcp_iperf
 TIMEOUT=${1:-180}
 
-LOGDIR="/tmp/cosim_tcp_iperf_$(date +%Y%m%d_%H%M%S)"
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
+LOGDIR="${PROJECT_DIR}/logs/tcp_iperf_$(date +%Y%m%d_%H%M%S)"
 mkdir -p "$LOGDIR"
 echo "[TCP-IPERF] Logs: $LOGDIR/"
 

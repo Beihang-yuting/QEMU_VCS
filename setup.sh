@@ -1128,9 +1128,11 @@ if [ "$NEED_GUEST" = true ]; then
                         fi
                     fi
 
+                    local BR_LOG="${PROJECT_DIR}/logs/buildroot_build.log"
+                    mkdir -p "${PROJECT_DIR}/logs"
                     info "编译 buildroot（可能需要 10-60 分钟）..."
-                    info "  完整日志: /tmp/buildroot_build.log"
-                    if make -j"$(nproc)" 2>&1 | tee /tmp/buildroot_build.log | tail -20; then
+                    info "  完整日志: ${BR_LOG}"
+                    if make -j"$(nproc)" 2>&1 | tee "${BR_LOG}" | tail -20; then
                         # 拷贝产出到统一位置
                         if [ -f "output/images/bzImage" ]; then
                             cp output/images/bzImage "${IMAGES_DIR}/"
