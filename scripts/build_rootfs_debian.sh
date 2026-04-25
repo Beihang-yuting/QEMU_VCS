@@ -1,0 +1,117 @@
+#!/bin/bash
+# build_rootfs_debian.sh -- build Debian rootfs.ext4
+# Usage: sudo ./scripts/build_rootfs_debian.sh [output_dir]
+# Requires: sudo, debootstrap, network
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
+OUTPUT_DIR="${1:-${PROJECT_DIR}/guest/images}"
+DEBIAN_SUITE="bookworm"
+DEBIAN_MIRROR="http://deb.debian.org/debian"
+ROOTFS_SIZE_MB=512
+ROOTFS_IMG="${OUTPUT_DIR}/rootfs.ext4"
+MOUNT_DIR=$(mktemp -d /tmp/cosim-rootfs.XXXXXX)
+LOOP_DEV=""
+
+info()  { echo -e "\033[0;36m[INFO]\033[0m $*"; }
+ok()    { echo -e "\033[0;32m[OK]\033[0m $*"; }
+fail()  { echo -e "\033[0;31m[FAIL]\033[0m $*"; exit 1; }
+
+cleanup() {
+    info "Cleaning up..."
+    umount "$MOUNT_DIR/proc" 2>/dev/null || true
+    umount "$MOUNT_DIR/sys" 2>/dev/null || true
+    umount "$MOUNT_DIR/dev" 2>/dev/null || true
+    umount "$MOUNT_DIR" 2>/dev/null || true
+    [ -n "$LOOP_DEV" ] && losetup -d "$LOOP_DEV" 2>/dev/null || true
+    rm -rf "$MOUNT_DIR"
+}
+trap cleanup EXIT
+
+if [ "$(id -u)" -ne 0 ]; then
+    fail "Need root. Run: sudo $0"
+fi
+
+if ! command -v debootstrap &>/dev/null; then
+    fail "debootstrap not installed. Run: sudo apt install debootstrap"
+fi
+
+mkdir -p "$OUTPUT_DIR"
+
+# ---- Create ext4 image ----
+info "Creating ${ROOTFS_SIZE_MB}MB ext4 image..."
+dd if=/dev/zero of="$ROOTFS_IMG" bs=1M count=$ROOTFS_SIZE_MB status=none
+mkfs.ext4 -q -F "$ROOTFS_IMG"
+LOOP_DEV=$(losetup --find --show "$ROOTFS_IMG")
+mount "$LOOP_DEV" "$MOUNT_DIR"
+
+# ---- Debootstrap ----
+info "Running debootstrap ${DEBIAN_SUITE} (5-10 minutes)..."
+debootstrap --variant=minbase "$DEBIAN_SUITE" "$MOUNT_DIR" "$DEBIAN_MIRROR"
+
+# ---- Install packages ----
+info "Installing packages (apt install)..."
+mount -t proc proc "$MOUNT_DIR/proc"
+mount -t sysfs sysfs "$MOUNT_DIR/sys"
+mount --bind /dev "$MOUNT_DIR/dev"
+
+chroot "$MOUNT_DIR" /bin/bash -c '
+    export DEBIAN_FRONTEND=noninteractive
+    apt-get update -qq
+    apt-get install -y -qq iperf3 iproute2 iputils-ping ethtool tcpdump
+    apt-get install -y -qq pciutils usbutils
+    apt-get install -y -qq kmod util-linux procps
+    apt-get install -y -qq rdma-core perftest 2>/dev/null || echo "RDMA not available"
+    apt-get install -y -qq gcc make 2>/dev/null || echo "Dev tools partially installed"
+    apt-get install -y -qq wget curl bash-completion
+    apt-get clean
+    rm -rf /var/lib/apt/lists/*
+'
+
+umount "$MOUNT_DIR/proc"
+umount "$MOUNT_DIR/sys"
+umount "$MOUNT_DIR/dev"
+
+# ---- Configure system ----
+info "Configuring system..."
+
+echo "cosim-guest" > "$MOUNT_DIR/etc/hostname"
+sed -i 's/^root:[^:]*:/root::/' "$MOUNT_DIR/etc/shadow"
+
+mkdir -p "$MOUNT_DIR/etc/systemd/system/serial-getty@ttyS0.service.d"
+cat > "$MOUNT_DIR/etc/systemd/system/serial-getty@ttyS0.service.d/autologin.conf" << 'AUTOLOGIN'
+[Service]
+ExecStart=
+ExecStart=-/sbin/agetty --autologin root --noclear %I 115200 linux
+AUTOLOGIN
+
+cat > "$MOUNT_DIR/etc/fstab" << 'FSTAB'
+/dev/vda    /        ext4    rw,relatime    0 1
+proc        /proc    proc    defaults       0 0
+sysfs       /sys     sysfs   defaults       0 0
+FSTAB
+
+# ---- Copy cosim overlay ----
+info "Copying cosim overlay..."
+OVERLAY_DIR="${PROJECT_DIR}/guest/overlay"
+if [ -d "$OVERLAY_DIR" ]; then
+    cp -a "$OVERLAY_DIR"/* "$MOUNT_DIR/" 2>/dev/null || true
+    chmod +x "$MOUNT_DIR/usr/local/bin/cosim-start" 2>/dev/null || true
+    chmod +x "$MOUNT_DIR/usr/local/bin/cosim-stop" 2>/dev/null || true
+fi
+
+# ---- Copy custom test tools (if built) ----
+TOOLS_DIR="${PROJECT_DIR}/build/guest_tools"
+if [ -d "$TOOLS_DIR" ]; then
+    info "Copying custom test tools..."
+    cp -a "$TOOLS_DIR"/* "$MOUNT_DIR/usr/local/bin/" 2>/dev/null || true
+fi
+
+# ---- Done ----
+umount "$MOUNT_DIR"
+losetup -d "$LOOP_DEV"
+LOOP_DEV=""
+
+ok "Debian rootfs built: $ROOTFS_IMG"
+ls -lh "$ROOTFS_IMG"
