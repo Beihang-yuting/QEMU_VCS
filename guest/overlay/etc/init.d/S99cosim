@@ -1,19 +1,17 @@
 #!/bin/sh
-# S99cosim — cosim guest network auto-configuration
-# Configures eth0 with static IP for cosim e2e testing
+# S99cosim -- cosim guest boot configuration
+# Network is NOT auto-configured; use cosim-start manually.
 
 case "$1" in
     start)
-        echo "cosim: configuring eth0..."
-        ip link set eth0 up 2>/dev/null
-        ip addr add 10.0.0.2/24 dev eth0 2>/dev/null
-        echo "cosim: eth0 = 10.0.0.2/24"
+        if ! echo "$PATH" | grep -q '/usr/local/bin'; then
+            export PATH="/usr/local/bin:$PATH"
+        fi
+        echo ""
+        echo "cosim: ready. Run 'cosim-start' to configure network."
+        echo ""
         ;;
     stop)
         ip link set eth0 down 2>/dev/null
-        ;;
-    *)
-        echo "Usage: $0 {start|stop}"
-        exit 1
         ;;
 esac

@@ -1,0 +1,16 @@
+============================================
+ CoSim Guest
+
+ 1. Start VCS in another terminal:
+      make run-vcs
+
+ 2. Configure network:
+      cosim-start
+
+ 3. Run tests:
+      ping / iperf3 / lspci / cfgspace_test
+
+ 4. Exit:
+      cosim-stop          (graceful, notifies VCS)
+      Ctrl+A X            (force quit QEMU)
+============================================

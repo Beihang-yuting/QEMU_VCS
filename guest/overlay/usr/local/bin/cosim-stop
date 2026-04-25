@@ -1,0 +1,4 @@
+#!/bin/sh
+# cosim-stop -- stop simulation, notify VCS to exit
+echo "cosim: notifying VCS to stop..."
+poweroff

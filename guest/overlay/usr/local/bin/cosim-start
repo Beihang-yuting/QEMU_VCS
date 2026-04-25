@@ -1,0 +1,30 @@
+#!/bin/sh
+# cosim-start -- configure network + show available commands
+# Usage: cosim-start [IP]
+
+IP="$1"
+if [ -z "$IP" ]; then
+    IP=$(cat /proc/cmdline | tr ' ' '\n' | grep '^guest_ip=' | cut -d= -f2)
+fi
+IP="${IP:-10.0.0.1}"
+
+PEER=$(cat /proc/cmdline | tr ' ' '\n' | grep '^peer_ip=' | cut -d= -f2)
+PEER="${PEER:-10.0.0.2}"
+
+ip link set eth0 up 2>/dev/null
+ip addr flush dev eth0 2>/dev/null
+ip addr add "$IP/24" dev eth0
+
+echo ""
+echo "eth0: $IP/24 -- ready"
+echo ""
+echo "Available commands:"
+echo "  ping $PEER               connectivity test"
+echo "  iperf3 -s                 start iperf server"
+echo "  iperf3 -c $PEER           throughput test"
+echo "  lspci -vv                 PCI device list"
+echo "  cfgspace_test             Config Space verification"
+echo "  dma_test <BAR_ADDR>       DMA read/write test"
+echo "  nic_tx_test <BAR_ADDR>    NIC TX test"
+echo "  cosim-stop                stop simulation"
+echo ""
