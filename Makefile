@@ -25,8 +25,6 @@ QEMU          ?= $(firstword $(wildcard $(PROJECT_DIR)/third_party/qemu/build/qe
 SIMV          ?= $(VCS_SIM_DIR)/simv_vip
 KERNEL        ?= $(firstword $(wildcard $(PROJECT_DIR)/guest/images/bzImage) \
                               $(wildcard $(HOME)/workspace/alpine-vmlinuz-new))
-INITRD        ?= $(firstword $(wildcard $(PROJECT_DIR)/guest/images/custom-initramfs-phase5.gz) \
-                              $(wildcard $(HOME)/workspace/custom-initramfs-phase5.gz))
 ROOTFS        ?= $(firstword $(wildcard $(PROJECT_DIR)/guest/images/rootfs.ext4) \
                               $(wildcard $(HOME)/workspace/rootfs.ext4))
 TAP_BRIDGE    ?= $(PROJECT_DIR)/tools/eth_tap_bridge
@@ -143,24 +141,28 @@ tap-bridge: bridge
 # ============================================================
 # 运行 — QEMU
 # ============================================================
-ifeq ($(TRANSPORT),tcp)
-  _QEMU_DEV = cosim-pcie-rc,transport=tcp,port_base=$(PORT_BASE),instance_id=$(INSTANCE_ID)
+VERBOSE       ?= 0
+
+ifeq ($(VERBOSE),1)
+  _LOGLEVEL    = loglevel=7
+  _COSIM_DEBUG = ,debug=on
 else
-  _QEMU_DEV = cosim-pcie-rc,shm_name=$(SHM_NAME),sock_path=$(SOCK_PATH)
+  _LOGLEVEL    = quiet loglevel=1
+  _COSIM_DEBUG =
 endif
-# Guest 启动模式: initramfs 优先，否则 drive (rootfs.ext4)
-ifneq ($(INITRD),)
-  _GUEST_MODE  = initramfs
-  _GUEST_ARGS  = -initrd $(INITRD)
-  _QEMU_APPEND = console=ttyS0 init=/init guest_ip=$(GUEST_IP) peer_ip=$(PEER_IP) role=$(ROLE) wait_sec=$(WAIT_SEC)
-else ifneq ($(ROOTFS),)
-  _GUEST_MODE  = drive
-  _GUEST_ARGS  = -drive file=$(ROOTFS),format=raw,if=virtio
-  _QEMU_APPEND = console=ttyS0 root=/dev/vda rw guest_ip=$(GUEST_IP) peer_ip=$(PEER_IP) role=$(ROLE) wait_sec=$(WAIT_SEC)
+
+ifeq ($(TRANSPORT),tcp)
+  _QEMU_DEV = cosim-pcie-rc,transport=tcp,port_base=$(PORT_BASE),instance_id=$(INSTANCE_ID)$(_COSIM_DEBUG)
 else
-  _GUEST_MODE  = none
+  _QEMU_DEV = cosim-pcie-rc,shm_name=$(SHM_NAME),sock_path=$(SOCK_PATH)$(_COSIM_DEBUG)
+endif
+
+ifneq ($(ROOTFS),)
+  _GUEST_ARGS  = -drive file=$(ROOTFS),format=raw,if=virtio
+  _QEMU_APPEND = console=ttyS0 root=/dev/vda rw $(_LOGLEVEL) guest_ip=$(GUEST_IP) peer_ip=$(PEER_IP)
+else
   _GUEST_ARGS  =
-  _QEMU_APPEND = console=ttyS0 guest_ip=$(GUEST_IP) peer_ip=$(PEER_IP) role=$(ROLE) wait_sec=$(WAIT_SEC)
+  _QEMU_APPEND = console=ttyS0 $(_LOGLEVEL) guest_ip=$(GUEST_IP) peer_ip=$(PEER_IP)
 endif
 
 run-qemu:
@@ -174,21 +176,22 @@ run-qemu:
 		echo "  请指定: make run-qemu KERNEL=/path/to/bzImage"; \
 		exit 1; \
 	fi
-	@if [ '$(_GUEST_MODE)' = 'none' ]; then \
-		echo "[警告] 未找到 initramfs 或 rootfs，内核可能无法挂载根文件系统"; \
-		echo "  请提供: INITRD=/path/to/initramfs.gz 或 ROOTFS=/path/to/rootfs.ext4"; \
+	@if [ -z '$(ROOTFS)' ]; then \
+		echo "[警告] 未找到 rootfs，内核可能无法挂载根文件系统"; \
+		echo "  请提供: ROOTFS=/path/to/rootfs.ext4"; \
 	fi
 	@mkdir -p $(LOG_DIR) $(RUN_DIR)
 	@echo "============================================"
-	@echo " QEMU ($(TRANSPORT) 模式, Guest: $(_GUEST_MODE))"
+	@echo " QEMU ($(TRANSPORT) 模式)"
 ifeq ($(TRANSPORT),tcp)
 	@echo "  监听: $(PORT_BASE)-$$(($(PORT_BASE)+2))  Instance: $(INSTANCE_ID)"
 else
 	@echo "  SHM: $(SHM_NAME)  Sock: $(SOCK_PATH)"
 endif
-	@echo "  Guest: $(GUEST_IP) ($(ROLE))  Peer: $(PEER_IP)"
+	@echo "  Guest: $(GUEST_IP)  Peer: $(PEER_IP)"
 	@echo "  日志: $(LOG_DIR)/qemu.log"
-	@echo "  提示: 阻塞等待 VCS 连接，Ctrl+A X 退出 QEMU"
+	@echo "  调试: make run-qemu VERBOSE=1"
+	@echo "  退出: Ctrl+A X 或 Guest 内 cosim-stop"
 	@echo "============================================"
 	$(QEMU) -M q35 -m $(GUEST_MEMORY) -smp 1 \
 		-kernel $(KERNEL) $(_GUEST_ARGS) \
@@ -257,13 +260,13 @@ run-dual:
 		VT2="+SHM_NAME=/cosim_d1 +SOCK_PATH=$(RUN_DIR)/cosim_d1.sock"; \
 	fi; \
 	$(QEMU) -M q35 -m $(GUEST_MEMORY) -smp 1 -kernel $(KERNEL) $(_GUEST_ARGS) \
-		-append '$(strip $(subst $(GUEST_IP),10.0.0.1,$(subst $(PEER_IP),10.0.0.2,$(subst $(ROLE),server,$(_QEMU_APPEND)))))' \
+		-append 'console=ttyS0 root=/dev/vda rw $(_LOGLEVEL) guest_ip=10.0.0.1 peer_ip=10.0.0.2' \
 		-device "$$DEV1" -nographic -no-reboot \
 		-d unimp -D $$LOGDIR/qemu1_debug.log > $$LOGDIR/qemu1.log 2>&1 & \
 	PIDS="$$PIDS $$!"; sleep 2; \
 	echo "[2/4] QEMU2 (10.0.0.2, client)..."; \
 	$(QEMU) -M q35 -m $(GUEST_MEMORY) -smp 1 -kernel $(KERNEL) $(_GUEST_ARGS) \
-		-append '$(strip $(subst $(GUEST_IP),10.0.0.2,$(subst $(PEER_IP),10.0.0.1,$(subst $(ROLE),client,$(_QEMU_APPEND)))))' \
+		-append 'console=ttyS0 root=/dev/vda rw $(_LOGLEVEL) guest_ip=10.0.0.2 peer_ip=10.0.0.1' \
 		-device "$$DEV2" -nographic -no-reboot \
 		-d unimp -D $$LOGDIR/qemu2_debug.log > $$LOGDIR/qemu2.log 2>&1 & \
 	PIDS="$$PIDS $$!"; sleep 2; \
@@ -359,9 +362,8 @@ info:
 	@echo "  QEMU:   $(QEMU)  $$(test -f '$(QEMU)' && echo [OK] || echo [缺失])"
 	@echo "  SIMV:   $(SIMV)  $$(test -f '$(SIMV)' && echo [OK] || echo [缺失])"
 	@echo "  Kernel: $(KERNEL)  $$(test -f '$(KERNEL)' && echo [OK] || echo [缺失])"
-	@echo "  Initrd: $(if $(INITRD),$(INITRD)  $$(test -f '$(INITRD)' && echo [OK] || echo [缺失]),(未找到))"
 	@echo "  Rootfs: $(if $(ROOTFS),$(ROOTFS)  $$(test -f '$(ROOTFS)' && echo [OK] || echo [缺失]),(未找到))"
-	@echo "  Guest:  $(_GUEST_MODE)"
+	@echo "  VERBOSE: $(VERBOSE)"
 	@echo "  TAP:    $(TAP_BRIDGE)  $$(test -f '$(TAP_BRIDGE)' && echo [OK] || echo [缺失])"
 	@echo "  日志:   $(LOG_DIR)/"
 	@echo "  运行:   $(RUN_DIR)/"
@@ -420,7 +422,8 @@ help:
 	@echo "  MAC_LAST=1             MAC 末字节"
 	@echo "  ETH_SHM                ETH 共享内存名"
 	@echo "  SIM_TIMEOUT=600000     VCS 超时(ms)"
-	@echo "  QEMU= SIMV= KERNEL= INITRD= ROOTFS=  路径覆盖"
+	@echo "  VERBOSE=0|1            日志级别（默认 0 安静，1 详细+debug）"
+	@echo "  QEMU= SIMV= KERNEL= ROOTFS=  路径覆盖"
 	@echo ""
 	@echo "示例:"
 	@echo "  make run-dual                            # 本机 SHM"
