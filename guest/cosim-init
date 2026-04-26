@@ -52,13 +52,12 @@ if [ -d "$MODDIR" ]; then
         kernel/drivers/ata \
         kernel/drivers/scsi \
         kernel/drivers/block \
-        kernel/drivers/nvme/host \
+        kernel/drivers/nvme \
         kernel/drivers/net \
         kernel/fs; do
         dir="$MODDIR/$subdir"
         if [ -d "$dir" ]; then
-            for mod in "$dir"/*.ko*; do
-                [ -f "$mod" ] || continue
+            find "$dir" -name '*.ko*' | while read mod; do
                 name=$(basename "$mod" | sed 's/\.ko.*$//')
                 modprobe "$name" 2>/dev/null
             done
