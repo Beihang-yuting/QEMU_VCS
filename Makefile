@@ -47,14 +47,14 @@ PEER_IP       ?= 10.0.0.2
 ROLE          ?= server
 WAIT_SEC      ?= 60
 GUEST_MEMORY  ?= 256M
-# VCS
-ETH_SHM       ?= /cosim_eth_dual
+# VCS（单实例，和 TAP 共用 /cosim_eth0）
+ETH_SHM       ?= /cosim_eth0
 ETH_ROLE      ?= 0
 ETH_CREATE    ?= 1
 MAC_LAST      ?= 1
 SIM_TIMEOUT   ?= 600000
 VCS_TEST      ?= cosim_test
-# TAP
+# TAP（Host 侧 10.0.0.1，Guest 侧用 cosim-start 配 10.0.0.2）
 TAP_DEV       ?= cosim0
 TAP_IP        ?= 10.0.0.1
 TAP_ETH_SHM   ?= /cosim_eth0
