@@ -3,6 +3,8 @@
 # 替换 Alpine/Debian 默认 init，适配 VCS RTL 仿真的高延迟环境
 # 主动加载所有模块 + 自适应等待 root 设备（最长 15 分钟）
 
+export PATH=/bin:/sbin:/usr/bin:/usr/sbin
+
 TIMEOUT=900  # 15 分钟
 
 # ---- 挂载基础文件系统 ----
