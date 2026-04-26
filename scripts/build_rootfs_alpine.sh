@@ -138,10 +138,21 @@ FSTAB
 info "Copying cosim overlay..."
 OVERLAY_DIR="${PROJECT_DIR}/guest/overlay"
 if [ -d "$OVERLAY_DIR" ]; then
-    cp -a "$OVERLAY_DIR"/* "$MOUNT_DIR/" 2>/dev/null || true
-    chmod +x "$MOUNT_DIR/usr/local/bin/cosim-start" 2>/dev/null || true
-    chmod +x "$MOUNT_DIR/usr/local/bin/cosim-stop" 2>/dev/null || true
-    chmod +x "$MOUNT_DIR/etc/init.d/S99cosim" 2>/dev/null || true
+    # 确保目标目录存在
+    mkdir -p "$MOUNT_DIR/usr/local/bin"
+    mkdir -p "$MOUNT_DIR/etc/init.d"
+    mkdir -p "$MOUNT_DIR/etc/profile.d"
+    # 逐个拷贝，不吞错误
+    cp -av "$OVERLAY_DIR"/etc/motd "$MOUNT_DIR/etc/motd"
+    cp -av "$OVERLAY_DIR"/etc/inittab "$MOUNT_DIR/etc/inittab"
+    cp -av "$OVERLAY_DIR"/etc/init.d/S99cosim "$MOUNT_DIR/etc/init.d/S99cosim"
+    cp -av "$OVERLAY_DIR"/etc/profile.d/cosim.sh "$MOUNT_DIR/etc/profile.d/cosim.sh"
+    cp -av "$OVERLAY_DIR"/usr/local/bin/cosim-start "$MOUNT_DIR/usr/local/bin/cosim-start"
+    cp -av "$OVERLAY_DIR"/usr/local/bin/cosim-stop "$MOUNT_DIR/usr/local/bin/cosim-stop"
+    chmod +x "$MOUNT_DIR/usr/local/bin/cosim-start"
+    chmod +x "$MOUNT_DIR/usr/local/bin/cosim-stop"
+    chmod +x "$MOUNT_DIR/etc/init.d/S99cosim"
+    ok "Overlay copied: cosim-start, cosim-stop, motd, inittab, profile, S99cosim"
 fi
 
 # ---- Copy custom test tools (if built) ----
