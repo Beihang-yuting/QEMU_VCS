@@ -70,8 +70,20 @@ chroot "$MOUNT_DIR" /bin/sh -c '
     apk add kmod util-linux procps coreutils
     apk add rdma-core perftest 2>/dev/null || echo "RDMA not available, skipping"
     apk add bash wget curl
+    # 安装虚拟化内核（含 virtio 驱动）
+    apk add linux-virt
     rm -rf /var/cache/apk/*
 '
+
+# ---- Extract kernel ----
+info "Extracting kernel (bzImage)..."
+VMLINUZ=$(ls "$MOUNT_DIR"/boot/vmlinuz-* 2>/dev/null | head -1)
+if [ -n "$VMLINUZ" ]; then
+    cp "$VMLINUZ" "${OUTPUT_DIR}/bzImage"
+    ok "Kernel: ${OUTPUT_DIR}/bzImage"
+else
+    echo "[WARN] vmlinuz not found in /boot, bzImage not extracted"
+fi
 
 # ---- Configure system ----
 info "Configuring system..."

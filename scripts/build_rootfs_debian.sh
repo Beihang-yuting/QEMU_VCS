@@ -65,9 +65,21 @@ chroot "$MOUNT_DIR" /bin/bash -c '
     apt-get install -y -qq rdma-core perftest 2>/dev/null || echo "RDMA not available"
     apt-get install -y -qq gcc make 2>/dev/null || echo "Dev tools partially installed"
     apt-get install -y -qq wget curl bash-completion
+    # 安装内核（含 virtio 驱动）
+    apt-get install -y -qq linux-image-amd64 2>/dev/null || echo "Kernel package not available"
     apt-get clean
     rm -rf /var/lib/apt/lists/*
 '
+
+# ---- Extract kernel ----
+info "Extracting kernel (bzImage)..."
+VMLINUZ=$(ls "$MOUNT_DIR"/boot/vmlinuz-* 2>/dev/null | head -1)
+if [ -n "$VMLINUZ" ]; then
+    cp "$VMLINUZ" "${OUTPUT_DIR}/bzImage"
+    ok "Kernel: ${OUTPUT_DIR}/bzImage"
+else
+    echo "[WARN] vmlinuz not found in /boot, bzImage not extracted"
+fi
 
 umount "$MOUNT_DIR/proc"
 umount "$MOUNT_DIR/sys"
