@@ -121,8 +121,10 @@ INITTAB
 
 echo "cosim-guest" > "$MOUNT_DIR/etc/hostname"
 
-sed -i 's/^root:.*/root::0:0:root:\/root:\/bin\/ash/' "$MOUNT_DIR/etc/shadow" 2>/dev/null || \
-    echo 'root::0:0:root:/root:/bin/ash' > "$MOUNT_DIR/etc/shadow"
+# root 密码设为 123
+HASH=$(openssl passwd -6 '123')
+sed -i "s|^root:[^:]*:|root:${HASH}:|" "$MOUNT_DIR/etc/shadow" 2>/dev/null || \
+    echo "root:${HASH}:0:0:root:/root:/bin/ash" > "$MOUNT_DIR/etc/shadow"
 chmod 640 "$MOUNT_DIR/etc/shadow"
 
 cat > "$MOUNT_DIR/etc/fstab" << 'FSTAB'
