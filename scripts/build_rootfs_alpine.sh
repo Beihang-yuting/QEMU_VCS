@@ -121,6 +121,10 @@ INITTAB
 
 echo "cosim-guest" > "$MOUNT_DIR/etc/hostname"
 
+# 启用 hostname 服务（OpenRC 需要在 boot runlevel）
+mkdir -p "$MOUNT_DIR/etc/runlevels/boot"
+ln -sf /etc/init.d/hostname "$MOUNT_DIR/etc/runlevels/boot/hostname" 2>/dev/null || true
+
 # root 密码设为 123
 HASH=$(openssl passwd -6 '123')
 sed -i "s|^root:[^:]*:|root:${HASH}:|" "$MOUNT_DIR/etc/shadow" 2>/dev/null || \
