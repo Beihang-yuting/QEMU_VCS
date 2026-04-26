@@ -6,10 +6,10 @@ IP="$1"
 if [ -z "$IP" ]; then
     IP=$(cat /proc/cmdline | tr ' ' '\n' | grep '^guest_ip=' | cut -d= -f2)
 fi
-IP="${IP:-10.0.0.1}"
+IP="${IP:-10.0.0.2}"
 
 PEER=$(cat /proc/cmdline | tr ' ' '\n' | grep '^peer_ip=' | cut -d= -f2)
-PEER="${PEER:-10.0.0.2}"
+PEER="${PEER:-10.0.0.1}"
 
 ip link set eth0 up 2>/dev/null
 ip addr flush dev eth0 2>/dev/null

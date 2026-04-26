@@ -41,9 +41,9 @@ SOCK_PATH     ?= $(RUN_DIR)/cosim0.sock
 PORT_BASE     ?= 9100
 INSTANCE_ID   ?= 0
 REMOTE_HOST   ?= 127.0.0.1
-# Guest
-GUEST_IP      ?= 10.0.0.1
-PEER_IP       ?= 10.0.0.2
+# Guest（TAP Host=10.0.0.1，Guest 默认 10.0.0.2）
+GUEST_IP      ?= 10.0.0.2
+PEER_IP       ?= 10.0.0.1
 ROLE          ?= server
 WAIT_SEC      ?= 60
 GUEST_MEMORY  ?= 256M
@@ -419,12 +419,17 @@ help:
 	@echo "  INSTANCE_ID=0          实例 ID（端口=BASE+ID*3）"
 	@echo "  REMOTE_HOST=127.0.0.1  VCS 连接目标"
 	@echo "  GUEST_IP / PEER_IP     Guest IP 地址"
-	@echo "  ROLE=server|client     Guest 角色"
 	@echo "  MAC_LAST=1             MAC 末字节"
 	@echo "  ETH_SHM                ETH 共享内存名"
 	@echo "  SIM_TIMEOUT=600000     VCS 超时(ms)"
 	@echo "  VERBOSE=0|1            日志级别（默认 0 安静，1 详细+debug）"
 	@echo "  QEMU= SIMV= KERNEL= ROOTFS=  路径覆盖"
+	@echo ""
+	@echo "IP 地址分配（10.0.0.0/24 网段）:"
+	@echo "  TAP Host 侧:  10.0.0.1  （make run-tap 自动配置）"
+	@echo "  Guest 侧:     10.0.0.2  （cosim-start 默认值）"
+	@echo "  双实例模式:    10.0.0.1 / 10.0.0.2（自动分配）"
+	@echo "  自定义:        cosim-start <IP> 指定任意 IP"
 	@echo ""
 	@echo "示例:"
 	@echo "  make run-dual                            # 本机 SHM"
