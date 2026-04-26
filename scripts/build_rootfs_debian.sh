@@ -6,7 +6,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
-OUTPUT_DIR="${1:-${PROJECT_DIR}/guest/images}"
+OUTPUT_DIR="$(cd "${1:-${PROJECT_DIR}/guest/images}" 2>/dev/null && pwd || echo "${PROJECT_DIR}/guest/images")"
 DEBIAN_SUITE="bookworm"
 DEBIAN_MIRROR="http://deb.debian.org/debian"
 ROOTFS_SIZE_MB=512

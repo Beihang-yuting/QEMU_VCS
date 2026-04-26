@@ -6,7 +6,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
-OUTPUT_DIR="${1:-${PROJECT_DIR}/guest/images}"
+OUTPUT_DIR="$(cd "${1:-${PROJECT_DIR}/guest/images}" 2>/dev/null && pwd || echo "${PROJECT_DIR}/guest/images")"
 ALPINE_VER="3.20"
 ALPINE_ARCH="x86_64"
 ALPINE_TAR="alpine-minirootfs-${ALPINE_VER}.0-${ALPINE_ARCH}.tar.gz"
