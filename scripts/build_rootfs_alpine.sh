@@ -139,5 +139,10 @@ umount "$MOUNT_DIR"
 losetup -d "$LOOP_DEV"
 LOOP_DEV=""
 
+# 修复权限（sudo 构建，产出文件归还给调用者）
+if [ -n "${SUDO_USER:-}" ]; then
+    chown "$SUDO_USER:$SUDO_USER" "${OUTPUT_DIR}/bzImage" "${OUTPUT_DIR}/initramfs.gz" "$ROOTFS_IMG" 2>/dev/null || true
+fi
+
 ok "Alpine rootfs built: $ROOTFS_IMG"
-ls -lh "$ROOTFS_IMG"
+ls -lh "${OUTPUT_DIR}/"
