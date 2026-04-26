@@ -65,6 +65,7 @@ cp /etc/resolv.conf "$MOUNT_DIR/etc/resolv.conf" 2>/dev/null || true
 info "Installing packages (apk add)..."
 chroot "$MOUNT_DIR" /bin/sh -c '
     apk update
+    apk add openrc alpine-base
     apk add iperf3 iproute2 iputils ethtool tcpdump
     apk add pciutils usbutils
     apk add kmod util-linux procps coreutils
