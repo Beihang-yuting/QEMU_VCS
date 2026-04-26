@@ -113,9 +113,9 @@ fi
 
 echo "[cosim-init] Mounted $ROOT, switching to real root..."
 
-# 清理
-umount /proc 2>/dev/null
-umount /sys 2>/dev/null
-umount /dev 2>/dev/null
+# 将 proc/sys/dev 移动到新 root（switch_root 需要）
+mount --move /proc /sysroot/proc 2>/dev/null
+mount --move /sys /sysroot/sys 2>/dev/null
+mount --move /dev /sysroot/dev 2>/dev/null
 
 exec switch_root /sysroot "$INIT"
