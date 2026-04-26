@@ -30,11 +30,13 @@ int sock_sync_listen(const char *path) {
 int sock_sync_accept(int listen_fd) {
     /* poll 循环：每 2 秒检查一次，允许 Ctrl+C (SIGINT) 中断 */
     struct pollfd pfd = { .fd = listen_fd, .events = POLLIN };
+    int printed = 0;
     while (1) {
         int ret = poll(&pfd, 1, 2000);
         if (ret > 0) {
             int fd = accept(listen_fd, NULL, NULL);
             if (fd < 0) perror("accept");
+            else fprintf(stderr, "[bridge] VCS connected.\n");
             return fd;
         }
         if (ret < 0) {
@@ -42,7 +44,12 @@ int sock_sync_accept(int listen_fd) {
             perror("poll");
             return -1;
         }
-        fprintf(stderr, "[bridge] Waiting for VCS connection...\n");
+        if (!printed) {
+            fprintf(stderr,
+                "[bridge] Waiting for VCS connection...\n"
+                "  Please start VCS in another terminal: make run-vcs\n");
+            printed = 1;
+        }
     }
 }
 

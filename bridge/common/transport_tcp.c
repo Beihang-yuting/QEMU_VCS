@@ -164,11 +164,13 @@ static int tcp_listen_port(const char *addr, int port) {
 /* accept with poll loop: 每 2 秒检查一次，支持 Ctrl+C 中断 */
 static int tcp_accept_poll(int listen_fd, const char *label) {
     struct pollfd pfd = { .fd = listen_fd, .events = POLLIN };
+    int printed = 0;
     while (1) {
         int ret = poll(&pfd, 1, 2000);
         if (ret > 0) {
             int fd = accept(listen_fd, NULL, NULL);
             if (fd < 0) { perror(label); return -1; }
+            fprintf(stderr, "%s: connected.\n", label);
             return fd;
         }
         if (ret < 0) {
@@ -176,7 +178,10 @@ static int tcp_accept_poll(int listen_fd, const char *label) {
             perror(label);
             return -1;
         }
-        fprintf(stderr, "%s: waiting for connection...\n", label);
+        if (!printed) {
+            fprintf(stderr, "%s: waiting for connection...\n", label);
+            printed = 1;
+        }
     }
 }
 
