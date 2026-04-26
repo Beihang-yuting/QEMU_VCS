@@ -75,14 +75,22 @@ chroot "$MOUNT_DIR" /bin/sh -c '
     rm -rf /var/cache/apk/*
 '
 
-# ---- Extract kernel ----
-info "Extracting kernel (bzImage)..."
+# ---- Extract kernel + initramfs ----
+info "Extracting kernel and initramfs..."
 VMLINUZ=$(ls "$MOUNT_DIR"/boot/vmlinuz-* 2>/dev/null | head -1)
 if [ -n "$VMLINUZ" ]; then
     cp "$VMLINUZ" "${OUTPUT_DIR}/bzImage"
     ok "Kernel: ${OUTPUT_DIR}/bzImage"
 else
     echo "[WARN] vmlinuz not found in /boot, bzImage not extracted"
+fi
+
+INITRAMFS=$(ls "$MOUNT_DIR"/boot/initramfs-* 2>/dev/null | head -1)
+if [ -n "$INITRAMFS" ]; then
+    cp "$INITRAMFS" "${OUTPUT_DIR}/initramfs.gz"
+    ok "Initramfs: ${OUTPUT_DIR}/initramfs.gz"
+else
+    echo "[WARN] initramfs not found in /boot"
 fi
 
 # ---- Configure system ----

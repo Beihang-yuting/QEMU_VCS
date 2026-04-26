@@ -27,6 +27,7 @@ KERNEL        ?= $(firstword $(wildcard $(PROJECT_DIR)/guest/images/bzImage) \
                               $(wildcard $(HOME)/workspace/alpine-vmlinuz-new))
 ROOTFS        ?= $(firstword $(wildcard $(PROJECT_DIR)/guest/images/rootfs.ext4) \
                               $(wildcard $(HOME)/workspace/rootfs.ext4))
+INITRD        ?= $(wildcard $(PROJECT_DIR)/guest/images/initramfs.gz)
 TAP_BRIDGE    ?= $(PROJECT_DIR)/tools/eth_tap_bridge
 
 # ============================================================
@@ -158,7 +159,7 @@ else
 endif
 
 ifneq ($(ROOTFS),)
-  _GUEST_ARGS  = -drive file=$(ROOTFS),format=raw,if=virtio
+  _GUEST_ARGS  = -drive file=$(ROOTFS),format=raw,if=virtio $(if $(INITRD),-initrd $(INITRD))
   _QEMU_APPEND = console=ttyS0 root=/dev/vda rw $(_LOGLEVEL) guest_ip=$(GUEST_IP) peer_ip=$(PEER_IP)
 else
   _GUEST_ARGS  =

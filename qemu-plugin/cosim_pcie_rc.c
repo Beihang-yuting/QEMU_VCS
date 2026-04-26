@@ -239,7 +239,7 @@ static uint32_t cosim_config_read(PCIDevice *pci_dev, uint32_t address, int len)
     /* Bridge 未连接时，使用 QEMU 本地 config space */
     if (!ctx) {
         uint32_t local_val = pci_default_read_config(pci_dev, address, len);
-        fprintf(stderr, "[cfg_read] LOCAL(no bridge) addr=0x%02x len=%d → 0x%x\n",
+        COSIM_DPRINTF(s, "cfg_read LOCAL addr=0x%02x len=%d -> 0x%x\n",
                 address, len, local_val);
         return local_val;
     }
@@ -259,7 +259,7 @@ static uint32_t cosim_config_read(PCIDevice *pci_dev, uint32_t address, int len)
     int ret = bridge_send_tlp_and_wait(ctx, &req, &cpl);
     if (ret < 0) {
         uint32_t fallback = pci_default_read_config(pci_dev, address, len);
-        fprintf(stderr, "[cfg_read] addr=0x%02x len=%d VCS_FAIL → local=0x%x\n",
+        COSIM_DPRINTF(s, "cfg_read addr=0x%02x len=%d VCS_FAIL -> local=0x%x\n",
                 address, len, fallback);
         return fallback;
     }
@@ -274,7 +274,7 @@ static uint32_t cosim_config_read(PCIDevice *pci_dev, uint32_t address, int len)
         val &= (1u << (len * 8)) - 1;
     }
 
-    fprintf(stderr, "[cfg_read] addr=0x%02x len=%d → 0x%x (dw=0x%08x off=%u)\n",
+    COSIM_DPRINTF(s, "cfg_read addr=0x%02x len=%d -> 0x%x (dw=0x%08x off=%u)\n",
             address, len, val, dword, byte_offset);
     return val;
 }
@@ -351,7 +351,7 @@ static uint32_t cosim_query_bar_size(bridge_ctx_t *ctx, int bar) {
 }
 
 /* 遍历 capability 链找 MSI */
-static void cosim_discover_caps(bridge_ctx_t *ctx,
+static void cosim_discover_caps(CosimPCIeRC *s, bridge_ctx_t *ctx,
                                  int *msi_offset, int *msi_vectors) {
     *msi_offset = -1;
     *msi_vectors = 0;
@@ -366,7 +366,7 @@ static void cosim_discover_caps(bridge_ctx_t *ctx,
             *msi_offset = ptr;
             uint16_t msg_ctrl = (dw >> 16) & 0xFFFF;
             *msi_vectors = 1 << ((msg_ctrl >> 1) & 0x7);
-            fprintf(stderr, "[discover] MSI cap at 0x%02x, vectors=%d, ctrl=0x%04x\n",
+            COSIM_DPRINTF(s, "discover MSI cap at 0x%02x, vectors=%d, ctrl=0x%04x\n",
                     ptr, *msi_vectors, msg_ctrl);
         }
         ptr = (dw >> 8) & 0xFC;
@@ -432,12 +432,12 @@ static void cosim_pcie_rc_realize(PCIDevice *pci_dev, Error **errp)
     /* BAR sizing — 查询 BAR0 大小 */
     uint32_t bar0_size = cosim_query_bar_size(ctx, 0);
     if (bar0_size == 0) bar0_size = 64 * 1024;  /* fallback 64KB */
-    fprintf(stderr, "[realize] Discovered BAR0 size: %u bytes (0x%x)\n",
+    COSIM_DPRINTF(s, "realize BAR0 size: %u bytes (0x%x)\n",
             bar0_size, bar0_size);
 
     /* Capability 链遍历 — 找 MSI cap */
     int msi_offset = -1, msi_vectors = 0;
-    cosim_discover_caps(ctx, &msi_offset, &msi_vectors);
+    cosim_discover_caps(s, ctx, &msi_offset, &msi_vectors);
 
     /* ======== 第三步: 基于发现结果初始化 QEMU 框架 ======== */
 
@@ -462,15 +462,15 @@ static void cosim_pcie_rc_realize(PCIDevice *pci_dev, Error **errp)
         if (msi_vectors < 1) msi_vectors = 1;
         int ret = msi_init(pci_dev, msi_offset, msi_vectors, true, false, &msi_err);
         if (ret != 0) {
-            fprintf(stderr, "[realize] msi_init at 0x%02x failed: %s\n",
+            COSIM_DPRINTF(s, "realize msi_init at 0x%02x failed: %s\n",
                     msi_offset, msi_err ? error_get_pretty(msi_err) : "?");
             error_free(msi_err);
         } else {
-            fprintf(stderr, "[realize] MSI initialized at 0x%02x, %d vectors\n",
+            COSIM_DPRINTF(s, "realize MSI initialized at 0x%02x, %d vectors\n",
                     msi_offset, msi_vectors);
         }
     } else {
-        fprintf(stderr, "[realize] No MSI capability found in EP config\n");
+        COSIM_DPRINTF(s, "realize No MSI capability found in EP config\n");
     }
 
     /* NOTE: Virtio vendor caps 不需要在 QEMU 侧注册，不影响架构。
@@ -488,13 +488,13 @@ static void cosim_pcie_rc_realize(PCIDevice *pci_dev, Error **errp)
     /* Debug: dump final config bytes around cap chain */
     {
         uint8_t *c = pci_dev->config;
-        fprintf(stderr, "[realize] FINAL config dump:\n");
-        fprintf(stderr, "  [0x34]=0x%02x (cap_ptr)\n", c[0x34]);
-        fprintf(stderr, "  [0x38..0x3B]=%02x %02x %02x %02x (MSI cap)\n",
+        COSIM_DPRINTF(s, "realize FINAL config dump:\n");
+        COSIM_DPRINTF(s, "  [0x34]=0x%02x (cap_ptr)\n", c[0x34]);
+        COSIM_DPRINTF(s, "  [0x38..0x3B]=%02x %02x %02x %02x (MSI cap)\n",
                 c[0x38], c[0x39], c[0x3a], c[0x3b]);
-        fprintf(stderr, "  [0x50..0x53]=%02x %02x %02x %02x (virtio COMMON)\n",
+        COSIM_DPRINTF(s, "  [0x50..0x53]=%02x %02x %02x %02x (virtio COMMON)\n",
                 c[0x50], c[0x51], c[0x52], c[0x53]);
-        fprintf(stderr, "  [0x64..0x67]=%02x %02x %02x %02x (virtio NOTIFY)\n",
+        COSIM_DPRINTF(s, "  [0x64..0x67]=%02x %02x %02x %02x (virtio NOTIFY)\n",
                 c[0x64], c[0x65], c[0x66], c[0x67]);
     }
 
