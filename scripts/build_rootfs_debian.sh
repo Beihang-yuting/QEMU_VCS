@@ -9,7 +9,7 @@ PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 OUTPUT_DIR="$(cd "${1:-${PROJECT_DIR}/guest/images}" 2>/dev/null && pwd || echo "${PROJECT_DIR}/guest/images")"
 DEBIAN_SUITE="bookworm"
 DEBIAN_MIRROR="http://deb.debian.org/debian"
-ROOTFS_SIZE_MB=512
+ROOTFS_SIZE_MB=1024
 ROOTFS_IMG="${OUTPUT_DIR}/rootfs.ext4"
 MOUNT_DIR=$(mktemp -d /tmp/cosim-rootfs.XXXXXX)
 LOOP_DEV=""
@@ -35,6 +35,11 @@ fi
 
 if ! command -v debootstrap &>/dev/null; then
     fail "debootstrap not installed. Run: sudo apt install debootstrap"
+fi
+
+# zstd 用于解压 Debian initramfs（bookworm 默认 zstd 压缩）
+if ! command -v zstd &>/dev/null; then
+    apt-get install -y -qq zstd 2>/dev/null || echo "[WARN] zstd not installed, initramfs repack may fail"
 fi
 
 mkdir -p "$OUTPUT_DIR"
@@ -88,7 +93,12 @@ if [ -n "$INITRD" ]; then
     if [ -f "$COSIM_INIT" ]; then
         REPACK_DIR=$(mktemp -d /tmp/cosim-initramfs.XXXXXX)
         cd "$REPACK_DIR"
-        zcat "$INITRD" | cpio -id 2>/dev/null
+        # Debian bookworm 可能用 zstd 或 gzip 压缩 initrd
+        if file "$INITRD" | grep -q "Zstandard"; then
+            zstd -d -c "$INITRD" | cpio -id 2>/dev/null
+        else
+            zcat "$INITRD" | cpio -id 2>/dev/null
+        fi
         cp "$COSIM_INIT" init
         chmod +x init
         find . | cpio -o -H newc 2>/dev/null | gzip > "${OUTPUT_DIR}/initramfs.gz"
@@ -111,14 +121,18 @@ umount "$MOUNT_DIR/dev"
 info "Configuring system..."
 
 echo "cosim-guest" > "$MOUNT_DIR/etc/hostname"
-sed -i 's/^root:[^:]*:/root::/' "$MOUNT_DIR/etc/shadow"
 
-mkdir -p "$MOUNT_DIR/etc/systemd/system/serial-getty@ttyS0.service.d"
-cat > "$MOUNT_DIR/etc/systemd/system/serial-getty@ttyS0.service.d/autologin.conf" << 'AUTOLOGIN'
-[Service]
-ExecStart=
-ExecStart=-/sbin/agetty --autologin root --noclear %I 115200 linux
-AUTOLOGIN
+# root 密码设为 123
+HASH=$(openssl passwd -6 '123')
+sed -i "s|^root:[^:]*:|root:${HASH}:|" "$MOUNT_DIR/etc/shadow"
+
+# 启用 ttyS0 串口 getty（systemd）
+mkdir -p "$MOUNT_DIR/etc/systemd/system/getty.target.wants"
+ln -sf /lib/systemd/system/serial-getty@.service \
+    "$MOUNT_DIR/etc/systemd/system/getty.target.wants/serial-getty@ttyS0.service" 2>/dev/null || true
+
+# 允许 root 通过串口登录
+echo "ttyS0" >> "$MOUNT_DIR/etc/securetty" 2>/dev/null || true
 
 cat > "$MOUNT_DIR/etc/fstab" << 'FSTAB'
 /dev/vda    /        ext4    rw,relatime    0 1
@@ -129,20 +143,23 @@ FSTAB
 # ---- Copy cosim overlay ----
 info "Copying cosim overlay..."
 OVERLAY_DIR="${PROJECT_DIR}/guest/overlay"
-if [ -d "$OVERLAY_DIR" ]; then
+if [ -d "$OVERLAY_DIR" ] && [ -f "$OVERLAY_DIR/usr/local/bin/cosim-start" ]; then
     mkdir -p "$MOUNT_DIR/usr/local/bin"
     mkdir -p "$MOUNT_DIR/etc/init.d"
     mkdir -p "$MOUNT_DIR/etc/profile.d"
-    cp -av "$OVERLAY_DIR"/etc/motd "$MOUNT_DIR/etc/motd"
-    cp -av "$OVERLAY_DIR"/etc/inittab "$MOUNT_DIR/etc/inittab" 2>/dev/null || true
-    cp -av "$OVERLAY_DIR"/etc/init.d/S99cosim "$MOUNT_DIR/etc/init.d/S99cosim"
-    cp -av "$OVERLAY_DIR"/etc/profile.d/cosim.sh "$MOUNT_DIR/etc/profile.d/cosim.sh"
-    cp -av "$OVERLAY_DIR"/usr/local/bin/cosim-start "$MOUNT_DIR/usr/local/bin/cosim-start"
-    cp -av "$OVERLAY_DIR"/usr/local/bin/cosim-stop "$MOUNT_DIR/usr/local/bin/cosim-stop"
+    cp -v "$OVERLAY_DIR"/etc/motd "$MOUNT_DIR/etc/motd"
+    # Debian 用 systemd，不需要 inittab，但拷贝不影响
+    cp -v "$OVERLAY_DIR"/etc/init.d/S99cosim "$MOUNT_DIR/etc/init.d/S99cosim"
+    cp -v "$OVERLAY_DIR"/etc/profile.d/cosim.sh "$MOUNT_DIR/etc/profile.d/cosim.sh"
+    cp -v "$OVERLAY_DIR"/usr/local/bin/cosim-start "$MOUNT_DIR/usr/local/bin/cosim-start"
+    cp -v "$OVERLAY_DIR"/usr/local/bin/cosim-stop "$MOUNT_DIR/usr/local/bin/cosim-stop"
     chmod +x "$MOUNT_DIR/usr/local/bin/cosim-start"
     chmod +x "$MOUNT_DIR/usr/local/bin/cosim-stop"
     chmod +x "$MOUNT_DIR/etc/init.d/S99cosim"
     ok "Overlay copied: cosim-start, cosim-stop, motd, profile, S99cosim"
+else
+    echo "[WARN] guest/overlay 目录不存在或内容不完整！"
+    echo "  请确认: git checkout good -- guest/overlay/"
 fi
 
 # ---- Copy custom test tools (if built) ----
