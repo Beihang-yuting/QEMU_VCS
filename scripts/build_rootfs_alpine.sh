@@ -137,22 +137,24 @@ FSTAB
 # ---- Copy cosim overlay ----
 info "Copying cosim overlay..."
 OVERLAY_DIR="${PROJECT_DIR}/guest/overlay"
-if [ -d "$OVERLAY_DIR" ]; then
-    # 确保目标目录存在
+if [ -d "$OVERLAY_DIR" ] && [ -f "$OVERLAY_DIR/usr/local/bin/cosim-start" ]; then
     mkdir -p "$MOUNT_DIR/usr/local/bin"
     mkdir -p "$MOUNT_DIR/etc/init.d"
     mkdir -p "$MOUNT_DIR/etc/profile.d"
-    # 逐个拷贝，不吞错误
-    cp -av "$OVERLAY_DIR"/etc/motd "$MOUNT_DIR/etc/motd"
-    cp -av "$OVERLAY_DIR"/etc/inittab "$MOUNT_DIR/etc/inittab"
-    cp -av "$OVERLAY_DIR"/etc/init.d/S99cosim "$MOUNT_DIR/etc/init.d/S99cosim"
-    cp -av "$OVERLAY_DIR"/etc/profile.d/cosim.sh "$MOUNT_DIR/etc/profile.d/cosim.sh"
-    cp -av "$OVERLAY_DIR"/usr/local/bin/cosim-start "$MOUNT_DIR/usr/local/bin/cosim-start"
-    cp -av "$OVERLAY_DIR"/usr/local/bin/cosim-stop "$MOUNT_DIR/usr/local/bin/cosim-stop"
+    cp -v "$OVERLAY_DIR"/etc/motd "$MOUNT_DIR/etc/motd"
+    cp -v "$OVERLAY_DIR"/etc/inittab "$MOUNT_DIR/etc/inittab"
+    cp -v "$OVERLAY_DIR"/etc/init.d/S99cosim "$MOUNT_DIR/etc/init.d/S99cosim"
+    cp -v "$OVERLAY_DIR"/etc/profile.d/cosim.sh "$MOUNT_DIR/etc/profile.d/cosim.sh"
+    cp -v "$OVERLAY_DIR"/usr/local/bin/cosim-start "$MOUNT_DIR/usr/local/bin/cosim-start"
+    cp -v "$OVERLAY_DIR"/usr/local/bin/cosim-stop "$MOUNT_DIR/usr/local/bin/cosim-stop"
     chmod +x "$MOUNT_DIR/usr/local/bin/cosim-start"
     chmod +x "$MOUNT_DIR/usr/local/bin/cosim-stop"
     chmod +x "$MOUNT_DIR/etc/init.d/S99cosim"
     ok "Overlay copied: cosim-start, cosim-stop, motd, inittab, profile, S99cosim"
+else
+    echo "[WARN] guest/overlay 目录不存在或内容不完整！"
+    echo "  请执行: git checkout good -- guest/overlay/"
+    echo "  缺少 overlay 将导致: 无 cosim-start/cosim-stop、无欢迎信息、hostname 显示 (none)"
 fi
 
 # ---- Copy custom test tools (if built) ----
