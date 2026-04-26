@@ -90,12 +90,12 @@ make run-qemu VERBOSE=1
 make run-vcs
 ```
 
-Guest 启动后登录 root，执行:
+Guest 启动后登录 (root / 123):
 
 ```bash
-cosim-start          # 配置网络并初始化协仿
-ping 10.0.0.2        # 测试连通
-cosim-stop           # 停止协仿并退出
+cosim-start                    # 配网 (默认 10.0.0.2)
+ping -c 1 10.0.0.1             # 测试连通 (cosim 下每包需数分钟)
+cosim-stop                     # 停止仿真并退出
 ```
 
 ### 3.2 单实例 -- TCP 模式 (可跨机, 2 个终端)
@@ -150,16 +150,58 @@ make run-vcs TRANSPORT=tcp INSTANCE_ID=1 MAC_LAST=2 ETH_ROLE=1 ETH_CREATE=0
 
 ```bash
 # 首次 (管理员执行一次)
+make tap-bridge                       # 编译 eth_tap_bridge
 sudo setcap cap_net_admin+ep tools/eth_tap_bridge
-
-# 检查权限
-make tap-check
-
-# 启动 (3 个终端)
-make run-qemu                         # 终端 1
-make run-vcs ETH_SHM=/cosim_eth0     # 终端 2
-make run-tap                          # 终端 3
+getcap tools/eth_tap_bridge           # 验证: 应显示 cap_net_admin=ep
 ```
+
+启动 (3 个终端, 按顺序):
+
+```bash
+# 终端 1: QEMU (先启动, 等待 VCS 连接)
+make run-qemu
+
+# 终端 2: VCS (连接 QEMU, 同时创建 ETH SHM)
+make run-vcs
+
+# 终端 3: TAP bridge (VCS 创建 SHM 后才能启动)
+sudo make run-tap
+```
+
+网络拓扑:
+
+```
+Host 机器
+├── eth0 (物理网卡, 连内网)
+├── cosim0 (TAP 虚拟网卡, IP=10.0.0.1)
+│       ↕ ETH SHM (/cosim_eth0)
+│   VCS RTL 仿真
+│       ↕ PCIe TLP (SHM 或 TCP)
+│   QEMU cosim-pcie-rc
+│       ↕
+└── Guest eth0 (virtio_net, IP=10.0.0.2)
+```
+
+Guest 登录后:
+
+```bash
+cosim-start                           # 配网 (默认 10.0.0.2)
+ping -c 1 10.0.0.1                    # ping Host TAP
+```
+
+Host 侧 iperf 测试:
+
+```bash
+# Host 上新开一个终端
+iperf3 -s                             # 监听所有网卡 (含 cosim0)
+iperf3 -s -B 10.0.0.1                 # 只监听 TAP 地址
+
+# Guest 内
+iperf3 -c 10.0.0.1 -t 1              # 吞吐量测试
+```
+
+> **注意**: cosim 环境下每个网络包都经过 VCS RTL 仿真, 一次 ping 往返可能需要数分钟。
+> 建议使用 `ping -c 1` 发单包验证连通性。
 
 ### 3.5 参数列表
 
@@ -169,14 +211,24 @@ make run-tap                          # 终端 3
 | `PORT_BASE` | `9100` | TCP 端口基数 |
 | `INSTANCE_ID` | `0` | 实例 ID (端口 = BASE + ID x 3) |
 | `REMOTE_HOST` | `127.0.0.1` | VCS 连接目标 |
-| `GUEST_IP` | `10.0.0.1` | Guest IP |
-| `PEER_IP` | `10.0.0.2` | 对端 IP |
-| `ROLE` | `server` | `server` 或 `client` |
+| `GUEST_IP` | `10.0.0.2` | Guest IP (TAP Host 为 10.0.0.1) |
+| `PEER_IP` | `10.0.0.1` | 对端 IP |
 | `MAC_LAST` | `1` | MAC 末字节 (de:ad:be:ef:00:0N) |
-| `ETH_SHM` | `/cosim_eth_dual` | ETH 共享内存名 |
+| `ETH_SHM` | `/cosim_eth0` | ETH 共享内存名 (单实例 + TAP 共用) |
 | `ETH_ROLE` | `0` | 0=创建 SHM, 1=加入 |
 | `SIM_TIMEOUT` | `600000` | VCS 超时 (ms) |
-| `QEMU` / `SIMV` / `KERNEL` / `INITRD` | 自动发现 | 路径覆盖 |
+| `VERBOSE` | `0` | 0=安静, 1=详细日志 + debug 打印 |
+| `QEMU` / `SIMV` / `KERNEL` / `ROOTFS` | 自动发现 | 路径覆盖 |
+
+**IP 地址分配 (10.0.0.0/24):**
+
+| 角色 | IP | 说明 |
+|------|-----|------|
+| TAP Host 侧 | `10.0.0.1` | `make run-tap` 自动配置 |
+| Guest 侧 | `10.0.0.2` | `cosim-start` 默认值 |
+| 双实例 Guest1 | `10.0.0.1` | `run-dual` 自动分配 |
+| 双实例 Guest2 | `10.0.0.2` | `run-dual` 自动分配 |
+| 自定义 | 任意 | `cosim-start <IP>` 指定 |
 
 ---
 
@@ -327,25 +379,103 @@ grep "NOTIFY" logs/vcs.log                # doorbell
 
 ---
 
-## 6. 退出机制
+## 6. Guest 登录后操作
+
+### 6.1 登录
+
+```
+cosim-guest login: root
+Password: 123
+```
+
+### 6.2 配网
+
+```bash
+cosim-start                    # 默认 IP 10.0.0.2
+cosim-start 10.0.0.3           # 指定 IP
+```
+
+### 6.3 测试命令
+
+```bash
+# 连通性 (-c 指定包数, cosim 下每包需数分钟)
+ping -c 1 10.0.0.1             # 发 1 个包
+ping -c 5 10.0.0.1             # 发 5 个包
+ping 10.0.0.1                  # 不停发 (Ctrl+C 停止)
+
+# 吞吐量
+iperf3 -s                      # Guest 做服务端
+iperf3 -c 10.0.0.1 -t 1        # Guest 做客户端
+
+# PCIe 诊断
+lspci -vv                      # 查看 PCI 设备 (含 cosim 设备)
+cfgspace_test                  # Config Space 验证
+dma_test <BAR_ADDR>            # DMA 读写测试
+nic_tx_test <BAR_ADDR>         # NIC TX 测试
+```
+
+### 6.4 TAP 模式 iperf 测试
+
+```bash
+# Host 上 (新开终端)
+iperf3 -s                      # 监听所有网卡 (含 cosim0 TAP)
+iperf3 -s -B 10.0.0.1          # 只监听 TAP 地址
+
+# Guest 内
+iperf3 -c 10.0.0.1 -t 1        # 连接 Host TAP
+```
+
+> iperf3 -s 在 Host 上启动后会监听 5201 端口。Guest 发起连接时,
+> 数据路径: Guest eth0 -> cosim 设备 -> VCS RTL -> ETH SHM -> TAP bridge -> Host iperf3
+
+### 6.5 退出
+
+```bash
+cosim-stop                     # 正常退出 (通知 VCS 停止)
+# 或
+Ctrl+A X                       # 强制退出 QEMU
+```
+
+---
+
+## 7. 退出机制
 
 | 操作 | 效果 |
 |------|------|
-| QEMU 正常退出 | bridge_destroy 发 SHUTDOWN -> VCS 自动退出 |
+| Guest 内 `cosim-stop` 或 `poweroff` | bridge_destroy 发 SHUTDOWN -> VCS 自动退出 |
+| `Ctrl+A X` | QEMU 强制退出 -> 通知 VCS shutdown |
 | Ctrl+C (等待连接时) | poll 返回 EINTR -> QEMU 退出 |
 | Ctrl+C (双实例) | trap 捕获 -> kill 4 个进程 |
 | VCS 超时 | 10 分钟安全网, 正常由 SHUTDOWN 驱动退出 |
 
 ---
 
-## 7. 常见问题
+## 8. 调试模式
+
+```bash
+make run-qemu VERBOSE=1        # 开启所有 debug 打印 + 内核详细日志
+```
+
+VERBOSE=1 效果:
+- kernel `loglevel=7` (显示所有内核消息)
+- cosim-pcie-rc `debug=on` (MMIO/CfgRd 打印)
+- bridge `debug=on` (TLP 发送打印)
+
+默认 VERBOSE=0 终端安静, 日志写入 `logs/qemu.log`。
+
+---
+
+## 9. 常见问题
 
 | 问题 | 原因 | 解决 |
 |------|------|------|
-| `make run-qemu` 无输出 | 等 VCS 连接 (正常) | 另开终端 `make run-vcs` |
+| `Waiting for VCS connection...` | 等 VCS 连接 (正常) | 另开终端 `make run-vcs` |
 | simv_vip 找不到 | 未编译 | `source ~/set-env.sh && make vcs-vip` |
-| `leaving for legacy driver` | MSI cap < 0x40 | 用最新 config_proxy |
-| `probe failed -22` | INT_PIN 被覆盖 | 确认字节级 CfgWr |
+| `Kernel panic: Unable to mount root fs` | initramfs 未注入 cosim-init | 重新构建: `rm -rf guest/images/* && sudo ./scripts/build_rootfs_alpine.sh guest/images` |
+| `(none) login:` 而非 `cosim-guest` | overlay 未拷入或 hostname 服务未启用 | 重新构建 rootfs |
+| `cosim-start: not found` | overlay 拷贝失败 | 确认 `git checkout good -- guest/overlay/` 后重新构建 |
+| TAP `Failed to open ETH SHM` | VCS 未运行或 SHM 名不匹配 | 先启动 VCS, 确认 ETH_SHM 一致 |
 | TAP `Operation not permitted` | 缺 CAP_NET_ADMIN | `sudo setcap cap_net_admin+ep tools/eth_tap_bridge` |
-| `eth0 not found` | 驱动未加载 | 检查 Alpine/Debian Guest 镜像含 virtio 驱动 |
-| ping 丢包但 VCS 有 TX/RX | 协仿延迟 | 延长 -W 超时 |
+| ping 无响应 | cosim RTL 仿真慢 (正常) | 等待数分钟, 用 `ping -c 1` |
+| `leaving for legacy driver` | MSI cap < 0x40 | 用最新 config_proxy |
+| root 空密码登录失败 | 密码为 123 | 输入 `123` |
