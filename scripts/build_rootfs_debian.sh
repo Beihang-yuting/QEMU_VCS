@@ -83,8 +83,22 @@ fi
 
 INITRD=$(ls "$MOUNT_DIR"/boot/initrd.img-* 2>/dev/null | head -1)
 if [ -n "$INITRD" ]; then
-    cp "$INITRD" "${OUTPUT_DIR}/initramfs.gz"
-    ok "Initramfs: ${OUTPUT_DIR}/initramfs.gz"
+    # 注入 cosim-init 替换 Debian 默认 init（适配 cosim 高延迟环境）
+    COSIM_INIT="${PROJECT_DIR}/guest/cosim-init"
+    if [ -f "$COSIM_INIT" ]; then
+        REPACK_DIR=$(mktemp -d /tmp/cosim-initramfs.XXXXXX)
+        cd "$REPACK_DIR"
+        zcat "$INITRD" | cpio -id 2>/dev/null
+        cp "$COSIM_INIT" init
+        chmod +x init
+        find . | cpio -o -H newc 2>/dev/null | gzip > "${OUTPUT_DIR}/initramfs.gz"
+        cd /
+        rm -rf "$REPACK_DIR"
+        ok "Initramfs: ${OUTPUT_DIR}/initramfs.gz (cosim-init injected)"
+    else
+        cp "$INITRD" "${OUTPUT_DIR}/initramfs.gz"
+        ok "Initramfs: ${OUTPUT_DIR}/initramfs.gz (original)"
+    fi
 else
     echo "[WARN] initrd not found in /boot"
 fi

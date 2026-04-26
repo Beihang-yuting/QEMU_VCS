@@ -1,0 +1,114 @@
+#!/bin/sh
+# cosim-init — CoSim 专用 initramfs init 脚本
+# 替换 Alpine/Debian 默认 init，适配 VCS RTL 仿真的高延迟环境
+# 主动加载所有模块 + 自适应等待 root 设备（最长 15 分钟）
+
+TIMEOUT=900  # 15 分钟
+
+# ---- 挂载基础文件系统 ----
+mount -t proc proc /proc
+mount -t sysfs sysfs /sys
+mount -t devtmpfs devtmpfs /dev
+
+# ---- 解析 kernel cmdline ----
+ROOT=""
+INIT="/sbin/init"
+for param in $(cat /proc/cmdline); do
+    case "$param" in
+        root=*)     ROOT="${param#root=}" ;;
+        init=*)     INIT="${param#init=}" ;;
+    esac
+done
+
+if [ -z "$ROOT" ]; then
+    echo "[cosim-init] ERROR: no root= parameter in kernel cmdline"
+    echo "  cmdline: $(cat /proc/cmdline)"
+    echo "Dropping to shell..."
+    exec /bin/sh
+fi
+
+echo "[cosim-init] CoSim initramfs starting"
+echo "[cosim-init] root=$ROOT init=$INIT timeout=${TIMEOUT}s"
+
+# ---- 主动加载所有可用模块 ----
+# 不依赖 uevent/mdev/nlplug-findfs，直接遍历模块目录
+KVER=$(uname -r)
+MODDIR="/lib/modules/$KVER"
+if [ -d "$MODDIR" ]; then
+    echo "[cosim-init] Loading kernel modules ($KVER)..."
+
+    # 按依赖顺序加载：先核心、再总线、再设备驱动、再文件系统
+    for subdir in \
+        kernel/drivers/virtio \
+        kernel/drivers/pci \
+        kernel/drivers/ata \
+        kernel/drivers/scsi \
+        kernel/drivers/block \
+        kernel/drivers/nvme/host \
+        kernel/drivers/net \
+        kernel/fs; do
+        dir="$MODDIR/$subdir"
+        if [ -d "$dir" ]; then
+            for mod in "$dir"/*.ko*; do
+                [ -f "$mod" ] || continue
+                name=$(basename "$mod" | sed 's/\.ko.*$//')
+                modprobe "$name" 2>/dev/null
+            done
+        fi
+    done
+
+    LOADED=$(lsmod 2>/dev/null | wc -l)
+    echo "[cosim-init] $((LOADED - 1)) modules loaded"
+else
+    echo "[cosim-init] WARNING: $MODDIR not found, no modules to load"
+fi
+
+# ---- 自适应等待 root 设备 ----
+echo "[cosim-init] Waiting for root device $ROOT (max ${TIMEOUT}s)..."
+ELAPSED=0
+while [ ! -b "$ROOT" ] && [ $ELAPSED -lt $TIMEOUT ]; do
+    sleep 1
+    ELAPSED=$((ELAPSED + 1))
+    # 每 30 秒打印一次进度
+    if [ $((ELAPSED % 30)) -eq 0 ]; then
+        echo "[cosim-init] Still waiting for $ROOT... (${ELAPSED}s elapsed)"
+        # 列出已发现的块设备
+        BLKDEVS=$(ls /dev/vd* /dev/sd* /dev/nvme* /dev/xvd* 2>/dev/null | tr '\n' ' ')
+        if [ -n "$BLKDEVS" ]; then
+            echo "[cosim-init]   Found block devices: $BLKDEVS"
+        fi
+    fi
+done
+
+if [ ! -b "$ROOT" ]; then
+    echo "[cosim-init] ERROR: root device $ROOT not found after ${TIMEOUT}s"
+    echo "[cosim-init] Available block devices:"
+    ls -la /dev/vd* /dev/sd* /dev/nvme* /dev/xvd* 2>/dev/null || echo "  (none)"
+    echo "[cosim-init] Loaded modules:"
+    lsmod 2>/dev/null || echo "  (lsmod not available)"
+    echo ""
+    echo "Dropping to emergency shell. Debug hints:"
+    echo "  cat /proc/cmdline"
+    echo "  ls /dev/"
+    echo "  lsmod"
+    echo "  dmesg | grep -i virtio"
+    exec /bin/sh
+fi
+
+echo "[cosim-init] Root device $ROOT found after ${ELAPSED}s"
+
+# ---- 挂载 root + switch_root ----
+mkdir -p /sysroot
+if ! mount -t auto "$ROOT" /sysroot; then
+    echo "[cosim-init] ERROR: failed to mount $ROOT"
+    exec /bin/sh
+fi
+
+echo "[cosim-init] Mounted $ROOT, switching to real root..."
+
+# 清理
+umount /proc 2>/dev/null
+umount /sys 2>/dev/null
+umount /dev 2>/dev/null
+
+exec switch_root /sysroot "$INIT"

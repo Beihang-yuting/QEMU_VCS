@@ -88,8 +88,22 @@ fi
 
 INITRAMFS=$(ls "$MOUNT_DIR"/boot/initramfs-* 2>/dev/null | head -1)
 if [ -n "$INITRAMFS" ]; then
-    cp "$INITRAMFS" "${OUTPUT_DIR}/initramfs.gz"
-    ok "Initramfs: ${OUTPUT_DIR}/initramfs.gz"
+    # 注入 cosim-init 替换 Alpine 默认 init（nlplug-findfs 不适合 cosim 高延迟环境）
+    COSIM_INIT="${PROJECT_DIR}/guest/cosim-init"
+    if [ -f "$COSIM_INIT" ]; then
+        REPACK_DIR=$(mktemp -d /tmp/cosim-initramfs.XXXXXX)
+        cd "$REPACK_DIR"
+        zcat "$INITRAMFS" | cpio -id 2>/dev/null
+        cp "$COSIM_INIT" init
+        chmod +x init
+        find . | cpio -o -H newc 2>/dev/null | gzip > "${OUTPUT_DIR}/initramfs.gz"
+        cd /
+        rm -rf "$REPACK_DIR"
+        ok "Initramfs: ${OUTPUT_DIR}/initramfs.gz (cosim-init injected)"
+    else
+        cp "$INITRAMFS" "${OUTPUT_DIR}/initramfs.gz"
+        ok "Initramfs: ${OUTPUT_DIR}/initramfs.gz (original)"
+    fi
 else
     echo "[WARN] initramfs not found in /boot"
 fi
