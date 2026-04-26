@@ -426,6 +426,7 @@ static void cosim_pcie_rc_realize(PCIDevice *pci_dev, Error **errp)
     }
 
     bridge_ctx_t *ctx = (bridge_ctx_t *)s->bridge_ctx;
+    ctx->debug = s->debug;  /* propagate runtime debug flag to bridge */
 
     /* ======== 第二步: 从 VCS EP 发现设备配置 (标准 PCIe 枚举) ======== */
 

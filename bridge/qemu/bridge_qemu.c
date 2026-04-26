@@ -43,8 +43,9 @@ int bridge_send_tlp(bridge_ctx_t *ctx, tlp_entry_t *req) {
     if (ctx->trace_enabled) trace_log_tlp(&ctx->trace, req);
 
     if (ctx->transport) {
-        fprintf(stderr, "[send_tlp] type=%d tag=%d addr=0x%llx\n",
-                req->type, req->tag, (unsigned long long)req->addr);
+        if (ctx->debug)
+            fprintf(stderr, "[send_tlp] type=%d tag=%d addr=0x%llx\n",
+                    req->type, req->tag, (unsigned long long)req->addr);
         int ret = ctx->transport->send_tlp(ctx->transport, req);
         if (ret < 0) {
             fprintf(stderr, "bridge_send_tlp: transport send_tlp failed\n");
@@ -52,7 +53,8 @@ int bridge_send_tlp(bridge_ctx_t *ctx, tlp_entry_t *req) {
         }
         sync_msg_t msg = { .type = SYNC_MSG_TLP_READY, .payload = 0 };
         ret = ctx->transport->send_sync(ctx->transport, &msg);
-        fprintf(stderr, "[send_tlp] sync sent ret=%d\n", ret);
+        if (ctx->debug)
+            fprintf(stderr, "[send_tlp] sync sent ret=%d\n", ret);
         return ret;
     }
 

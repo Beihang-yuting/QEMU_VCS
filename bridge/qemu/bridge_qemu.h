@@ -19,6 +19,7 @@ typedef struct {
     int         trace_enabled;
     struct cosim_transport *transport;  /* NULL = legacy SHM mode */
     pthread_mutex_t tlp_mutex;         /* protects send_tlp + wait_completion */
+    int             debug;             /* runtime debug print toggle */
 } bridge_ctx_t;
 
 bridge_ctx_t *bridge_init(const char *shm_name, const char *sock_path);
