@@ -81,10 +81,6 @@ int bridge_vcs_init(const char *shm_name, const char *sock_path) {
 int bridge_vcs_poll_tlp(unsigned char *tlp_type, unsigned long long *addr,
                          unsigned int *data, int *len, int *tag) {
     g_poll_count++;
-    if ((g_poll_count % 100000) == 0) {
-        fprintf(stderr, "[VCS Bridge] heartbeat: poll_count=%d cached_tlp=%d\n",
-                g_poll_count, tlp_cache_count());
-    }
 
     /* ---- TCP transport path ----
      *
@@ -147,9 +143,6 @@ int bridge_vcs_poll_tlp(unsigned char *tlp_type, unsigned long long *addr,
         return 1;
 
     return_entry:
-        fprintf(stderr, "[VCS poll#%d] got TLP type=%d tag=%d addr=0x%llx (cached=%d)\n",
-                g_poll_count, entry.type, entry.tag,
-                (unsigned long long)entry.addr, tlp_cache_count());
         g_last_entry = entry;
         *tlp_type = entry.type;
         *addr = entry.addr;
