@@ -35,15 +35,14 @@ if [ -z "$ROOT" ]; then
     exec /bin/sh
 fi
 
-echo "[cosim-init] CoSim initramfs starting"
-echo "[cosim-init] root=$ROOT init=$INIT timeout=${TIMEOUT}s"
+echo "[cosim-init] Booting... (root=$ROOT)"
 
 # ---- 主动加载所有可用模块 ----
 # 不依赖 uevent/mdev/nlplug-findfs，直接遍历模块目录
 KVER=$(uname -r)
 MODDIR="/lib/modules/$KVER"
 if [ -d "$MODDIR" ]; then
-    echo "[cosim-init] Loading kernel modules ($KVER)..."
+    # 静默加载模块
 
     # 按依赖顺序加载：先核心、再总线、再设备驱动、再文件系统
     for subdir in \
@@ -64,14 +63,13 @@ if [ -d "$MODDIR" ]; then
         fi
     done
 
-    LOADED=$(lsmod 2>/dev/null | wc -l)
-    echo "[cosim-init] $((LOADED - 1)) modules loaded"
+    :  # 模块加载完成
 else
     echo "[cosim-init] WARNING: $MODDIR not found, no modules to load"
 fi
 
 # ---- 自适应等待 root 设备 ----
-echo "[cosim-init] Waiting for root device $ROOT (max ${TIMEOUT}s)..."
+:  # 静默等待 root 设备
 ELAPSED=0
 while [ ! -b "$ROOT" ] && [ $ELAPSED -lt $TIMEOUT ]; do
     sleep 1
@@ -102,7 +100,7 @@ if [ ! -b "$ROOT" ]; then
     exec /bin/sh
 fi
 
-echo "[cosim-init] Root device $ROOT found after ${ELAPSED}s"
+:  # root 设备已找到
 
 # ---- 挂载 root + switch_root ----
 mkdir -p /sysroot
@@ -111,7 +109,7 @@ if ! mount -t auto "$ROOT" /sysroot; then
     exec /bin/sh
 fi
 
-echo "[cosim-init] Mounted $ROOT, switching to real root..."
+:  # 挂载成功，切换到真实 root
 
 # 将 proc/sys/dev 移动到新 root（switch_root 需要）
 mount --move /proc /sysroot/proc 2>/dev/null
