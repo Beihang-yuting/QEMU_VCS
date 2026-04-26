@@ -5,6 +5,12 @@
 
 export PATH=/bin:/sbin:/usr/bin:/usr/sbin
 
+# ---- 安装 busybox applets（initramfs 可能只有精简的 symlink）----
+if [ -x /bin/busybox ]; then
+    /bin/busybox --install -s /bin 2>/dev/null
+    /bin/busybox --install -s /sbin 2>/dev/null
+fi
+
 TIMEOUT=900  # 15 分钟
 
 # ---- 挂载基础文件系统 ----
