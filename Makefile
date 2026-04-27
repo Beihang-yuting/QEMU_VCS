@@ -24,21 +24,10 @@ QEMU          ?= $(firstword $(wildcard $(PROJECT_DIR)/third_party/qemu/build/qe
                               $(wildcard $(HOME)/workspace/qemu-9.2.0/build/qemu-system-x86_64))
 SIMV          ?= $(VCS_SIM_DIR)/simv_vip
 GUEST_TYPE    ?= alpine
-# 镜像查找顺序: 指定类型子目录 → 旧版平铺目录 → 另一类型子目录 → 兼容旧路径
-KERNEL        ?= $(firstword $(wildcard $(PROJECT_DIR)/guest/images/$(GUEST_TYPE)/bzImage) \
-                              $(wildcard $(PROJECT_DIR)/guest/images/bzImage) \
-                              $(wildcard $(PROJECT_DIR)/guest/images/alpine/bzImage) \
-                              $(wildcard $(PROJECT_DIR)/guest/images/debian/bzImage) \
-                              $(wildcard $(HOME)/workspace/alpine-vmlinuz-new))
-ROOTFS        ?= $(firstword $(wildcard $(PROJECT_DIR)/guest/images/$(GUEST_TYPE)/rootfs.ext4) \
-                              $(wildcard $(PROJECT_DIR)/guest/images/rootfs.ext4) \
-                              $(wildcard $(PROJECT_DIR)/guest/images/alpine/rootfs.ext4) \
-                              $(wildcard $(PROJECT_DIR)/guest/images/debian/rootfs.ext4) \
-                              $(wildcard $(HOME)/workspace/rootfs.ext4))
-INITRD        ?= $(firstword $(wildcard $(PROJECT_DIR)/guest/images/$(GUEST_TYPE)/initramfs.gz) \
-                              $(wildcard $(PROJECT_DIR)/guest/images/initramfs.gz) \
-                              $(wildcard $(PROJECT_DIR)/guest/images/alpine/initramfs.gz) \
-                              $(wildcard $(PROJECT_DIR)/guest/images/debian/initramfs.gz))
+# 镜像路径: guest/images/<GUEST_TYPE>/
+KERNEL        ?= $(wildcard $(PROJECT_DIR)/guest/images/$(GUEST_TYPE)/bzImage)
+ROOTFS        ?= $(wildcard $(PROJECT_DIR)/guest/images/$(GUEST_TYPE)/rootfs.ext4)
+INITRD        ?= $(wildcard $(PROJECT_DIR)/guest/images/$(GUEST_TYPE)/initramfs.gz)
 TAP_BRIDGE    ?= $(PROJECT_DIR)/tools/eth_tap_bridge
 
 # ============================================================
@@ -187,14 +176,19 @@ run-qemu:
 		echo "  请指定: make run-qemu QEMU=/path/to/qemu-system-x86_64"; \
 		exit 1; \
 	fi
-	@if [ ! -f '$(KERNEL)' ]; then \
-		echo "[错误] Kernel 未找到: $(KERNEL)"; \
-		echo "  请指定: make run-qemu KERNEL=/path/to/bzImage"; \
+	@if [ -z '$(KERNEL)' ] || [ ! -f '$(KERNEL)' ]; then \
+		echo "[错误] Kernel 未找到 (GUEST_TYPE=$(GUEST_TYPE))"; \
+		echo "  查找路径: $(PROJECT_DIR)/guest/images/$(GUEST_TYPE)/bzImage"; \
+		echo "  可用镜像:"; \
+		ls -d $(PROJECT_DIR)/guest/images/*/bzImage 2>/dev/null | sed 's|.*/images/||;s|/bzImage||;s|^|    |' || echo "    (无)"; \
+		echo "  解决方法:"; \
+		echo "    make run-qemu GUEST_TYPE=debian    # 切换 Guest 类型"; \
+		echo "    make run-qemu KERNEL=/path/to/bzImage"; \
 		exit 1; \
 	fi
-	@if [ -z '$(ROOTFS)' ]; then \
-		echo "[警告] 未找到 rootfs，内核可能无法挂载根文件系统"; \
-		echo "  请提供: ROOTFS=/path/to/rootfs.ext4"; \
+	@if [ -z '$(ROOTFS)' ] || [ ! -f '$(ROOTFS)' ]; then \
+		echo "[警告] 未找到 rootfs (GUEST_TYPE=$(GUEST_TYPE))"; \
+		echo "  请构建或指定: ROOTFS=/path/to/rootfs.ext4"; \
 	fi
 	@mkdir -p $(LOG_DIR) $(RUN_DIR)
 	@echo ""
