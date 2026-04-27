@@ -9,7 +9,7 @@ PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 OUTPUT_DIR="$(cd "${1:-${PROJECT_DIR}/guest/images/debian}" 2>/dev/null && pwd || echo "${PROJECT_DIR}/guest/images/debian")"
 DEBIAN_SUITE="bookworm"
 DEBIAN_MIRROR="http://deb.debian.org/debian"
-ROOTFS_SIZE_MB=768
+ROOTFS_SIZE_MB=1536
 ROOTFS_IMG="${OUTPUT_DIR}/rootfs.ext4"
 MOUNT_DIR=$(mktemp -d /tmp/cosim-rootfs.XXXXXX)
 LOOP_DEV=""
@@ -63,14 +63,20 @@ mount --bind /dev "$MOUNT_DIR/dev"
 
 chroot "$MOUNT_DIR" /bin/bash -c '
     export DEBIAN_FRONTEND=noninteractive
+    # 禁用 invoke-rc.d（chroot 中无 init 系统）
+    echo "exit 101" > /usr/sbin/policy-rc.d
+    chmod +x /usr/sbin/policy-rc.d
     apt-get update -qq
-    apt-get install -y -qq iperf3 iproute2 iputils-ping ethtool tcpdump
-    apt-get install -y -qq pciutils usbutils
-    apt-get install -y -qq kmod util-linux procps
-    apt-get install -y -qq rdma-core perftest 2>/dev/null || echo "RDMA not available"
-    apt-get install -y -qq wget curl bash-completion
+    apt-get install -y -qq --no-install-recommends \
+        systemd systemd-sysv \
+        iperf3 iproute2 iputils-ping ethtool tcpdump \
+        pciutils usbutils kmod util-linux procps \
+        wget curl bash-completion
+    apt-get install -y -qq --no-install-recommends \
+        rdma-core perftest || echo "RDMA not available"
     # 安装内核（含 virtio 驱动）
-    apt-get install -y -qq linux-image-amd64 2>/dev/null || echo "Kernel package not available"
+    apt-get install -y -qq linux-image-amd64
+    rm -f /usr/sbin/policy-rc.d
     apt-get clean
     rm -rf /var/lib/apt/lists/*
 '

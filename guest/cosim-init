@@ -14,6 +14,7 @@ fi
 TIMEOUT=900  # 15 分钟
 
 # ---- 挂载基础文件系统 ----
+mkdir -p /proc /sys /dev /sysroot
 mount -t proc proc /proc
 mount -t sysfs sysfs /sys
 mount -t devtmpfs devtmpfs /dev
@@ -110,6 +111,16 @@ if ! mount -t auto "$ROOT" /sysroot; then
 fi
 
 :  # 挂载成功，切换到真实 root
+
+# 自动探测 init 路径（Alpine=/sbin/init, Debian=/lib/systemd/systemd）
+if [ ! -e "/sysroot${INIT}" ]; then
+    for candidate in /sbin/init /lib/systemd/systemd /bin/init /usr/lib/systemd/systemd; do
+        if [ -x "/sysroot${candidate}" ]; then
+            INIT="$candidate"
+            break
+        fi
+    done
+fi
 
 # 将 proc/sys/dev 移动到新 root（switch_root 需要）
 mount --move /proc /sysroot/proc 2>/dev/null

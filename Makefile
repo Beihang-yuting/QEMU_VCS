@@ -50,7 +50,11 @@ GUEST_IP      ?= 10.0.0.2
 PEER_IP       ?= 10.0.0.1
 ROLE          ?= server
 WAIT_SEC      ?= 60
-GUEST_MEMORY  ?= 256M
+ifeq ($(GUEST_TYPE),debian)
+  GUEST_MEMORY  ?= 512M
+else
+  GUEST_MEMORY  ?= 256M
+endif
 # VCS（单实例，和 TAP 共用 /cosim_eth0）
 ETH_SHM       ?= /cosim_eth0
 ETH_ROLE      ?= 0
