@@ -311,7 +311,12 @@ QEMU_DIR="${PROJECT_DIR}/third_party/qemu"
 BUILD_DIR="${PROJECT_DIR}/build"
 BRIDGE_LIB_DIR="${BUILD_DIR}/bridge"
 VCS_SIM_DIR="${PROJECT_DIR}/vcs-tb/sim_build"
-IMAGES_DIR="${PROJECT_DIR}/guest/images"
+# IMAGES_DIR 根据 GUEST_TYPE 指向子目录
+if [ "${GUEST_TYPE:-alpine}" = "debian" ]; then
+    IMAGES_DIR="${PROJECT_DIR}/guest/images/debian"
+else
+    IMAGES_DIR="${PROJECT_DIR}/guest/images/alpine"
+fi
 
 info "项目目录: ${PROJECT_DIR}"
 info "部署模式: ${SETUP_MODE}"
@@ -477,6 +482,12 @@ info "检查依赖版本"
 info "========================================"
 
 DEP_ERRORS=()
+
+# 确保 ~/.local/bin 在 PATH 中（pip3 install --user 安装位置）
+if [ -d "$HOME/.local/bin" ] && ! echo "$PATH" | grep -q "$HOME/.local/bin"; then
+    export PATH="$HOME/.local/bin:$PATH"
+    info "已将 ~/.local/bin 加入 PATH（pip --user 安装路径）"
+fi
 
 # ---- 关键编译工具 ----
 info "检查编译工具链..."
@@ -1020,18 +1031,29 @@ if [ "$NEED_GUEST" = true ]; then
     else
         if ! sudo -n true 2>/dev/null; then
             warn "构建 rootfs 需要 sudo 权限（mount/chroot）"
-            sudo true || { fail "无法获取 sudo 权限"; FAIL_COUNT=$((FAIL_COUNT + 1)); }
-        fi
+            echo ""
+            fail "当前用户无免密 sudo 权限，无法自动构建 Guest 镜像"
+            fail "请以 root 用户手动执行以下命令，然后重新运行 setup.sh："
+            echo ""
+            if [ "$GUEST_TYPE" = "alpine" ]; then
+                fail "  sudo ${PROJECT_DIR}/scripts/build_rootfs_alpine.sh ${IMAGES_DIR}"
+            elif [ "$GUEST_TYPE" = "debian" ]; then
+                fail "  sudo ${PROJECT_DIR}/scripts/build_rootfs_debian.sh ${IMAGES_DIR}"
+            fi
+            echo ""
+            fail "完成后重新运行 ./setup.sh 即可跳过此步骤"
+            FAIL_COUNT=$((FAIL_COUNT + 1))
+        else
+            info "编译自定义测试工具..."
+            "${PROJECT_DIR}/scripts/build_guest_tools.sh" || warn "部分工具编译失败"
 
-        info "编译自定义测试工具..."
-        "${PROJECT_DIR}/scripts/build_guest_tools.sh" || warn "部分工具编译失败"
-
-        if [ "$GUEST_TYPE" = "alpine" ]; then
-            header "构建 Alpine rootfs"
-            sudo "${PROJECT_DIR}/scripts/build_rootfs_alpine.sh" "$IMAGES_DIR"
-        elif [ "$GUEST_TYPE" = "debian" ]; then
-            header "构建 Debian rootfs"
-            sudo "${PROJECT_DIR}/scripts/build_rootfs_debian.sh" "$IMAGES_DIR"
+            if [ "$GUEST_TYPE" = "alpine" ]; then
+                header "构建 Alpine rootfs"
+                sudo "${PROJECT_DIR}/scripts/build_rootfs_alpine.sh" "$IMAGES_DIR"
+            elif [ "$GUEST_TYPE" = "debian" ]; then
+                header "构建 Debian rootfs"
+                sudo "${PROJECT_DIR}/scripts/build_rootfs_debian.sh" "$IMAGES_DIR"
+            fi
         fi
 
         if [ -f "${IMAGES_DIR}/rootfs.ext4" ]; then
