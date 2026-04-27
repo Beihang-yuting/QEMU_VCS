@@ -860,6 +860,30 @@ if [ "$NEED_QEMU" = true ]; then
             fi
         done
 
+        # 自动探测可用的 C 编译器（优先高版本 gcc）
+        QEMU_CC="${CC:-}"
+        if [ -z "$QEMU_CC" ]; then
+            for cc_candidate in gcc-12 gcc-11 gcc-10 gcc-9 gcc cc; do
+                if command -v "$cc_candidate" &>/dev/null; then
+                    QEMU_CC="$cc_candidate"
+                    break
+                fi
+            done
+        fi
+
+        # 检查编译器能否编译 64 位程序
+        if [ -z "$QEMU_CC" ] || ! echo 'int main(){return 0;}' | $QEMU_CC -m64 -x c - -o /dev/null 2>/dev/null; then
+            fail "编译器 '${QEMU_CC:-cc} -m64' 无法编译程序"
+            fail "请安装开发工具链:"
+            fail "  CentOS/RHEL: sudo yum groupinstall 'Development Tools' && sudo yum install glibc-devel glib2-devel"
+            fail "  Ubuntu/Debian: sudo apt install build-essential"
+            fail "  或指定编译器: CC=/path/to/gcc-9 ./setup.sh"
+            QEMU_DEPS_OK=false
+        else
+            info "QEMU 使用编译器: $QEMU_CC"
+            export CC="$QEMU_CC"
+        fi
+
         if [ "$QEMU_DEPS_OK" = false ]; then
             warn "QEMU 编译依赖不满足，跳过 QEMU 编译"
             SKIP_COUNT=$((SKIP_COUNT + 1))
@@ -901,8 +925,9 @@ if [ "$NEED_QEMU" = true ]; then
                     QEMU_EXTRA_OPTS="--disable-fdt"
                 fi
 
-                info "配置 QEMU (--target-list=x86_64-softmmu)..."
+                info "配置 QEMU (--target-list=x86_64-softmmu, CC=$QEMU_CC)..."
                 ./configure \
+                    --cc="$QEMU_CC" \
                     --target-list=x86_64-softmmu \
                     $QEMU_EXTRA_OPTS \
                     --extra-cflags="-I${PROJECT_DIR}/bridge/common -I${PROJECT_DIR}/bridge/qemu" \
