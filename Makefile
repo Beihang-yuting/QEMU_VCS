@@ -156,6 +156,9 @@ else
   _COSIM_DEBUG =
 endif
 
+# 运行时库路径（确保源码编译的 glib 等库可被找到）
+_QEMU_LD_PATH = LD_LIBRARY_PATH=/usr/local/lib:/usr/local/lib/x86_64-linux-gnu:$(BRIDGE_LIB_DIR):$${LD_LIBRARY_PATH:-}
+
 ifeq ($(TRANSPORT),tcp)
   _QEMU_DEV = cosim-pcie-rc,transport=tcp,port_base=$(PORT_BASE),instance_id=$(INSTANCE_ID)$(_COSIM_DEBUG)
 else
@@ -174,6 +177,28 @@ run-qemu:
 	@if [ ! -f '$(QEMU)' ]; then \
 		echo "[错误] QEMU 未找到: $(QEMU)"; \
 		echo "  请指定: make run-qemu QEMU=/path/to/qemu-system-x86_64"; \
+		exit 1; \
+	fi
+	@MISSING=$$($(_QEMU_LD_PATH) ldd '$(QEMU)' 2>/dev/null | grep 'not found' || true); \
+	if [ -n "$$MISSING" ]; then \
+		echo "[错误] QEMU 动态库缺失:"; \
+		echo "$$MISSING" | sed 's/^/  /'; \
+		echo "  解决方法: 在本机重新编译 QEMU: ./setup.sh"; \
+		echo "  或设置: export LD_LIBRARY_PATH=/path/to/libs"; \
+		exit 1; \
+	fi
+	@if ! $(_QEMU_LD_PATH) '$(QEMU)' --version >/dev/null 2>&1; then \
+		echo "[错误] QEMU 无法运行: $(QEMU)"; \
+		ERR=$$($(_QEMU_LD_PATH) '$(QEMU)' --version 2>&1 || true); \
+		echo "$$ERR" | head -3 | sed 's/^/  /'; \
+		if echo "$$ERR" | grep -q 'undefined symbol'; then \
+			SYM=$$(echo "$$ERR" | grep -oP 'undefined symbol: \K\S+'); \
+			echo "  缺少符号: $$SYM"; \
+			if echo "$$SYM" | grep -q '^g_'; then \
+				echo "  原因: 本机 glib 版本过低（QEMU 9.2 需要 glib >= 2.66）"; \
+				echo "  解决: 在本机运行 ./setup.sh 编译 QEMU，或升级 glib"; \
+			fi; \
+		fi; \
 		exit 1; \
 	fi
 	@if [ -z '$(KERNEL)' ] || [ ! -f '$(KERNEL)' ]; then \
@@ -207,6 +232,7 @@ endif
 	@echo -e "\033[0;36m║\033[0;33m  退出:  Ctrl+A X 或 cosim-stop\033[0m\033[0;36m              ║\033[0m"
 	@echo -e "\033[0;36m╚══════════════════════════════════════════════╝\033[0m"
 	@echo ""
+	$(_QEMU_LD_PATH) \
 	$(QEMU) -M q35 -m $(GUEST_MEMORY) -smp 1 \
 		-kernel $(KERNEL) $(_GUEST_ARGS) \
 		-append '$(strip $(_QEMU_APPEND))' \
