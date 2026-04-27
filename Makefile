@@ -23,11 +23,15 @@ RUN_DIR       := $(PROJECT_DIR)/run
 QEMU          ?= $(firstword $(wildcard $(PROJECT_DIR)/third_party/qemu/build/qemu-system-x86_64) \
                               $(wildcard $(HOME)/workspace/qemu-9.2.0/build/qemu-system-x86_64))
 SIMV          ?= $(VCS_SIM_DIR)/simv_vip
-KERNEL        ?= $(firstword $(wildcard $(PROJECT_DIR)/guest/images/bzImage) \
+GUEST_TYPE    ?= alpine
+KERNEL        ?= $(firstword $(wildcard $(PROJECT_DIR)/guest/images/$(GUEST_TYPE)/bzImage) \
+                              $(wildcard $(PROJECT_DIR)/guest/images/bzImage) \
                               $(wildcard $(HOME)/workspace/alpine-vmlinuz-new))
-ROOTFS        ?= $(firstword $(wildcard $(PROJECT_DIR)/guest/images/rootfs.ext4) \
+ROOTFS        ?= $(firstword $(wildcard $(PROJECT_DIR)/guest/images/$(GUEST_TYPE)/rootfs.ext4) \
+                              $(wildcard $(PROJECT_DIR)/guest/images/rootfs.ext4) \
                               $(wildcard $(HOME)/workspace/rootfs.ext4))
-INITRD        ?= $(wildcard $(PROJECT_DIR)/guest/images/initramfs.gz)
+INITRD        ?= $(firstword $(wildcard $(PROJECT_DIR)/guest/images/$(GUEST_TYPE)/initramfs.gz) \
+                              $(wildcard $(PROJECT_DIR)/guest/images/initramfs.gz))
 TAP_BRIDGE    ?= $(PROJECT_DIR)/tools/eth_tap_bridge
 
 # ============================================================
@@ -427,6 +431,7 @@ help:
 	@echo "  ETH_SHM                ETH 共享内存名"
 	@echo "  SIM_TIMEOUT=600000     VCS 超时(ms)"
 	@echo "  VERBOSE=0|1            日志级别（默认 0 安静，1 详细+debug）"
+	@echo "  GUEST_TYPE=alpine|debian  Guest 系统（默认 alpine）"
 	@echo "  QEMU= SIMV= KERNEL= ROOTFS=  路径覆盖"
 	@echo ""
 	@echo "IP 地址分配（10.0.0.0/24 网段）:"

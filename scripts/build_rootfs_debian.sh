@@ -6,10 +6,10 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
-OUTPUT_DIR="$(cd "${1:-${PROJECT_DIR}/guest/images}" 2>/dev/null && pwd || echo "${PROJECT_DIR}/guest/images")"
+OUTPUT_DIR="$(cd "${1:-${PROJECT_DIR}/guest/images/debian}" 2>/dev/null && pwd || echo "${PROJECT_DIR}/guest/images/debian")"
 DEBIAN_SUITE="bookworm"
 DEBIAN_MIRROR="http://deb.debian.org/debian"
-ROOTFS_SIZE_MB=1024
+ROOTFS_SIZE_MB=768
 ROOTFS_IMG="${OUTPUT_DIR}/rootfs.ext4"
 MOUNT_DIR=$(mktemp -d /tmp/cosim-rootfs.XXXXXX)
 LOOP_DEV=""
@@ -68,7 +68,6 @@ chroot "$MOUNT_DIR" /bin/bash -c '
     apt-get install -y -qq pciutils usbutils
     apt-get install -y -qq kmod util-linux procps
     apt-get install -y -qq rdma-core perftest 2>/dev/null || echo "RDMA not available"
-    apt-get install -y -qq gcc make 2>/dev/null || echo "Dev tools partially installed"
     apt-get install -y -qq wget curl bash-completion
     # 安装内核（含 virtio 驱动）
     apt-get install -y -qq linux-image-amd64 2>/dev/null || echo "Kernel package not available"
@@ -145,18 +144,15 @@ info "Copying cosim overlay..."
 OVERLAY_DIR="${PROJECT_DIR}/guest/overlay"
 if [ -d "$OVERLAY_DIR" ] && [ -f "$OVERLAY_DIR/usr/local/bin/cosim-start" ]; then
     mkdir -p "$MOUNT_DIR/usr/local/bin"
-    mkdir -p "$MOUNT_DIR/etc/init.d"
     mkdir -p "$MOUNT_DIR/etc/profile.d"
     cp -v "$OVERLAY_DIR"/etc/motd "$MOUNT_DIR/etc/motd"
-    # Debian 用 systemd，不需要 inittab，但拷贝不影响
-    cp -v "$OVERLAY_DIR"/etc/init.d/S99cosim "$MOUNT_DIR/etc/init.d/S99cosim"
+    # Debian 用 systemd，不拷贝 inittab 和 S99cosim
     cp -v "$OVERLAY_DIR"/etc/profile.d/cosim.sh "$MOUNT_DIR/etc/profile.d/cosim.sh"
     cp -v "$OVERLAY_DIR"/usr/local/bin/cosim-start "$MOUNT_DIR/usr/local/bin/cosim-start"
     cp -v "$OVERLAY_DIR"/usr/local/bin/cosim-stop "$MOUNT_DIR/usr/local/bin/cosim-stop"
     chmod +x "$MOUNT_DIR/usr/local/bin/cosim-start"
     chmod +x "$MOUNT_DIR/usr/local/bin/cosim-stop"
-    chmod +x "$MOUNT_DIR/etc/init.d/S99cosim"
-    ok "Overlay copied: cosim-start, cosim-stop, motd, profile, S99cosim"
+    ok "Overlay copied: cosim-start, cosim-stop, motd, profile"
 else
     echo "[WARN] guest/overlay 目录不存在或内容不完整！"
     echo "  请确认: git checkout good -- guest/overlay/"
