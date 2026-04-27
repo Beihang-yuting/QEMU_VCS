@@ -24,14 +24,21 @@ QEMU          ?= $(firstword $(wildcard $(PROJECT_DIR)/third_party/qemu/build/qe
                               $(wildcard $(HOME)/workspace/qemu-9.2.0/build/qemu-system-x86_64))
 SIMV          ?= $(VCS_SIM_DIR)/simv_vip
 GUEST_TYPE    ?= alpine
+# 镜像查找顺序: 指定类型子目录 → 旧版平铺目录 → 另一类型子目录 → 兼容旧路径
 KERNEL        ?= $(firstword $(wildcard $(PROJECT_DIR)/guest/images/$(GUEST_TYPE)/bzImage) \
                               $(wildcard $(PROJECT_DIR)/guest/images/bzImage) \
+                              $(wildcard $(PROJECT_DIR)/guest/images/alpine/bzImage) \
+                              $(wildcard $(PROJECT_DIR)/guest/images/debian/bzImage) \
                               $(wildcard $(HOME)/workspace/alpine-vmlinuz-new))
 ROOTFS        ?= $(firstword $(wildcard $(PROJECT_DIR)/guest/images/$(GUEST_TYPE)/rootfs.ext4) \
                               $(wildcard $(PROJECT_DIR)/guest/images/rootfs.ext4) \
+                              $(wildcard $(PROJECT_DIR)/guest/images/alpine/rootfs.ext4) \
+                              $(wildcard $(PROJECT_DIR)/guest/images/debian/rootfs.ext4) \
                               $(wildcard $(HOME)/workspace/rootfs.ext4))
 INITRD        ?= $(firstword $(wildcard $(PROJECT_DIR)/guest/images/$(GUEST_TYPE)/initramfs.gz) \
-                              $(wildcard $(PROJECT_DIR)/guest/images/initramfs.gz))
+                              $(wildcard $(PROJECT_DIR)/guest/images/initramfs.gz) \
+                              $(wildcard $(PROJECT_DIR)/guest/images/alpine/initramfs.gz) \
+                              $(wildcard $(PROJECT_DIR)/guest/images/debian/initramfs.gz))
 TAP_BRIDGE    ?= $(PROJECT_DIR)/tools/eth_tap_bridge
 
 # ============================================================
