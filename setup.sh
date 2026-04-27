@@ -321,6 +321,18 @@ fi
 info "项目目录: ${PROJECT_DIR}"
 info "部署模式: ${SETUP_MODE}"
 
+# ---- 全局网络检测 ----
+HAS_INTERNET=false
+if timeout 5 bash -c 'echo >/dev/tcp/github.com/443' 2>/dev/null || \
+   timeout 5 curl -s --head https://github.com >/dev/null 2>&1; then
+    HAS_INTERNET=true
+fi
+if [ "$HAS_INTERNET" = true ]; then
+    ok "外网可达"
+else
+    warn "外网不可达（内网环境），涉及下载的步骤将给出离线准备命令"
+fi
+
 # ============================================================
 # [步骤] 检测操作系统并安装系统依赖
 # ============================================================
@@ -675,13 +687,25 @@ if [ "$NEED_QEMU" = true ]; then
 
         if [ ! -d "$GLIB_BUILD_DIR" ]; then
             if [ ! -f "$GLIB_TARBALL" ]; then
-                info "下载 glib ${GLIB_BUILD_VER} 源码..."
-                if ! wget -q -O "$GLIB_TARBALL" "$GLIB_URL"; then
-                    fail "下载 glib 失败，请手动下载到: ${GLIB_TARBALL}"
-                    fail "下载地址: ${GLIB_URL}"
+                if [ "$HAS_INTERNET" = true ]; then
+                    info "下载 glib ${GLIB_BUILD_VER} 源码..."
+                    if ! wget -q -O "$GLIB_TARBALL" "$GLIB_URL"; then
+                        fail "下载 glib 失败，请手动下载到: ${GLIB_TARBALL}"
+                        fail "下载地址: ${GLIB_URL}"
+                        exit 1
+                    fi
+                    ok "glib 源码下载完成"
+                else
+                    fail "内网环境无法下载 glib 源码"
+                    echo ""
+                    fail "  请在有网络的机器上执行以下命令，然后将文件拷贝到本机："
+                    fail "  ────────────────────────────────────────"
+                    fail "  wget ${GLIB_URL}"
+                    fail "  scp glib-${GLIB_BUILD_VER}.tar.xz <用户>@<本机IP>:${GLIB_TARBALL}"
+                    fail "  ────────────────────────────────────────"
+                    fail "  完成后重新运行 ./setup.sh"
                     exit 1
                 fi
-                ok "glib 源码下载完成"
             fi
             info "解压 glib 源码..."
             tar xf "$GLIB_TARBALL" -C "${PROJECT_DIR}/third_party/"
@@ -788,35 +812,39 @@ if [ "$NEED_QEMU" = true ]; then
         case "${QEMU_SRC_OPT}" in
             download)
                 QEMU_FETCHED=false
-                if command -v git &>/dev/null; then
+                TARBALL="${PROJECT_DIR}/third_party/qemu-9.2.0.tar.xz"
+
+                # 优先检查本地 tarball（支持离线）
+                if [ -f "$TARBALL" ]; then
+                    info "从本地 tarball 解压 QEMU..."
+                    cd "${PROJECT_DIR}/third_party"
+                    tar xf "$TARBALL"
+                    [ -d "qemu-9.2.0" ] && [ ! -d "qemu" ] && mv qemu-9.2.0 qemu
+                    cd "$PROJECT_DIR"
+                    ok "QEMU 源码解压完成"
+                    QEMU_FETCHED=true
+                elif [ "$HAS_INTERNET" = true ] && command -v git &>/dev/null; then
                     info "从 GitHub 下载 QEMU ${QEMU_VERSION}..."
                     if git clone https://github.com/qemu/qemu.git \
                             --branch "$QEMU_VERSION" --depth 1 "$QEMU_DIR" 2>/dev/null; then
                         ok "QEMU 源码下载完成"
                         QEMU_FETCHED=true
                     else
-                        warn "git clone 失败，检查本地备份..."
+                        warn "git clone 失败"
                     fi
-                else
-                    info "git 不可用，检查本地 tarball..."
                 fi
+
                 if [ "$QEMU_FETCHED" = false ]; then
-                    TARBALL="${PROJECT_DIR}/third_party/qemu-9.2.0.tar.xz"
-                    if [ -f "$TARBALL" ]; then
-                        info "从本地 tarball 解压 QEMU..."
-                        cd "${PROJECT_DIR}/third_party"
-                        tar xf "$TARBALL"
-                        [ -d "qemu-9.2.0" ] && [ ! -d "qemu" ] && mv qemu-9.2.0 qemu
-                        cd "$PROJECT_DIR"
-                        ok "QEMU 源码解压完成"
-                    else
-                        fail "无法获取 QEMU 源码！"
-                        fail "  解决方法:"
-                        fail "    1. 重新运行，选择本地路径模式: --qemu-src path:<目录>"
-                        fail "    2. 将 QEMU 源码放到 ${QEMU_DIR}"
-                        fail "    3. 将 tarball 放到 ${TARBALL}"
-                        exit 1
-                    fi
+                    fail "无法获取 QEMU 源码！"
+                    echo ""
+                    fail "  请在有网络的机器上执行以下命令，然后将文件拷贝到本机："
+                    fail "  ────────────────────────────────────────"
+                    fail "  wget https://github.com/qemu/qemu/archive/refs/tags/${QEMU_VERSION}.tar.gz -O qemu-9.2.0.tar.xz"
+                    fail "  scp qemu-9.2.0.tar.xz <用户>@<本机IP>:${TARBALL}"
+                    fail "  ────────────────────────────────────────"
+                    fail "  或直接将 QEMU 源码目录拷贝到: ${QEMU_DIR}"
+                    fail "  完成后重新运行 ./setup.sh"
+                    exit 1
                 fi
                 ;;
             path:*)
@@ -906,10 +934,8 @@ if [ "$NEED_QEMU" = true ]; then
                     warn "build/ 目录已存在但非 QEMU configure 创建，清理..."
                     rm -rf build
                 fi
-                # 检测网络连通性，决定 subproject 和 fdt 策略
-                HAS_NETWORK=false
-                if timeout 5 git ls-remote https://gitlab.com/qemu-project/dtc.git HEAD &>/dev/null; then
-                    HAS_NETWORK=true
+                # 复用全局网络检测结果，决定 subproject 和 fdt 策略
+                if [ "$HAS_INTERNET" = true ]; then
                     ok "外网可达，保留 subproject .wrap 文件（meson 可自动下载依赖）"
                 else
                     warn "外网不可达（内网环境），清理 subproject 防止下载超时"
@@ -932,7 +958,7 @@ if [ "$NEED_QEMU" = true ]; then
 
                 # configure 参数：内网禁用 fdt（避免下载 dtc），外网保留全部功能
                 QEMU_EXTRA_OPTS=""
-                if [ "$HAS_NETWORK" = false ]; then
+                if [ "$HAS_INTERNET" = false ]; then
                     QEMU_EXTRA_OPTS="--disable-fdt"
                 fi
 
@@ -1042,6 +1068,25 @@ if [ "$NEED_GUEST" = true ]; then
             fi
             echo ""
             fail "完成后重新运行 ./setup.sh 即可跳过此步骤"
+            FAIL_COUNT=$((FAIL_COUNT + 1))
+        elif [ "$HAS_INTERNET" = false ]; then
+            warn "内网环境无法自动构建 Guest 镜像（需要下载内核和软件包）"
+            echo ""
+            fail "  请在有网络的机器上构建 Guest 镜像，然后拷贝到本机："
+            fail "  ────────────────────────────────────────"
+            if [ "$GUEST_TYPE" = "alpine" ]; then
+                fail "  # 在有网络的机器上:"
+                fail "  sudo ./scripts/build_rootfs_alpine.sh"
+                fail "  # 将产物拷贝到本机:"
+                fail "  scp guest/images/alpine/{bzImage,initramfs.gz,rootfs.ext4} <用户>@<本机IP>:${IMAGES_DIR}/"
+            elif [ "$GUEST_TYPE" = "debian" ]; then
+                fail "  # 在有网络的机器上:"
+                fail "  sudo ./scripts/build_rootfs_debian.sh"
+                fail "  # 将产物拷贝到本机:"
+                fail "  scp guest/images/debian/{bzImage,initramfs.gz,rootfs.ext4} <用户>@<本机IP>:${IMAGES_DIR}/"
+            fi
+            fail "  ────────────────────────────────────────"
+            fail "  完成后重新运行 ./setup.sh 即可跳过此步骤"
             FAIL_COUNT=$((FAIL_COUNT + 1))
         else
             info "编译自定义测试工具..."
