@@ -458,12 +458,12 @@ static void t5_vcs_stub(void) {
             .host_addr = 0x2000 + (uint64_t)(i * 64),
             .len = 16,
             .dma_offset = 0,
-            .timestamp = cur_sim,
+            .timestamp = (uint32_t)cur_sim,
         };
         CHECK(ring_buf_enqueue(&shm.dma_req_ring, &dma) == 0);
 
         /* 发 MSI 事件 */
-        msi_event_t msi = { .vector = (uint32_t)i, .timestamp = cur_sim };
+        msi_event_t msi = { .vector = (uint16_t)i, .timestamp = cur_sim };
         CHECK(ring_buf_enqueue(&shm.msi_ring, &msi) == 0);
 
         usleep(30000); /* 等 poller 处理 */

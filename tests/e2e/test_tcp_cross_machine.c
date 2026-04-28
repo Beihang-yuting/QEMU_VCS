@@ -74,7 +74,7 @@ static int run_server(int port) {
         tlp_entry_t tlp;
         CHECK(t->recv_tlp(t, &tlp) == 0);
         CHECK(tlp.type == TLP_MRD);
-        CHECK(tlp.tag == (uint8_t)i);
+        CHECK(tlp.tag == (uint16_t)i);
 
         cpl_entry_t cpl;
         memset(&cpl, 0, sizeof(cpl));
@@ -105,7 +105,7 @@ static int run_server(int port) {
     for (int i = 0; i < 5; i++) {
         msi_event_t ev;
         CHECK(t->recv_msi(t, &ev) == 0);
-        CHECK(ev.vector == (uint32_t)(i + 1));
+        CHECK(ev.vector == (uint16_t)(i + 1));
     }
     printf("[Server] Test 4: PASS\n\n");
 
@@ -178,7 +178,7 @@ static int run_client(const char *host, int port) {
         tlp_entry_t tlp;
         memset(&tlp, 0, sizeof(tlp));
         tlp.type = TLP_MRD;
-        tlp.tag = (uint8_t)i;
+        tlp.tag = (uint16_t)i;
         tlp.len = 4;
         tlp.addr = (uint64_t)(0x1000 + i * 4);
         CHECK(t->send_tlp(t, &tlp) == 0);
@@ -187,7 +187,7 @@ static int run_client(const char *host, int port) {
         CHECK(t->recv_cpl(t, &cpl) == 0);
         uint64_t lat = now_us() - t0;
         lat_sum += lat;
-        CHECK(cpl.tag == (uint8_t)i);
+        CHECK(cpl.tag == (uint16_t)i);
         uint32_t val;
         memcpy(&val, cpl.data, 4);
         CHECK(val == 0xBEEF0000 + (uint32_t)i);
@@ -223,7 +223,7 @@ static int run_client(const char *host, int port) {
     /* Test 4: MSI */
     printf("[Client] Test 4: MSI event (5x)...\n");
     for (int i = 0; i < 5; i++) {
-        msi_event_t ev = { .vector = (uint32_t)(i + 1), .timestamp = now_us() };
+        msi_event_t ev = { .vector = (uint16_t)(i + 1), .timestamp = now_us() };
         CHECK(t->send_msi(t, &ev) == 0);
     }
     printf("[Client] Test 4: PASS\n\n");

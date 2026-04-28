@@ -29,7 +29,7 @@ static void vcs_stub(void) {
     atomic_store(&shm.ctrl->vcs_ready, 1);
 
     for (uint32_t v = 0; v < 3; v++) {
-        msi_event_t ev = { .vector = v, .timestamp = 1000 + v };
+        msi_event_t ev = { .vector = (uint16_t)v, .timestamp = 1000 + v };
         assert(ring_buf_enqueue(&shm.msi_ring, &ev) == 0);
         usleep(50000);  /* give poller time to process */
     }

@@ -13,6 +13,7 @@ bridge_ctx_t *bridge_init(const char *shm_name, const char *sock_path) {
     ctx->listen_fd = -1;
     ctx->client_fd = -1;
     ctx->next_tag = 0;
+    ctx->tag_mask = 0x00FF;   /* default 8-bit tags; updated after topology handshake */
     pthread_mutex_init(&ctx->tlp_mutex, NULL);
 
     if (cosim_shm_create(&ctx->shm, shm_name) < 0) {
@@ -38,7 +39,12 @@ int bridge_connect(bridge_ctx_t *ctx) {
 }
 
 int bridge_send_tlp(bridge_ctx_t *ctx, tlp_entry_t *req) {
-    req->tag = ctx->next_tag++;
+    req->tag = ctx->next_tag & ctx->tag_mask;
+    ctx->next_tag = (ctx->next_tag + 1) & ctx->tag_mask;
+    /* P3: ensure multi-function routing fields are initialized */
+    if (req->requester_id == 0 && req->target_bdf == 0) {
+        /* leave as zero — single-function default */
+    }
 
     if (ctx->trace_enabled) trace_log_tlp(&ctx->trace, req);
 
@@ -68,7 +74,7 @@ int bridge_send_tlp(bridge_ctx_t *ctx, tlp_entry_t *req) {
     return sock_sync_send(ctx->client_fd, &msg);
 }
 
-int bridge_wait_completion(bridge_ctx_t *ctx, uint8_t tag, cpl_entry_t *cpl) {
+int bridge_wait_completion(bridge_ctx_t *ctx, uint16_t tag, cpl_entry_t *cpl) {
     sync_msg_t msg;
     int ret;
     int drain_guard = 256;  /* bound stale-cpl drain to avoid wedging */
@@ -278,6 +284,7 @@ bridge_ctx_t *bridge_init_ex(const transport_cfg_t *cfg) {
     ctx->listen_fd = -1;
     ctx->client_fd = -1;
     ctx->next_tag = 0;
+    ctx->tag_mask = 0x00FF;   /* default 8-bit tags */
     pthread_mutex_init(&ctx->tlp_mutex, NULL);
 
     transport_cfg_t server_cfg = *cfg;

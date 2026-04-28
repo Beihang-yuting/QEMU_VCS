@@ -50,7 +50,7 @@ static int run_vcs(void) {
         tlp_entry_t tlp;
         CHECK(t->recv_tlp(t, &tlp) == 0);
         CHECK(tlp.type == TLP_MRD);
-        CHECK(tlp.tag == (uint8_t)i);
+        CHECK(tlp.tag == (uint16_t)i);
 
         cpl_entry_t cpl;
         memset(&cpl, 0, sizeof(cpl));
@@ -90,7 +90,7 @@ static int run_qemu(void) {
         tlp_entry_t tlp;
         memset(&tlp, 0, sizeof(tlp));
         tlp.type = TLP_MRD;
-        tlp.tag = (uint8_t)i;
+        tlp.tag = (uint16_t)i;
         tlp.len = 4;
         tlp.addr = (uint64_t)(0x1000 + i * 4);
 
@@ -105,7 +105,7 @@ static int run_qemu(void) {
 
         cpl_entry_t cpl;
         CHECK(t->recv_cpl(t, &cpl) == 0);
-        CHECK(cpl.tag == (uint8_t)i);
+        CHECK(cpl.tag == (uint16_t)i);
 
         uint32_t val;
         memcpy(&val, cpl.data, 4);

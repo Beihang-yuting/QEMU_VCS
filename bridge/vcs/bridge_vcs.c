@@ -235,8 +235,10 @@ int bridge_vcs_send_completion(int tag, const unsigned int *data, int len) {
     cpl_entry_t cpl;
     memset(&cpl, 0, sizeof(cpl));
     cpl.type = TLP_CPL;
-    cpl.tag = (unsigned char)tag;
+    cpl.tag = (uint16_t)tag;
     cpl.status = 0;
+    cpl.requester_id = 0;     /* P3: default single-function */
+    cpl.completer_id = 0;     /* P3: default single-function */
     cpl.len = len;
 
     int bytes = (len < COSIM_TLP_DATA_SIZE) ? len : COSIM_TLP_DATA_SIZE;
@@ -605,7 +607,7 @@ int bridge_vcs_dma_write_sync(unsigned long long host_addr,
 
 /* DPI-C: VCS raises MSI interrupt */
 int bridge_vcs_raise_msi(int vector) {
-    msi_event_t ev = { .vector = (uint32_t)vector, .timestamp = 0 };
+    msi_event_t ev = { .requester_id = 0, .vector = (uint16_t)vector, .timestamp = 0 };
 
     /* ---- TCP transport path ---- */
     if (g_transport) {
