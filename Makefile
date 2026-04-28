@@ -58,6 +58,12 @@ ETH_CREATE    ?= 1
 MAC_LAST      ?= 1
 SIM_TIMEOUT   ?= 600000
 VCS_TEST      ?= cosim_test
+# SR-IOV / Multi-Function 参数
+NUM_PFS       ?= 1
+MAX_VFS       ?= 0
+MSIX_VECTORS  ?= 4
+VF_MSIX_VECS  ?= 2
+TAG_WIDTH     ?= 1
 # TAP（Host 侧 10.0.0.1，Guest 侧用 cosim-start 配 10.0.0.2）
 TAP_DEV       ?= cosim0
 TAP_IP        ?= 10.0.0.1
@@ -253,7 +259,9 @@ endif
 _VCS_ARGS = $(_VCS_TRANS) \
 	+ETH_SHM=$(ETH_SHM) +ETH_ROLE=$(ETH_ROLE) +ETH_CREATE=$(ETH_CREATE) \
 	+MAC_LAST=$(MAC_LAST) +SIM_TIMEOUT_MS=$(SIM_TIMEOUT) \
-	+UVM_TESTNAME=$(VCS_TEST) +NO_WAVE
+	+UVM_TESTNAME=$(VCS_TEST) +NO_WAVE \
+	+NUM_PFS=$(NUM_PFS) +MAX_VFS=$(MAX_VFS) +MSIX_VECTORS=$(MSIX_VECTORS) \
+	+VF_MSIX_VECTORS=$(VF_MSIX_VECS) +TAG_WIDTH=$(TAG_WIDTH)
 
 run-vcs:
 	@mkdir -p $(LOG_DIR)
