@@ -11,7 +11,8 @@ struct irq_poller {
     cosim_shm_t         *shm;
     cosim_transport_t   *transport;
     dma_req_cb_t         dma_cb;
-    msi_cb_t             msi_cb;
+    msi_cb_t             msi_cb;      /* legacy: vector only */
+    msi_cb_ex_t          msi_cb_ex;   /* extended: requester_id + vector */
     void                *user;
     atomic_int           stop;
 };
@@ -49,7 +50,10 @@ static void *poller_thread(void *arg) {
                 /* 尝试 MSI */
                 rc = p->transport->recv_msi_nb(p->transport, &ev);
                 if (rc == 0) {
-                    if (p->msi_cb) p->msi_cb(ev.vector, p->user);
+                    if (p->msi_cb_ex)
+                        p->msi_cb_ex(ev.requester_id, ev.vector, p->user);
+                    else if (p->msi_cb)
+                        p->msi_cb(ev.vector, p->user);
                     did_work = 1;
                     continue;
                 }
@@ -74,7 +78,10 @@ static void *poller_thread(void *arg) {
 
             msi_event_t ev;
             while (ring_buf_dequeue(&p->shm->msi_ring, &ev) == 0) {
-                if (p->msi_cb) p->msi_cb(ev.vector, p->user);
+                if (p->msi_cb_ex)
+                    p->msi_cb_ex(ev.requester_id, ev.vector, p->user);
+                else if (p->msi_cb)
+                    p->msi_cb(ev.vector, p->user);
                 did_work = 1;
             }
         }
@@ -117,6 +124,50 @@ irq_poller_t *irq_poller_start_ex(cosim_transport_t *transport,
     p->transport = transport;
     p->dma_cb = dma_cb;
     p->msi_cb = msi_cb;
+    p->user = user;
+    atomic_store(&p->stop, 0);
+
+    if (pthread_create(&p->tid, NULL, poller_thread, p) != 0) {
+        perror("pthread_create");
+        free(p);
+        return NULL;
+    }
+
+    return p;
+}
+
+irq_poller_t *irq_poller_start_v2(cosim_shm_t *shm,
+                                    dma_req_cb_t dma_cb,
+                                    msi_cb_ex_t msi_cb_ex,
+                                    void *user) {
+    irq_poller_t *p = calloc(1, sizeof(*p));
+    if (!p) return NULL;
+
+    p->shm = shm;
+    p->dma_cb = dma_cb;
+    p->msi_cb_ex = msi_cb_ex;
+    p->user = user;
+    atomic_store(&p->stop, 0);
+
+    if (pthread_create(&p->tid, NULL, poller_thread, p) != 0) {
+        perror("pthread_create");
+        free(p);
+        return NULL;
+    }
+
+    return p;
+}
+
+irq_poller_t *irq_poller_start_ex_v2(cosim_transport_t *transport,
+                                       dma_req_cb_t dma_cb,
+                                       msi_cb_ex_t msi_cb_ex,
+                                       void *user) {
+    irq_poller_t *p = calloc(1, sizeof(*p));
+    if (!p) return NULL;
+
+    p->transport = transport;
+    p->dma_cb = dma_cb;
+    p->msi_cb_ex = msi_cb_ex;
     p->user = user;
     atomic_store(&p->stop, 0);
 
