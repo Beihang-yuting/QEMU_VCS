@@ -44,7 +44,10 @@ module tb_uvm_top;
         .isr_set      (cif.isr_set),
         /* Standalone UVM: DUT's cpl_valid is sampled combinationally by
            the monitor; tie ack high so cpl_valid clears after one cycle. */
-        .cpl_ack      (1'b1)
+        .cpl_ack      (1'b1),
+        .first_be     (4'hF),
+        .bar_index    (3'd0),
+        .func_id      (16'd0)
     );
 
     // Initialize interface outputs to avoid X

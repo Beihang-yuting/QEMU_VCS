@@ -39,6 +39,8 @@ module pcie_ep_stub (
     input  logic [3:0]  first_be,
     /* BAR index (from glue BAR matching) */
     input  logic [2:0]  bar_index,
+    /* Function ID for multi-function routing (0 = legacy PF0) */
+    input  logic [15:0] func_id,
     /* TLP 完成接口 */
     output logic        cpl_valid,
     output logic [7:0]  cpl_tag,
@@ -112,6 +114,17 @@ module pcie_ep_stub (
 
     /* 当前选中的 queue 索引 (截断到 0 或 1) */
     wire [0:0] qsel = vio_queue_sel[0];
+
+    /* ========== Multi-function sparse register model ========== */
+    /* These associative arrays allow per-function register state.
+     * For func_id==0, the existing fixed registers above are used
+     * (backward compatible).  For func_id!=0, these sparse arrays
+     * provide independent register sets per function. */
+    bit [31:0] func_reg[int][int];            // [func_id][reg_idx]
+    bit [31:0] func_msix_table[int][int];     // [func_id][entry*4+field]
+    bit [31:0] func_virtio_common[int][int];  // [func_id][dword_offset]
+    bit [31:0] func_virtio_notify[int];       // [func_id]
+    bit [31:0] func_virtio_isr[int];          // [func_id]
 
     /* ========== 地址解码 ========== */
     wire [15:0] addr_offset = tlp_addr[15:0];

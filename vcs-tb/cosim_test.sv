@@ -11,6 +11,9 @@ class cosim_test extends uvm_test;
     pcie_tl_env       env;
     cosim_env_config  cfg;
 
+    // Multi-function manager (SR-IOV)
+    pcie_tl_func_manager  func_mgr;
+
     function new(string name = "cosim_test", uvm_component parent = null);
         super.new(name, parent);
     endfunction
@@ -38,6 +41,34 @@ class cosim_test extends uvm_test;
 
         /* 创建 env */
         env = pcie_tl_env::type_id::create("env", this);
+
+        /* Multi-function / SR-IOV setup */
+        begin
+            int num_pfs = 1, max_vfs = 256;
+            int msix_vectors = 64, vf_msix_vectors = 8, tag_width = 1;
+
+            if ($value$plusargs("NUM_PFS=%d", num_pfs)) ;
+            if ($value$plusargs("MAX_VFS=%d", max_vfs)) ;
+            if ($value$plusargs("MSIX_VECTORS=%d", msix_vectors)) ;
+            if ($value$plusargs("VF_MSIX_VECTORS=%d", vf_msix_vectors)) ;
+            if ($value$plusargs("TAG_WIDTH=%d", tag_width)) ;
+
+            func_mgr = pcie_tl_func_manager::type_id::create("func_mgr");
+            func_mgr.build(num_pfs, max_vfs);
+            func_mgr.pf_msix_vectors = msix_vectors;
+            func_mgr.vf_msix_vectors = vf_msix_vectors;
+            func_mgr.tag_width       = tag_width;
+
+            // Set default BAR sizes for PFs (BAR0 = 64KB, others disabled)
+            for (int pf = 0; pf < num_pfs; pf++) begin
+                func_mgr.pf_ctx[pf].bar_size[0] = 64'h10000;  // 64KB
+                func_mgr.pf_ctx[pf].bar_enable[0] = 1;
+            end
+
+            `uvm_info("COSIM_TEST", $sformatf(
+                "func_mgr: num_pfs=%0d max_vfs=%0d msix=%0d vf_msix=%0d tag_width=%0d",
+                num_pfs, max_vfs, msix_vectors, vf_msix_vectors, tag_width), UVM_LOW)
+        end
     endfunction
 
     function void connect_phase(uvm_phase phase);
@@ -99,8 +130,22 @@ class cosim_test extends uvm_test;
         end
         `uvm_info("COSIM_TEST", "Bridge initialized, cosim_rc_driver running", UVM_LOW)
 
+        /* Export topology to C bridge */
+        if (func_mgr != null)
+            func_mgr.export_topology_to_bridge();
+
         /* 获取 driver 引用，通知 bridge 就绪，等待 shutdown 事件 */
         if ($cast(drv, env.rc_agent.driver)) begin
+            // Wire multi-function support to driver and config_proxy
+            if (func_mgr != null && func_mgr.num_pfs > 0) begin
+                drv.func_mgr = func_mgr;
+                drv.multi_function_mode = 1;
+                if (drv.config_proxy != null) begin
+                    drv.config_proxy.func_mgr = func_mgr;
+                    drv.config_proxy.multi_function_mode = 1;
+                end
+                `uvm_info("COSIM_TEST", "Multi-function mode enabled for driver and config_proxy", UVM_LOW)
+            end
             drv.bridge_ready = 1;
             @(drv.shutdown_event);
         end else

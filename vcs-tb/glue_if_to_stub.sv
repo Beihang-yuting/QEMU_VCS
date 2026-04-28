@@ -72,7 +72,11 @@ module glue_if_to_stub (
     // Stub pass-through
     input  logic         stub_notify_valid,
     input  logic [15:0]  stub_notify_queue,
-    input  logic         stub_isr_set
+    input  logic         stub_isr_set,
+
+    // Multi-function: func_id pass-through
+    input  logic [15:0]  func_id_in,
+    output logic [15:0]  func_id_out
 );
 
     // =========================================================================
@@ -370,6 +374,7 @@ module glue_if_to_stub (
             stub_tlp_tag   <= 8'd0;
             stub_first_be  <= 4'hF;
             stub_bar_index <= 3'd0;
+            func_id_out    <= 16'd0;
         end else begin
             stub_tlp_valid <= 1'b0;  // default: deassert each cycle
 
@@ -383,6 +388,7 @@ module glue_if_to_stub (
                 stub_tlp_tag   <= hdr_tag;
                 stub_first_be  <= hdr_first_be;
                 stub_bar_index <= is_config_tlp ? 3'd0 : matched_bar;
+                func_id_out    <= func_id_in;
             end
         end
     end

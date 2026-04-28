@@ -45,6 +45,9 @@ module cosim_vip_top;
     logic [15:0] stub_notify_queue;
     logic        stub_isr_set;
 
+    /* Multi-function: func_id wire between glue and ep_stub */
+    logic [15:0] stub_func_id;
+
     /* === BAR base addresses (from DPI-C, updated by cosim_rc_driver bypass) === */
     logic [63:0] bar_base_regs [0:5];
     always_ff @(posedge clk) begin
@@ -97,7 +100,9 @@ module cosim_vip_top;
         .stub_cpl_ack    (stub_cpl_ack),
         .stub_notify_valid (stub_notify_valid),
         .stub_notify_queue (stub_notify_queue),
-        .stub_isr_set    (stub_isr_set)
+        .stub_isr_set    (stub_isr_set),
+        .func_id_in      (16'd0),
+        .func_id_out     (stub_func_id)
     );
 
     /* === EP stub 实例 === */
@@ -112,6 +117,7 @@ module cosim_vip_top;
         .tlp_tag      (stub_tlp_tag),
         .first_be     (stub_first_be),
         .bar_index    (stub_bar_index),
+        .func_id      (stub_func_id),
         .cpl_valid    (stub_cpl_valid),
         .cpl_tag      (stub_cpl_tag),
         .cpl_rdata    (stub_cpl_rdata),

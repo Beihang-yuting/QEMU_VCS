@@ -1093,6 +1093,21 @@ unsigned long long bridge_vcs_get_bar_base(int idx) {
     return 0;
 }
 
+/* Per-BDF BAR base storage for multi-function mode.
+ * Indexed by [bdf_hash][bar_idx].  Simple hash: bdf & 0x1FF (max 512 functions). */
+#define BDF_BAR_HASH_SIZE 512
+static uint64_t g_bdf_bar_base[BDF_BAR_HASH_SIZE][6];
+
+void bridge_vcs_set_bar_base_bdf(int bdf, int bar_idx, unsigned long long bar_addr) {
+    int h = bdf & (BDF_BAR_HASH_SIZE - 1);
+    if (bar_idx >= 0 && bar_idx < 6) {
+        g_bdf_bar_base[h][bar_idx] = bar_addr;
+        /* Also update legacy g_bar_base for BAR0 of BDF with func==0 */
+        if ((bdf & 0x7) == 0)
+            g_bar_base[bar_idx] = bar_addr;
+    }
+}
+
 /* Set one word in the completion data buffer */
 void bridge_vcs_set_cpl_data(int index, unsigned int value) {
     if (index >= 0 && index < 16)

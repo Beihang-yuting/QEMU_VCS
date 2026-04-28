@@ -152,6 +152,20 @@ package cosim_bridge_pkg;
     import "DPI-C" function int vcs_vq_get_tx_count();
     import "DPI-C" function int vcs_vq_get_rx_count();
 
+    /* ---- Multi-function / SR-IOV DPI-C ---- */
+    import "DPI-C" function void bridge_vcs_set_pf_topology(
+        input int pf_idx, input int bdf, input int num_vfs, input int vf_device_id,
+        input int vendor_id, input int device_id, input int msix_vectors, input int vf_msix_vectors,
+        input longint unsigned pf_bar0, input longint unsigned pf_bar1, input longint unsigned pf_bar2,
+        input longint unsigned pf_bar3, input longint unsigned pf_bar4, input longint unsigned pf_bar5,
+        input longint unsigned vf_bar0, input longint unsigned vf_bar1, input longint unsigned vf_bar2,
+        input longint unsigned vf_bar3, input longint unsigned vf_bar4, input longint unsigned vf_bar5);
+    import "DPI-C" function void bridge_vcs_finalize_topology(input int num_pfs, input int tag_width);
+    import "DPI-C" function int bridge_vcs_send_vf_event(input int event_type, input int pf_index, input int num_vfs);
+    import "DPI-C" function int bridge_vcs_get_tlp_target_bdf();
+    import "DPI-C" function int bridge_vcs_get_tlp_requester_id();
+    import "DPI-C" function void bridge_vcs_set_bar_base_bdf(input int bdf, input int bar_idx, input longint unsigned bar_addr);
+
 `ifdef COSIM_VIP_MODE
     import "DPI-C" function int bridge_vcs_poll_tlp_ext(
         output byte unsigned tlp_type,

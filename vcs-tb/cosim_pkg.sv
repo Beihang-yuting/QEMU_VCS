@@ -37,6 +37,13 @@ package cosim_pkg;
     import cosim_bridge_pkg::bridge_vcs_get_poll_last_be;
     import cosim_bridge_pkg::bridge_vcs_set_bar_base;
     import cosim_bridge_pkg::bridge_vcs_get_bar_base;
+    /* Multi-function / SR-IOV DPI-C */
+    import cosim_bridge_pkg::bridge_vcs_get_tlp_target_bdf;
+    import cosim_bridge_pkg::bridge_vcs_get_tlp_requester_id;
+    import cosim_bridge_pkg::bridge_vcs_set_pf_topology;
+    import cosim_bridge_pkg::bridge_vcs_finalize_topology;
+    import cosim_bridge_pkg::bridge_vcs_send_vf_event;
+    import cosim_bridge_pkg::bridge_vcs_set_bar_base_bdf;
 `ifdef COSIM_VIP_MODE
     import cosim_bridge_pkg::bridge_vcs_poll_tlp_ext;
 `endif

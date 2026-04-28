@@ -13,11 +13,19 @@
 //   +CFG_MSIX_VECTORS=4       配置 MSI-X 向量数
 //-----------------------------------------------------------------------------
 
+// DPI-C imports for multi-function config proxy (must be at package scope)
+import "DPI-C" function int bridge_vcs_send_vf_event(input int event_type, input int pf_index, input int num_vfs);
+import "DPI-C" function void bridge_vcs_set_bar_base_bdf(input int bdf, input int bar_idx, input longint unsigned bar_addr);
+
 class pcie_tl_config_proxy extends uvm_component;
     `uvm_component_utils(pcie_tl_config_proxy)
 
     //--- Bypass 开关 ---
     bit bypass_enable = 1;
+
+    //--- Multi-function support ---
+    pcie_tl_func_manager func_mgr;
+    bit multi_function_mode = 0;
 
     //--- 4KB Config Space 寄存器 ---
     bit [31:0] config_space[1024];  // 4KB = 1024 DWORDs
@@ -232,6 +240,100 @@ class pcie_tl_config_proxy extends uvm_component;
             return 1;
         end
 
+        return 1;
+    endfunction
+
+    //=========================================================================
+    // Multi-function CfgRd — delegates to func_mgr, handles BAR sizing
+    // Returns 1 if handled, 0 if not (passthrough)
+    //=========================================================================
+    function bit handle_cfg_read_bdf(bit [15:0] target_bdf, int dw_addr, output bit [31:0] data);
+        pcie_tl_func_context ctx;
+        if (!multi_function_mode || func_mgr == null) begin
+            return handle_cfg_read(dw_addr, data);
+        end
+
+        ctx = func_mgr.lookup_by_bdf(target_bdf);
+        if (ctx == null) begin
+            data = 32'hFFFF_FFFF;
+            return 1;
+        end
+
+        // BAR sizing response: check per-function bar_sizing state
+        // Type 0 header BARs are at DW4..DW9
+        if (dw_addr >= 4 && dw_addr <= 9) begin
+            int bar_idx = dw_addr - 4;
+            if (ctx.bar_sizing[bar_idx]) begin
+                if (ctx.bar_size[bar_idx] != 0)
+                    data = ~(ctx.bar_size[bar_idx][31:0] - 1);
+                else
+                    data = 32'h0;
+                `uvm_info("CFG_PROXY", $sformatf("BAR%0d sizing read BDF=0x%04h: mask=0x%08h",
+                    bar_idx, target_bdf, data), UVM_MEDIUM)
+                return 1;
+            end
+        end
+
+        // Normal config read via func_mgr
+        data = func_mgr.cfg_read(target_bdf, dw_addr[11:0] << 2);
+        `uvm_info("CFG_PROXY", $sformatf("CfgRd BDF=0x%04h DW[%0d]=0x%08h (multi-func)",
+            target_bdf, dw_addr, data), UVM_HIGH)
+        return 1;
+    endfunction
+
+    //=========================================================================
+    // Multi-function CfgWr — delegates to func_mgr, detects BAR sizing
+    // and SR-IOV NumVFs writes
+    // Returns 1 if handled, 0 if not (passthrough)
+    //=========================================================================
+    function bit handle_cfg_write_bdf(bit [15:0] target_bdf, int dw_addr,
+                                       bit [31:0] data, int byte_off = 0, int byte_len = 4);
+        pcie_tl_func_context ctx;
+        if (!multi_function_mode || func_mgr == null) begin
+            return handle_cfg_write(dw_addr, data, byte_off, byte_len);
+        end
+
+        ctx = func_mgr.lookup_by_bdf(target_bdf);
+        if (ctx == null) return 1;  // silently drop writes to unknown BDF
+
+        // BAR sizing detection (DW4..DW9 = BAR0..BAR5)
+        if (dw_addr >= 4 && dw_addr <= 9) begin
+            int bar_idx = dw_addr - 4;
+            if (data == 32'hFFFF_FFFF) begin
+                ctx.bar_sizing[bar_idx] = 1;
+                `uvm_info("CFG_PROXY", $sformatf("BAR%0d sizing write detected BDF=0x%04h",
+                    bar_idx, target_bdf), UVM_MEDIUM)
+            end else begin
+                ctx.bar_sizing[bar_idx] = 0;
+                ctx.bar_base[bar_idx][31:0] = data & ~(ctx.bar_size[bar_idx][31:0] - 1);
+                `uvm_info("CFG_PROXY", $sformatf("BAR%0d assigned BDF=0x%04h base=0x%016h",
+                    bar_idx, target_bdf, ctx.bar_base[bar_idx]), UVM_MEDIUM)
+                // Notify C bridge of BAR base update
+                bridge_vcs_set_bar_base_bdf(int'(target_bdf), bar_idx, ctx.bar_base[bar_idx]);
+            end
+            return 1;
+        end
+
+        // SR-IOV NumVFs write detection
+        // SR-IOV cap at offset 0x200; NumVFs is at cap+0x10 = byte offset 0x210
+        // DW index = 0x210 / 4 = 0x84 = 132
+        if (dw_addr == 'h84 && !ctx.is_vf) begin
+            bit [15:0] new_num_vfs = data[15:0];
+            `uvm_info("CFG_PROXY", $sformatf("SR-IOV NumVFs write BDF=0x%04h num_vfs=%0d",
+                target_bdf, new_num_vfs), UVM_MEDIUM)
+            if (new_num_vfs > 0) begin
+                func_mgr.enable_vfs(ctx.pf_index, int'(new_num_vfs));
+                void'(bridge_vcs_send_vf_event(1, ctx.pf_index, int'(new_num_vfs)));
+            end else begin
+                func_mgr.disable_vfs(ctx.pf_index);
+                void'(bridge_vcs_send_vf_event(0, ctx.pf_index, 0));
+            end
+        end
+
+        // Normal config write via func_mgr
+        func_mgr.cfg_write(target_bdf, dw_addr[11:0] << 2, data, 4'hF);
+        `uvm_info("CFG_PROXY", $sformatf("CfgWr BDF=0x%04h DW[%0d]=0x%08h (multi-func)",
+            target_bdf, dw_addr, data), UVM_HIGH)
         return 1;
     endfunction
 

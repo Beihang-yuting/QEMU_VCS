@@ -32,6 +32,9 @@ class pcie_tl_sriov_cap extends pcie_ext_capability;
     //--- VF BAR registers ---
     bit [31:0] vf_bar[6];
 
+    //--- VF BAR sizes (actual size in bytes, for topology export) ---
+    bit [63:0] vf_bar_size[6];
+
     //--- Page size registers ---
     bit [31:0] supported_page_sizes = 32'h00000553;
     bit [31:0] system_page_size     = 32'h00000001;

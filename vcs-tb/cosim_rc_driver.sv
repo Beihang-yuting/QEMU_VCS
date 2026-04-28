@@ -62,6 +62,12 @@ class cosim_rc_driver extends pcie_tl_rc_driver;
     pcie_tl_config_proxy  config_proxy;
 
     // -----------------------------------------------------------------------
+    // Multi-function support (SR-IOV)
+    // -----------------------------------------------------------------------
+    pcie_tl_func_manager  func_mgr;
+    bit multi_function_mode = 0;
+
+    // -----------------------------------------------------------------------
     // Statistics counters
     // -----------------------------------------------------------------------
     int unsigned total_tlp_count;
@@ -179,6 +185,47 @@ class cosim_rc_driver extends pcie_tl_rc_driver;
             dpi_tag  = bridge_vcs_get_poll_tag();
             for (int i = 0; i < 16; i++)
                 dpi_data[i] = bridge_vcs_get_poll_data(i);
+
+            // Multi-function routing: fetch target_bdf and requester_id
+            begin
+                bit [15:0] target_bdf;
+                bit [15:0] requester_id;
+                target_bdf   = bridge_vcs_get_tlp_target_bdf();
+                requester_id = bridge_vcs_get_tlp_requester_id();
+
+                // Multi-function Config Space Bypass
+                if (multi_function_mode && config_proxy != null && config_proxy.bypass_enable) begin
+                    if (dpi_type == BV_TLP_CFGRD0 || dpi_type == BV_TLP_CFGRD1) begin
+                        bit [31:0] cfg_data;
+                        int dw_addr = int'(dpi_addr) >> 2;
+                        if (config_proxy.handle_cfg_read_bdf(target_bdf, dw_addr, cfg_data)) begin
+                            for (int i = 0; i < 16; i++)
+                                bridge_vcs_set_cpl_data(i, 0);
+                            bridge_vcs_set_cpl_data(0, cfg_data);
+                            ret = bridge_vcs_send_cpl_scalar(dpi_tag, 1);
+                            `uvm_info(get_name(), $sformatf(
+                                "CfgRd BYPASS(MF): bdf=0x%04h addr=0x%03h dw[%0d]=0x%08h tag=%0d",
+                                target_bdf, dpi_addr, dw_addr, cfg_data, dpi_tag), UVM_MEDIUM)
+                            total_tlp_count++;
+                            @(posedge cpl_vif.clk);
+                            continue;
+                        end
+                    end
+                    if (dpi_type == BV_TLP_CFGWR0 || dpi_type == BV_TLP_CFGWR1) begin
+                        int dw_addr = int'(dpi_addr) >> 2;
+                        int byte_off = int'(dpi_addr) & 3;
+                        bit [31:0] wr_data = dpi_data[0];
+                        if (config_proxy.handle_cfg_write_bdf(target_bdf, dw_addr, wr_data, byte_off, dpi_len)) begin
+                            `uvm_info(get_name(), $sformatf(
+                                "CfgWr BYPASS(MF): bdf=0x%04h addr=0x%03h dw[%0d]=0x%08h tag=%0d (no cpl)",
+                                target_bdf, dpi_addr, dw_addr, wr_data, dpi_tag), UVM_MEDIUM)
+                            total_tlp_count++;
+                            #1;
+                            continue;
+                        end
+                    end
+                end
+            end
 
             // Config Space Bypass: CfgRd/CfgWr 由 proxy 直接回 completion，不进 VIP pipeline
             if (config_proxy != null && config_proxy.bypass_enable) begin
@@ -433,6 +480,45 @@ class cosim_rc_driver extends pcie_tl_rc_driver;
         @(shutdown_event);
         `uvm_info(get_name(), "dma_msi_loop: shutdown received, exiting", UVM_MEDIUM)
     endtask
+
+    // -----------------------------------------------------------------------
+    // resolve_address (multi-function mode)
+    //   Iterates func_mgr.bdf_lut to match a 64-bit PCIe address against
+    //   BAR ranges.  Returns 1 if matched, with matched_bdf/bar/offset set.
+    // -----------------------------------------------------------------------
+    protected function bit resolve_address(
+        input  longint unsigned addr,
+        output bit [15:0]       matched_bdf,
+        output int              matched_bar,
+        output longint unsigned bar_offset
+    );
+        pcie_tl_func_context ctx;
+        bit [15:0] bdf;
+
+        matched_bdf = 16'h0;
+        matched_bar = 0;
+        bar_offset  = addr;
+
+        if (func_mgr == null) return 0;
+
+        if (func_mgr.bdf_lut.first(bdf)) begin
+            do begin
+                ctx = func_mgr.bdf_lut[bdf];
+                for (int i = 0; i < 6; i++) begin
+                    if (ctx.bar_enable[i] && ctx.bar_size[i] != 0) begin
+                        if (addr >= ctx.bar_base[i] &&
+                            addr < (ctx.bar_base[i] + ctx.bar_size[i])) begin
+                            matched_bdf = bdf;
+                            matched_bar = i;
+                            bar_offset  = addr - ctx.bar_base[i];
+                            return 1;
+                        end
+                    end
+                end
+            end while (func_mgr.bdf_lut.next(bdf));
+        end
+        return 0;
+    endfunction
 
     // -----------------------------------------------------------------------
     // build_vip_tlp

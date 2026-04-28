@@ -3,6 +3,18 @@
 //-----------------------------------------------------------------------------
 
 //=============================================================================
+// DPI-C imports for topology export (must be at file/package scope)
+//=============================================================================
+import "DPI-C" function void bridge_vcs_set_pf_topology(
+    input int pf_idx, input int bdf, input int num_vfs, input int vf_device_id,
+    input int vendor_id, input int device_id, input int msix_vectors, input int vf_msix_vectors,
+    input longint unsigned pf_bar0, input longint unsigned pf_bar1, input longint unsigned pf_bar2,
+    input longint unsigned pf_bar3, input longint unsigned pf_bar4, input longint unsigned pf_bar5,
+    input longint unsigned vf_bar0, input longint unsigned vf_bar1, input longint unsigned vf_bar2,
+    input longint unsigned vf_bar3, input longint unsigned vf_bar4, input longint unsigned vf_bar5);
+import "DPI-C" function void bridge_vcs_finalize_topology(input int num_pfs, input int tag_width);
+
+//=============================================================================
 // Per-function context: holds BDF, config space, and BAR state
 //=============================================================================
 class pcie_tl_func_context extends uvm_object;
@@ -22,6 +34,7 @@ class pcie_tl_func_context extends uvm_object;
     bit [63:0] bar_base[6];
     bit [63:0] bar_size[6];
     bit        bar_enable[6];
+    bit        bar_sizing[6];   // BAR sizing state per BAR register
 
     //--- Bus Master Enable (mirrors Command register bit 2) ---
     bit        bus_master_en;
@@ -68,6 +81,11 @@ class pcie_tl_func_manager extends uvm_object;
     bit [15:0] vf_device_id   = 16'h1235;
     bit [7:0]  pf_base_bus    = 8'h01;
     bit [4:0]  pf_base_dev    = 5'h00;
+
+    //--- MSI-X and tag configuration ---
+    int        pf_msix_vectors = 64;
+    int        vf_msix_vectors = 8;
+    int        tag_width = 1;  // 0=5bit, 1=8bit, 2=10bit
 
     //--- Context arrays ---
     pcie_tl_func_context  pf_ctx[];
@@ -240,6 +258,24 @@ class pcie_tl_func_manager extends uvm_object;
             end
         end
         return count;
+    endfunction
+
+    //=========================================================================
+    // Export topology to C bridge via DPI-C (called once after build)
+    //=========================================================================
+    function void export_topology_to_bridge();
+        for (int pf = 0; pf < num_pfs; pf++) begin
+            bridge_vcs_set_pf_topology(
+                pf, pf_ctx[pf].bdf, max_vfs_per_pf, vf_device_id,
+                vendor_id, device_id, pf_msix_vectors, vf_msix_vectors,
+                pf_ctx[pf].bar_size[0], pf_ctx[pf].bar_size[1],
+                pf_ctx[pf].bar_size[2], pf_ctx[pf].bar_size[3],
+                pf_ctx[pf].bar_size[4], pf_ctx[pf].bar_size[5],
+                sriov_caps[pf].vf_bar_size[0], sriov_caps[pf].vf_bar_size[1],
+                sriov_caps[pf].vf_bar_size[2], sriov_caps[pf].vf_bar_size[3],
+                sriov_caps[pf].vf_bar_size[4], sriov_caps[pf].vf_bar_size[5]);
+        end
+        bridge_vcs_finalize_topology(num_pfs, tag_width);
     endfunction
 
 endclass
