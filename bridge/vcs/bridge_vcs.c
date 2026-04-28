@@ -3,6 +3,7 @@
  */
 #include "shm_layout.h"
 #include "cosim_types.h"
+#include "cosim_topology.h"
 #include "cosim_transport.h"
 #include "../qemu/sock_sync.h"
 #include <string.h>
@@ -13,6 +14,10 @@ static cosim_shm_t g_shm;
 static int g_sock_fd = -1;
 static int g_initialized = 0;
 static cosim_transport_t *g_transport = NULL;
+
+/* P3: Topology state (populated by SV testbench via DPI-C before simulation) */
+static topology_resp_t g_topology;
+static int g_topology_ready = 0;
 
 /* Counter for TLP_READY messages consumed during DMA waits (SHM mode only). */
 static int g_pending_tlp_ready = 0;
@@ -75,6 +80,120 @@ int bridge_vcs_init(const char *shm_name, const char *sock_path) {
     return 0;
 }
 
+/* ========== P3: Topology DPI-C functions ========== */
+
+/* DPI-C: Set topology for one PF (called from SV testbench during init) */
+void bridge_vcs_set_pf_topology(int pf_idx,
+                                 int bdf, int num_vfs, int vf_device_id,
+                                 int vendor_id, int device_id,
+                                 int msix_vectors, int vf_msix_vectors,
+                                 unsigned long long pf_bar0, unsigned long long pf_bar1,
+                                 unsigned long long pf_bar2, unsigned long long pf_bar3,
+                                 unsigned long long pf_bar4, unsigned long long pf_bar5,
+                                 unsigned long long vf_bar0, unsigned long long vf_bar1,
+                                 unsigned long long vf_bar2, unsigned long long vf_bar3,
+                                 unsigned long long vf_bar4, unsigned long long vf_bar5) {
+    if (pf_idx < 0 || pf_idx >= COSIM_MAX_PFS) {
+        fprintf(stderr, "[VCS Bridge] set_pf_topology: invalid pf_idx=%d\n", pf_idx);
+        return;
+    }
+    pf_topology_t *pf = &g_topology.pfs[pf_idx];
+    memset(pf, 0, sizeof(*pf));
+    pf->bdf             = (uint16_t)bdf;
+    pf->num_vfs         = (uint16_t)num_vfs;
+    pf->vf_device_id    = (uint16_t)vf_device_id;
+    pf->vendor_id       = (uint16_t)vendor_id;
+    pf->device_id       = (uint16_t)device_id;
+    pf->msix_vectors    = (uint16_t)msix_vectors;
+    pf->vf_msix_vectors = (uint16_t)vf_msix_vectors;
+    pf->pf_bar_size[0]  = pf_bar0;
+    pf->pf_bar_size[1]  = pf_bar1;
+    pf->pf_bar_size[2]  = pf_bar2;
+    pf->pf_bar_size[3]  = pf_bar3;
+    pf->pf_bar_size[4]  = pf_bar4;
+    pf->pf_bar_size[5]  = pf_bar5;
+    pf->vf_bar_size[0]  = vf_bar0;
+    pf->vf_bar_size[1]  = vf_bar1;
+    pf->vf_bar_size[2]  = vf_bar2;
+    pf->vf_bar_size[3]  = vf_bar3;
+    pf->vf_bar_size[4]  = vf_bar4;
+    pf->vf_bar_size[5]  = vf_bar5;
+    fprintf(stderr, "[VCS Bridge] set_pf_topology: pf[%d] bdf=0x%04x vfs=%d\n",
+            pf_idx, bdf, num_vfs);
+}
+
+/* DPI-C: Finalize topology (marks it ready for queries) */
+void bridge_vcs_finalize_topology(int num_pfs, int tag_width) {
+    g_topology.header.num_pfs  = (uint8_t)num_pfs;
+    g_topology.header.tag_width = (uint8_t)tag_width;
+    memset(g_topology.header.pad, 0, sizeof(g_topology.header.pad));
+    g_topology_ready = 1;
+    fprintf(stderr, "[VCS Bridge] finalize_topology: num_pfs=%d tag_width=%d\n",
+            num_pfs, tag_width);
+}
+
+/* Internal: Handle a QUERY_TOPOLOGY request from QEMU */
+static int bridge_vcs_handle_topology_query(void) {
+    if (!g_topology_ready) {
+        fprintf(stderr, "[VCS Bridge] handle_topology_query: topology not ready\n");
+        return -1;
+    }
+
+    if (g_transport) {
+        /* TCP mode: send sync ack first, then topology payload.
+         * Both go on ctrl_fd; QEMU recv_sync reads the sync header first,
+         * then recv_topology reads the topology header+payload. */
+        sync_msg_t resp = { .type = SYNC_MSG_TOPOLOGY_RESP, .payload = 0 };
+        if (g_transport->send_sync(g_transport, &resp) < 0) {
+            fprintf(stderr, "[VCS Bridge] handle_topology_query: send_sync failed\n");
+            return -1;
+        }
+        if (g_transport->send_topology(g_transport, &g_topology) < 0) {
+            fprintf(stderr, "[VCS Bridge] handle_topology_query: send_topology failed\n");
+            return -1;
+        }
+        return 0;
+    }
+
+    /* SHM mode: write topology to ctrl region, then send sync ack */
+    uint8_t *dst = (uint8_t *)g_shm.ctrl + sizeof(cosim_ctrl_t);
+    memcpy(dst, &g_topology, sizeof(g_topology));
+    sync_msg_t resp = { .type = SYNC_MSG_TOPOLOGY_RESP, .payload = 0 };
+    return sock_sync_send(g_sock_fd, &resp);
+}
+
+/* DPI-C: Send VF event (enable/disable) to QEMU */
+int bridge_vcs_send_vf_event(int event_type, int pf_index, int num_vfs) {
+    vf_event_t ev;
+    memset(&ev, 0, sizeof(ev));
+    ev.event_type = (uint8_t)event_type;
+    ev.pf_index   = (uint8_t)pf_index;
+    ev.num_vfs    = (uint16_t)num_vfs;
+
+    if (g_transport) {
+        if (g_transport->send_vf_event(g_transport, &ev) < 0) return -1;
+        sync_msg_t msg = { .type = SYNC_MSG_VF_EVENT, .payload = 0 };
+        return g_transport->send_sync(g_transport, &msg);
+    }
+
+    /* SHM mode: just send sync with encoded payload */
+    sync_msg_t msg = { .type = SYNC_MSG_VF_EVENT,
+                       .payload = ((uint32_t)event_type) |
+                                  ((uint32_t)pf_index << 8) |
+                                  ((uint32_t)num_vfs << 16) };
+    return sock_sync_send(g_sock_fd, &msg);
+}
+
+/* DPI-C: Get target_bdf from most recently polled TLP */
+int bridge_vcs_get_tlp_target_bdf(void) {
+    return (int)g_last_entry.target_bdf;
+}
+
+/* DPI-C: Get requester_id from most recently polled TLP */
+int bridge_vcs_get_tlp_requester_id(void) {
+    return (int)g_last_entry.requester_id;
+}
+
 /* DPI-C: 轮询请求队列，获取一个 TLP
  * 返回: 0=成功取到, 1=队列空（无新事务）, -1=错误
  */
@@ -105,6 +224,10 @@ int bridge_vcs_poll_tlp(unsigned char *tlp_type, unsigned long long *addr,
             if (ret < 0) return -1;
             if (ret == 1) break;  /* ctrl_fd 为空，drain 完成 */
             if (msg.type == SYNC_MSG_SHUTDOWN) return -1;
+            if (msg.type == SYNC_MSG_QUERY_TOPOLOGY) {
+                bridge_vcs_handle_topology_query();
+                continue;
+            }
             if (msg.type == SYNC_MSG_TLP_READY) {
                 if (g_transport->recv_tlp(g_transport, &entry) == 0)
                     tlp_cache_push(&entry);
@@ -135,6 +258,10 @@ int bridge_vcs_poll_tlp(unsigned char *tlp_type, unsigned long long *addr,
             empty_streak = 0;  /* 收到数据，重置 */
         }
         if (msg.type == SYNC_MSG_SHUTDOWN) return -1;
+        if (msg.type == SYNC_MSG_QUERY_TOPOLOGY) {
+            bridge_vcs_handle_topology_query();
+            return 1;  /* no TLP this iteration, let SV loop re-enter */
+        }
         if (msg.type == SYNC_MSG_TLP_READY) {
             if (g_transport->recv_tlp(g_transport, &entry) < 0) return 1;
             goto return_entry;
@@ -184,6 +311,10 @@ int bridge_vcs_poll_tlp(unsigned char *tlp_type, unsigned long long *addr,
     int ret = sock_sync_recv_timed(g_sock_fd, &msg, 0);
     if (ret < 0) return -1;
     if (ret == 1) return 1;  /* timeout — no TLP, allow RX poll */
+    if (msg.type == SYNC_MSG_QUERY_TOPOLOGY) {
+        bridge_vcs_handle_topology_query();
+        return 1;  /* handled, no TLP this iteration */
+    }
     if (msg.type != SYNC_MSG_TLP_READY) {
         if (msg.type == SYNC_MSG_SHUTDOWN) return -1;
         return 1; /* 非 TLP 消息，返回空 */

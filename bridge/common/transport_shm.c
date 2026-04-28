@@ -143,6 +143,38 @@ static int shm_recv_eth(cosim_transport_t *t, eth_frame_t *frame, uint64_t timeo
     return eth_shm_dequeue(ring, frame);
 }
 
+/* ========== P3: Topology / VF event (SHM: ctrl region + sync socket) ========== */
+
+/* Topology data lives in the ctrl region right after cosim_ctrl_t.
+ * The ctrl region is 4KB, cosim_ctrl_t is ~112 bytes, topology_resp_t is ~900 bytes. */
+#define SHM_TOPOLOGY_OFFSET  sizeof(cosim_ctrl_t)
+
+static int shm_send_topology(cosim_transport_t *t, const topology_resp_t *topo) {
+    transport_shm_priv_t *p = (transport_shm_priv_t *)t->priv;
+    uint8_t *dst = (uint8_t *)p->shm.ctrl + SHM_TOPOLOGY_OFFSET;
+    memcpy(dst, topo, sizeof(*topo));
+    return 0;
+}
+
+static int shm_recv_topology(cosim_transport_t *t, topology_resp_t *topo) {
+    transport_shm_priv_t *p = (transport_shm_priv_t *)t->priv;
+    const uint8_t *src = (const uint8_t *)p->shm.ctrl + SHM_TOPOLOGY_OFFSET;
+    memcpy(topo, src, sizeof(*topo));
+    return 0;
+}
+
+static int shm_send_vf_event(cosim_transport_t *t, const vf_event_t *ev) {
+    (void)t; (void)ev;
+    /* SHM mode: VF events are communicated via sync messages only;
+     * the vf_event_t payload is small enough to encode in sync_msg_t.payload */
+    return 0;
+}
+
+static int shm_recv_vf_event(cosim_transport_t *t, vf_event_t *ev) {
+    (void)t; (void)ev;
+    return 0;
+}
+
 /* ========== 状态查询 ========== */
 
 static int shm_peer_ready(cosim_transport_t *t) {
@@ -262,6 +294,10 @@ cosim_transport_t *transport_shm_create(const transport_cfg_t *cfg) {
     t->recv_msi        = shm_recv_msi;
     t->send_eth        = shm_send_eth;
     t->recv_eth        = shm_recv_eth;
+    t->send_topology   = shm_send_topology;
+    t->recv_topology   = shm_recv_topology;
+    t->send_vf_event   = shm_send_vf_event;
+    t->recv_vf_event   = shm_recv_vf_event;
     t->peer_ready      = shm_peer_ready;
     t->set_ready       = shm_set_ready;
     t->get_shm_base    = shm_get_shm_base;

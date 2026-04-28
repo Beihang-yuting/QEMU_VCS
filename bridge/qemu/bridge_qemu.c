@@ -265,6 +265,72 @@ void bridge_destroy(bridge_ctx_t *ctx) {
     free(ctx);
 }
 
+/* ========== P3: Topology query & BDF-aware TLP ========== */
+
+int bridge_query_topology(bridge_ctx_t *ctx, topology_resp_t *topo) {
+    if (!ctx || !topo) return -1;
+
+    sync_msg_t req_msg = { .type = SYNC_MSG_QUERY_TOPOLOGY, .payload = 0 };
+
+    if (ctx->transport) {
+        /* TCP mode: send query sync, then recv topology response */
+        if (ctx->transport->send_sync(ctx->transport, &req_msg) < 0) {
+            fprintf(stderr, "bridge_query_topology: send_sync failed\n");
+            return -1;
+        }
+        /* Wait for TOPOLOGY_RESP sync ack */
+        sync_msg_t resp;
+        if (ctx->transport->recv_sync(ctx->transport, &resp) < 0) {
+            fprintf(stderr, "bridge_query_topology: recv_sync failed\n");
+            return -1;
+        }
+        if (resp.type != SYNC_MSG_TOPOLOGY_RESP) {
+            fprintf(stderr, "bridge_query_topology: unexpected sync type %d\n", resp.type);
+            return -1;
+        }
+        /* Recv topology payload via transport */
+        if (ctx->transport->recv_topology(ctx->transport, topo) < 0) {
+            fprintf(stderr, "bridge_query_topology: recv_topology failed\n");
+            return -1;
+        }
+        return 0;
+    }
+
+    /* SHM mode: send query via socket, recv ack, then memcpy from ctrl region */
+    if (sock_sync_send(ctx->client_fd, &req_msg) < 0) {
+        fprintf(stderr, "bridge_query_topology: sock_sync_send failed\n");
+        return -1;
+    }
+    sync_msg_t resp;
+    if (sock_sync_recv(ctx->client_fd, &resp) < 0) {
+        fprintf(stderr, "bridge_query_topology: sock_sync_recv failed\n");
+        return -1;
+    }
+    if (resp.type != SYNC_MSG_TOPOLOGY_RESP) {
+        fprintf(stderr, "bridge_query_topology: unexpected sync type %d\n", resp.type);
+        return -1;
+    }
+    /* Read topology from ctrl region (after cosim_ctrl_t) */
+    const uint8_t *src = (const uint8_t *)ctx->shm.ctrl + sizeof(cosim_ctrl_t);
+    memcpy(topo, src, sizeof(*topo));
+    return 0;
+}
+
+int bridge_send_tlp_bdf(bridge_ctx_t *ctx, tlp_entry_t *req,
+                         uint16_t requester_id, uint16_t target_bdf) {
+    req->requester_id = requester_id;
+    req->target_bdf = target_bdf;
+    return bridge_send_tlp(ctx, req);
+}
+
+int bridge_send_tlp_and_wait_bdf(bridge_ctx_t *ctx, tlp_entry_t *req,
+                                  cpl_entry_t *cpl,
+                                  uint16_t requester_id, uint16_t target_bdf) {
+    req->requester_id = requester_id;
+    req->target_bdf = target_bdf;
+    return bridge_send_tlp_and_wait(ctx, req, cpl);
+}
+
 /* ========== Transport-aware API (新增) ========== */
 
 bridge_ctx_t *bridge_init_ex(const transport_cfg_t *cfg) {

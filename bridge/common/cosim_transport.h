@@ -7,6 +7,7 @@
 #define COSIM_TRANSPORT_H
 
 #include "cosim_types.h"
+#include "cosim_topology.h"
 #include "eth_types.h"
 #include <stdint.h>
 
@@ -60,6 +61,12 @@ struct cosim_transport {
     /* ETH 通道 */
     int  (*send_eth)(cosim_transport_t *t, const eth_frame_t *frame);
     int  (*recv_eth)(cosim_transport_t *t, eth_frame_t *frame, uint64_t timeout_ns);
+
+    /* P3: Topology / VF event 通道 */
+    int  (*send_topology)(cosim_transport_t *t, const topology_resp_t *topo);
+    int  (*recv_topology)(cosim_transport_t *t, topology_resp_t *topo);
+    int  (*send_vf_event)(cosim_transport_t *t, const vf_event_t *ev);
+    int  (*recv_vf_event)(cosim_transport_t *t, vf_event_t *ev);
 
     /* 状态查询 */
     int  (*peer_ready)(cosim_transport_t *t);

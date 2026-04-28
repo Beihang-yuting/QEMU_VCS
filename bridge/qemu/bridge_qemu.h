@@ -56,4 +56,14 @@ void bridge_disable_trace(bridge_ctx_t *ctx);
 bridge_ctx_t *bridge_init_ex(const transport_cfg_t *cfg);
 int bridge_connect_ex(bridge_ctx_t *ctx);
 
+/* P3: Topology query — retrieves PF/VF topology from VCS side */
+int bridge_query_topology(bridge_ctx_t *ctx, topology_resp_t *topo);
+
+/* P3: BDF-aware TLP send — sets requester_id and target_bdf before sending */
+int bridge_send_tlp_bdf(bridge_ctx_t *ctx, tlp_entry_t *req,
+                         uint16_t requester_id, uint16_t target_bdf);
+int bridge_send_tlp_and_wait_bdf(bridge_ctx_t *ctx, tlp_entry_t *req,
+                                  cpl_entry_t *cpl,
+                                  uint16_t requester_id, uint16_t target_bdf);
+
 #endif

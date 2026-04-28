@@ -505,6 +505,46 @@ static int tcp_recv_eth(cosim_transport_t *t, eth_frame_t *frame, uint64_t timeo
     return 0;
 }
 
+/* ========== P3: Topology / VF event 通道 ========== */
+
+static int tcp_send_topology(cosim_transport_t *t, const topology_resp_t *topo) {
+    transport_tcp_priv_t *p = (transport_tcp_priv_t *)t->priv;
+    return tcp_send_msg(p->ctrl_fd, TCP_MSG_TOPOLOGY_RESP, topo, sizeof(*topo));
+}
+
+static int tcp_recv_topology(cosim_transport_t *t, topology_resp_t *topo) {
+    transport_tcp_priv_t *p = (transport_tcp_priv_t *)t->priv;
+    tcp_msg_hdr_t hdr;
+    if (tcp_recv_hdr(p->ctrl_fd, &hdr) < 0) return -1;
+    if (hdr.msg_type != TCP_MSG_TOPOLOGY_RESP) {
+        fprintf(stderr, "[tcp] expected TOPOLOGY_RESP, got type=%u\n", hdr.msg_type);
+        return -1;
+    }
+    if (hdr.payload_len != sizeof(*topo)) {
+        fprintf(stderr, "[tcp] topology payload size mismatch: %u vs %zu\n",
+                hdr.payload_len, sizeof(*topo));
+        return -1;
+    }
+    return tcp_recv_all(p->ctrl_fd, topo, sizeof(*topo));
+}
+
+static int tcp_send_vf_event(cosim_transport_t *t, const vf_event_t *ev) {
+    transport_tcp_priv_t *p = (transport_tcp_priv_t *)t->priv;
+    return tcp_send_msg(p->ctrl_fd, TCP_MSG_VF_EVENT, ev, sizeof(*ev));
+}
+
+static int tcp_recv_vf_event(cosim_transport_t *t, vf_event_t *ev) {
+    transport_tcp_priv_t *p = (transport_tcp_priv_t *)t->priv;
+    tcp_msg_hdr_t hdr;
+    if (tcp_recv_hdr(p->ctrl_fd, &hdr) < 0) return -1;
+    if (hdr.msg_type != TCP_MSG_VF_EVENT) {
+        fprintf(stderr, "[tcp] expected VF_EVENT, got type=%u\n", hdr.msg_type);
+        return -1;
+    }
+    if (hdr.payload_len != sizeof(*ev)) return -1;
+    return tcp_recv_all(p->ctrl_fd, ev, sizeof(*ev));
+}
+
 /* ========== 状态查询 ========== */
 
 static int tcp_peer_ready(cosim_transport_t *t) {
@@ -804,6 +844,10 @@ cosim_transport_t *transport_tcp_create(const transport_cfg_t *cfg) {
     t->recv_msi        = tcp_recv_msi;
     t->send_eth        = tcp_send_eth;
     t->recv_eth        = tcp_recv_eth;
+    t->send_topology   = tcp_send_topology;
+    t->recv_topology   = tcp_recv_topology;
+    t->send_vf_event   = tcp_send_vf_event;
+    t->recv_vf_event   = tcp_recv_vf_event;
     t->peer_ready      = tcp_peer_ready;
     t->set_ready       = tcp_set_ready;
     t->get_shm_base    = tcp_get_shm_base;
