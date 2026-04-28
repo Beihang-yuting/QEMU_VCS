@@ -63,6 +63,10 @@ typedef enum {
     SYNC_MSG_MSI          = 6,
     SYNC_MSG_CLOCK_STEP   = 7,
     SYNC_MSG_CLOCK_ACK    = 8,
+    /* P3: Multi-function / SR-IOV topology */
+    SYNC_MSG_QUERY_TOPOLOGY = 0x10,
+    SYNC_MSG_TOPOLOGY_RESP  = 0x11,
+    SYNC_MSG_VF_EVENT       = 0x12,
 } sync_msg_type_t;
 
 typedef struct {
@@ -72,11 +76,15 @@ typedef struct {
 
 typedef struct {
     uint8_t   type;
-    uint8_t   tag;
+    uint8_t   _pad_type;      /* alignment padding (was part of old tag) */
+    uint16_t  tag;            /* 10-bit tag support (was uint8_t) */
     uint16_t  len;
     uint8_t   msg_code;       /* Message code (TLP_MSG) */
     uint8_t   atomic_op_size; /* AtomicOp operand size: 4 or 8 bytes */
     uint16_t  vendor_id;      /* Vendor Defined Message ID */
+    uint16_t  requester_id;   /* PCIe BDF of requester (P3: multi-function) */
+    uint16_t  target_bdf;     /* PCIe BDF of target device (P3: routing) */
+    uint16_t  _pad_bdf;       /* alignment padding */
     uint64_t  addr;
     uint8_t   data[COSIM_TLP_DATA_SIZE];
     uint64_t  dma_offset;
@@ -86,19 +94,20 @@ typedef struct {
     uint8_t   _reserved[6];
 } __attribute__((packed)) tlp_entry_t;
 
-_Static_assert(sizeof(tlp_entry_t) == 104, "tlp_entry_t must be 104 bytes");
+_Static_assert(sizeof(tlp_entry_t) == 112, "tlp_entry_t must be 112 bytes");
 
 typedef struct {
     uint8_t   type;
-    uint8_t   tag;
     uint8_t   status;
-    uint8_t   _pad0;
+    uint16_t  tag;            /* 10-bit tag support (was uint8_t) */
+    uint16_t  requester_id;   /* PCIe BDF of original requester (P3) */
+    uint16_t  completer_id;   /* PCIe BDF of completer (P3) */
     uint32_t  len;
     uint8_t   data[COSIM_TLP_DATA_SIZE];
     uint64_t  timestamp;
 } __attribute__((packed)) cpl_entry_t;
 
-_Static_assert(sizeof(cpl_entry_t) == 80, "cpl_entry_t must be 80 bytes");
+_Static_assert(sizeof(cpl_entry_t) == 84, "cpl_entry_t must be 84 bytes");
 
 /* ========== DMA 请求（VCS 发起，QEMU 处理） ========== */
 typedef enum {
@@ -107,12 +116,14 @@ typedef enum {
 } dma_direction_t;
 
 typedef struct {
+    uint16_t requester_id;    /* PCIe BDF of DMA initiator (P3: multi-function) */
+    uint16_t _pad_rid;
     uint32_t tag;
     uint32_t direction;
     uint64_t host_addr;
     uint32_t len;
     uint32_t dma_offset;
-    uint64_t timestamp;
+    uint32_t timestamp;       /* narrowed from uint64_t to fit requester_id */
 } __attribute__((packed)) dma_req_t;
 
 _Static_assert(sizeof(dma_req_t) == 32, "dma_req_t must be 32 bytes");
@@ -127,7 +138,8 @@ _Static_assert(sizeof(dma_cpl_t) == 16, "dma_cpl_t must be 16 bytes");
 
 /* ========== MSI 事件 ========== */
 typedef struct {
-    uint32_t vector;
+    uint16_t requester_id;    /* PCIe BDF of MSI source (P3: multi-function) */
+    uint16_t vector;          /* MSI-X vector index (narrowed from uint32_t) */
     uint32_t _pad0;
     uint64_t timestamp;
 } __attribute__((packed)) msi_event_t;

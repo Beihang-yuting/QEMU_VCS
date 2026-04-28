@@ -30,6 +30,10 @@ typedef enum {
     TCP_MSG_MSI          = 0x06,
     TCP_MSG_ETH_FRAME    = 0x07,
     TCP_MSG_DMA_DATA     = 0x08,  /* DMA 数据搬运 */
+    /* P3: Multi-function / SR-IOV topology */
+    TCP_MSG_QUERY_TOPOLOGY = 0x10,
+    TCP_MSG_TOPOLOGY_RESP  = 0x11,
+    TCP_MSG_VF_EVENT       = 0x12,
 } tcp_msg_type_t;
 
 /* 消息头 */

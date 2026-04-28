@@ -6,23 +6,23 @@
 #include "cosim_types.h"
 #include "ring_buffer.h"
 
-#define COSIM_SHM_TOTAL_SIZE    (4 * 1024 * 1024)
+#define COSIM_SHM_TOTAL_SIZE    (16 * 1024 * 1024)  /* P3: expanded from 4MB to 16MB */
 #define COSIM_SHM_CTRL_OFFSET   0x00000000
-#define COSIM_SHM_CTRL_SIZE     0x00001000
+#define COSIM_SHM_CTRL_SIZE     0x00001000          /* 4KB */
 #define COSIM_SHM_REQ_OFFSET    0x00001000
-#define COSIM_SHM_REQ_SIZE      0x00040000
-#define COSIM_SHM_CPL_OFFSET    0x00041000
-#define COSIM_SHM_CPL_SIZE      0x00040000
-#define COSIM_SHM_DMA_OFFSET    0x00081000
+#define COSIM_SHM_REQ_SIZE      0x00100000          /* 1MB (P3: expanded from 256KB) */
+#define COSIM_SHM_CPL_OFFSET    0x00101000
+#define COSIM_SHM_CPL_SIZE      0x00100000          /* 1MB (P3: expanded from 256KB) */
+#define COSIM_SHM_DMA_OFFSET    0x00201000
 
-/* P2 新增：DMA 队列 + MSI 队列 + DMA 数据区 */
-#define COSIM_SHM_DMA_REQ_OFFSET    0x00081000
-#define COSIM_SHM_DMA_REQ_SIZE      0x00010000   /* 64KB */
-#define COSIM_SHM_DMA_CPL_OFFSET    0x00091000
-#define COSIM_SHM_DMA_CPL_SIZE      0x00010000   /* 64KB */
-#define COSIM_SHM_MSI_OFFSET        0x000A1000
-#define COSIM_SHM_MSI_SIZE          0x00001000   /* 4KB */
-#define COSIM_SHM_DMA_BUF_OFFSET    0x000A2000
+/* P2 新增：DMA 队列 + MSI 队列 + DMA 数据区 (P3: expanded) */
+#define COSIM_SHM_DMA_REQ_OFFSET    0x00201000
+#define COSIM_SHM_DMA_REQ_SIZE      0x00040000      /* 256KB (P3: expanded from 64KB) */
+#define COSIM_SHM_DMA_CPL_OFFSET    0x00241000
+#define COSIM_SHM_DMA_CPL_SIZE      0x00040000      /* 256KB (P3: expanded from 64KB) */
+#define COSIM_SHM_MSI_OFFSET        0x00281000
+#define COSIM_SHM_MSI_SIZE          0x00010000      /* 64KB (P3: expanded from 4KB) */
+#define COSIM_SHM_DMA_BUF_OFFSET    0x00291000      /* ~13.4MB remaining for DMA data */
 
 typedef struct {
     uint32_t              magic;
