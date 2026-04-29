@@ -207,13 +207,48 @@ const MemoryRegionOps cosim_pf_mmio_ops = {
 
 /* ========== Config Space forwarding ========== */
 
+/* Check if config address falls in QEMU-managed capability region.
+ * Capabilities (MSI-X, PCIe, SR-IOV) are managed by QEMU locally and
+ * must NOT be forwarded to VCS. */
+static bool cosim_pf_addr_is_local(PCIDevice *pci_dev, uint32_t address, int len)
+{
+    /* Status register (0x06): must expose Capabilities List bit from local */
+    /* Capability Pointer (0x34): must come from local QEMU chain */
+    if (address == PCI_CAPABILITY_LIST || address == 0x34 ||
+        address == 0x35 || address == 0x36 || address == 0x37) {
+        return true;
+    }
+
+    /* All standard capability structures (0x40+) are QEMU-managed:
+     * MSI-X, PCIe Endpoint cap, etc. */
+    if (address >= 0x40 && address < PCI_CONFIG_SPACE_SIZE) {
+        return true;
+    }
+
+    /* Extended config space (0x100+): SR-IOV and other extended caps */
+    if (address >= PCI_CONFIG_SPACE_SIZE) {
+        return true;
+    }
+
+    /* Status register: merge locally to ensure Cap bit is visible */
+    if (address <= PCI_STATUS && address + len > PCI_STATUS) {
+        return true;
+    }
+
+    return false;
+}
+
 static uint32_t cosim_pf_config_read(PCIDevice *pci_dev, uint32_t address, int len)
 {
     CosimPCIePF *s = COSIM_PCIE_PF(pci_dev);
     bridge_ctx_t *ctx = (bridge_ctx_t *)s->bridge_ctx;
 
-    if (!ctx) {
-        return pci_default_read_config(pci_dev, address, len);
+    /* Serve QEMU-managed capability regions from local config space */
+    if (!ctx || cosim_pf_addr_is_local(pci_dev, address, len)) {
+        uint32_t val = pci_default_read_config(pci_dev, address, len);
+        PF_DPRINTF(s, "cfg_read addr=0x%02x len=%d -> 0x%x (local)\n",
+                   address, len, val);
+        return val;
     }
 
     uint32_t dword_addr  = address & ~3u;
@@ -268,10 +303,16 @@ static void cosim_pf_config_write(PCIDevice *pci_dev, uint32_t address,
     CosimPCIePF *s = COSIM_PCIE_PF(pci_dev);
     bridge_ctx_t *ctx = (bridge_ctx_t *)s->bridge_ctx;
 
-    /* Always write local config for QEMU framework consistency */
+    /* Always write local config for QEMU framework consistency
+     * (this also triggers pcie_sriov_config_write for VF enable) */
     pci_default_write_config(pci_dev, address, data, len);
 
-    if (!ctx) return;
+    /* Don't forward QEMU-managed capability writes to VCS */
+    if (!ctx || cosim_pf_addr_is_local(pci_dev, address, len)) {
+        PF_DPRINTF(s, "CfgWr addr=0x%02x len=%d data=0x%x (local only)\n",
+                   address, len, data);
+        return;
+    }
 
     uint16_t target_bdf = s->topo ? s->topo->pfs[s->pf_index].bdf : 0;
 
@@ -596,8 +637,18 @@ static void cosim_pcie_pf_realize(PCIDevice *pci_dev, Error **errp)
         }
     }
 
-    /* ======== Step 5: SR-IOV (if available) ======== */
-    if (s->num_vfs > 0) {
+    /* ======== Step 5: PCIe Capability + SR-IOV ======== */
+    /* PCIe Endpoint Capability is required for SR-IOV Extended Capability */
+    int pcie_cap_ret = pcie_endpoint_cap_init(pci_dev, 0x80);
+    if (pcie_cap_ret < 0) {
+        qemu_log("cosim-pf%d: pcie_endpoint_cap_init failed (ret=%d), "
+                 "SR-IOV will not work\n", s->pf_index, pcie_cap_ret);
+    } else {
+        PF_DPRINTF(s, "PCIe Endpoint Capability initialized at 0x%x\n",
+                   pcie_cap_ret);
+    }
+
+    if (s->num_vfs > 0 && pcie_cap_ret >= 0) {
         /* Initialize SR-IOV capability for this PF */
         pcie_sriov_pf_init(pci_dev, COSIM_SRIOV_CAP_OFFSET,
                            TYPE_COSIM_PCIE_VF,
@@ -725,6 +776,7 @@ static void cosim_pcie_pf_exit(PCIDevice *pci_dev)
         pcie_sriov_pf_exit(pci_dev);
     }
 
+    pcie_cap_exit(pci_dev);
     msix_uninit(pci_dev, &s->bars[0], &s->bars[0]);
 }
 

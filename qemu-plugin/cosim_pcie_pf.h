@@ -21,7 +21,7 @@ OBJECT_DECLARE_SIMPLE_TYPE(CosimPCIePF, COSIM_PCIE_PF)
 #define TYPE_COSIM_PCIE_VF "cosim-pcie-vf"
 
 /* SR-IOV capability offset in config space */
-#define COSIM_SRIOV_CAP_OFFSET  0x200
+#define COSIM_SRIOV_CAP_OFFSET  0x100
 #define COSIM_MAX_PF_DEVICES    8
 
 /* MSI-X BH queue entry size */

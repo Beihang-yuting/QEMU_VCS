@@ -20,6 +20,7 @@
 #include "bridge_qemu.h"
 #include "cosim_transport.h"
 #include "hw/pci/pcie_sriov.h"
+#include "hw/pci/pcie.h"
 
 
 #define VF_DPRINTF(s, fmt, ...) do { \
@@ -119,10 +120,8 @@ static void cosim_pcie_vf_realize(PCIDevice *pci_dev, Error **errp)
     CosimPCIePF *pf = s->parent_pf;
     s->debug = pf->debug;
 
-    /* Determine VF index from PCI devfn relative to PF */
-    uint8_t pf_devfn = pf->parent_obj.devfn;
-    uint8_t vf_devfn = pci_dev->devfn;
-    s->vf_index = (vf_devfn > pf_devfn) ? (vf_devfn - pf_devfn - 1) : 0;
+    /* Get VF index from SR-IOV framework */
+    s->vf_index = pcie_sriov_vf_number(pci_dev);
 
     /* Get VF MSI-X count from parent PF's topology */
     s->msix_vectors = pf->vf_msix_vectors;
@@ -141,10 +140,8 @@ static void cosim_pcie_vf_realize(PCIDevice *pci_dev, Error **errp)
 
         memory_region_init_io(&s->bars[i], OBJECT(s), &cosim_pf_mmio_ops,
                               &s->bar_ctx[i], name, sz);
-        pci_register_bar(pci_dev, i,
-                         PCI_BASE_ADDRESS_SPACE_MEMORY |
-                         PCI_BASE_ADDRESS_MEM_TYPE_64,
-                         &s->bars[i]);
+        /* VFs must use pcie_sriov_vf_register_bar (not pci_register_bar) */
+        pcie_sriov_vf_register_bar(pci_dev, i, &s->bars[i]);
         s->num_bars++;
 
         VF_DPRINTF(s, "BAR%d registered, size=0x%lx\n", i, (unsigned long)sz);
@@ -174,8 +171,14 @@ static void cosim_pcie_vf_realize(PCIDevice *pci_dev, Error **errp)
         }
     }
 
-    qemu_log("cosim-vf: VF%d realized (parent PF%d, msix=%d)\n",
-             s->vf_index, pf->pf_index, s->msix_vectors);
+    /* PCIe Endpoint Capability for VF */
+    if (pcie_endpoint_cap_init(pci_dev, 0xa0) < 0) {
+        qemu_log("cosim-vf: VF%d pcie_endpoint_cap_init failed\n",
+                 s->vf_index);
+    }
+
+    qemu_log("cosim-vf: VF%d realized (parent PF%d, vf_bdf=0x%04x, msix=%d)\n",
+             s->vf_index, pf->pf_index, pci_get_bdf(pci_dev), s->msix_vectors);
 }
 
 static void cosim_pcie_vf_exit(PCIDevice *pci_dev)
@@ -185,6 +188,7 @@ static void cosim_pcie_vf_exit(PCIDevice *pci_dev)
     if (s->num_bars > 0) {
         msix_uninit(pci_dev, &s->bars[0], &s->bars[0]);
     }
+    pcie_cap_exit(pci_dev);
 
     qemu_log("cosim-vf: VF%d exited\n", s->vf_index);
 }
