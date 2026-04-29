@@ -1113,6 +1113,21 @@ if [ "$NEED_GUEST" = true ]; then
             warn "bzImage 不存在，请手动准备: ${IMAGES_DIR}/bzImage"
         fi
     fi
+
+    # ---- Ubuntu LTS 内核提取（含 VFIO/RDMA/NVMe-oF 模块）----
+    local UBUNTU_DIR="${PROJECT_DIR}/guest/images/ubuntu"
+    if [ -f "${UBUNTU_DIR}/vmlinuz" ] && [ -f "${UBUNTU_DIR}/rootfs.ext4" ]; then
+        ok "Ubuntu LTS 内核已存在: ${UBUNTU_DIR}/vmlinuz"
+    elif [ "$HAS_INTERNET" = true ]; then
+        header "提取 Ubuntu LTS 内核"
+        mkdir -p "${UBUNTU_DIR}" 2>/dev/null || true
+        "${PROJECT_DIR}/scripts/setup-ubuntu-kernel.sh" "6.8.0-107-generic" || warn "Ubuntu 内核提取失败"
+        if [ -f "${UBUNTU_DIR}/modules.tar.gz" ] && [ -f "${IMAGES_DIR}/rootfs.ext4" ]; then
+            "${PROJECT_DIR}/scripts/inject-modules.sh" ubuntu || warn "Ubuntu 模块注入失败"
+        fi
+    else
+        info "跳过 Ubuntu 内核提取（无网络）"
+    fi
 fi
 
 # ============================================================

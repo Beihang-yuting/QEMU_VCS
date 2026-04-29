@@ -244,9 +244,62 @@ static uint32_t cosim_config_read(PCIDevice *pci_dev, uint32_t address, int len)
         return local_val;
     }
 
-    /* 全部 config space 转发到 VCS（由 VCS bypass proxy 或 DUT RTL 处理）。
-     * QEMU 本地 config[] 仍由 cosim_config_write 的 pci_default_write_config
-     * 维护，供 QEMU PCI 框架内部使用（不影响 Guest 看到的值）。 */
+    /* ---- BDF 缓存过滤 ---- */
+    int bus  = pci_bus_num(pci_get_bus(pci_dev));
+    int dev  = PCI_SLOT(pci_dev->devfn);
+    int func = PCI_FUNC(pci_dev->devfn);
+
+    if (bus < COSIM_MAX_BUS && dev < COSIM_MAX_DEV && func < COSIM_MAX_FUNC) {
+        CosimBdfCacheEntry *entry = &s->bdf_cache[bus][dev][func];
+
+        if (!entry->probed) {
+            /* 首次访问: 主动读 vendor/device ID (offset 0x00) */
+            tlp_entry_t probe_req = {0};
+            probe_req.type     = TLP_CFGRD;
+            probe_req.addr     = 0x00;
+            probe_req.len      = 4;
+            probe_req.first_be = 0xF;
+
+            cpl_entry_t probe_cpl = {0};
+            int probe_ret = bridge_send_tlp_and_wait(ctx, &probe_req, &probe_cpl);
+
+            if (probe_ret < 0) {
+                entry->vendor_id = 0xFFFF;
+            } else {
+                entry->vendor_id = (uint16_t)(probe_cpl.data[0] |
+                                              (probe_cpl.data[1] << 8));
+            }
+            entry->probed = true;
+            entry->valid  = (entry->vendor_id != 0xFFFF);
+
+            COSIM_DPRINTF(s, "BDF %02x:%02x.%x probe: vendor=0x%04x valid=%d\n",
+                    bus, dev, func, entry->vendor_id, entry->valid);
+
+            if (!entry->valid) {
+                return 0xFFFFFFFF;
+            }
+
+            /* 如果内核请求的就是 offset 0x00，直接返回已获取的数据 */
+            if ((address & ~3u) == 0x00) {
+                uint32_t dword = 0;
+                for (int i = 0; i < 4 && i < COSIM_TLP_DATA_SIZE; i++) {
+                    dword |= ((uint32_t)probe_cpl.data[i]) << (i * 8);
+                }
+                uint32_t byte_offset = address & 3u;
+                uint32_t val = dword >> (byte_offset * 8);
+                if (len < 4) {
+                    val &= (1u << (len * 8)) - 1;
+                }
+                return val;
+            }
+        }
+
+        if (!entry->valid) {
+            return 0xFFFFFFFF;
+        }
+    }
+
+    /* 有效设备 — 正常转发 VCS */
     uint32_t dword_addr = address & ~3u;
     uint32_t byte_offset = address & 3u;
 
@@ -292,7 +345,21 @@ static void cosim_config_write(PCIDevice *pci_dev, uint32_t address,
         return;
     }
 
-    /* 同时转发 CfgWr TLP 到 VCS */
+    /* ---- BDF 缓存过滤: 无效设备的 CfgWr 直接丢弃 ---- */
+    int bus  = pci_bus_num(pci_get_bus(pci_dev));
+    int dev  = PCI_SLOT(pci_dev->devfn);
+    int func = PCI_FUNC(pci_dev->devfn);
+
+    if (bus < COSIM_MAX_BUS && dev < COSIM_MAX_DEV && func < COSIM_MAX_FUNC) {
+        CosimBdfCacheEntry *entry = &s->bdf_cache[bus][dev][func];
+        if (!entry->probed || !entry->valid) {
+            COSIM_DPRINTF(s, "BDF %02x:%02x.%x CfgWr dropped (invalid device)\n",
+                    bus, dev, func);
+            return;
+        }
+    }
+
+    /* 有效设备 — 转发 CfgWr TLP 到 VCS */
     tlp_entry_t req = {0};
     req.type = TLP_CFGWR;
     req.addr = address;
@@ -308,7 +375,7 @@ static void cosim_config_write(PCIDevice *pci_dev, uint32_t address,
                       address, data);
     }
 
-    qemu_log_mask(LOG_UNIMP, "cosim: CfgWr addr=0x%02x len=%d data=0x%x\n",
+    COSIM_DPRINTF(s, "CfgWr addr=0x%02x len=%d data=0x%x\n",
                   address, len, data);
 }
 
@@ -379,6 +446,9 @@ static void cosim_pcie_rc_realize(PCIDevice *pci_dev, Error **errp)
 {
     CosimPCIeRC *s = COSIM_PCIE_RC(pci_dev);
     s->num_bars = 0;
+
+    /* 清零 BDF 缓存 */
+    memset(s->bdf_cache, 0, sizeof(s->bdf_cache));
 
     /* ======== 第一步: 建立 Bridge 连接 ======== */
     if (s->transport && strcmp(s->transport, "tcp") == 0) {

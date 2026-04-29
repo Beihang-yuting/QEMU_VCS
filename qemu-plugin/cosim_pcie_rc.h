@@ -17,6 +17,18 @@
 
 #define COSIM_MAX_BARS         6
 
+/* BDF 动态缓存: 首次 CfgRd 探测 vendor ID，缓存结果
+ * 无效 BDF 后续访问直接返回 0xFFFFFFFF，不转发 VCS */
+#define COSIM_MAX_BUS   256
+#define COSIM_MAX_DEV   32
+#define COSIM_MAX_FUNC  8
+
+typedef struct CosimBdfCacheEntry {
+    uint16_t vendor_id;    /* 缓存的 vendor ID */
+    bool     probed;       /* 是否已探测过 */
+    bool     valid;        /* VCS 是否返回了有效设备 */
+} CosimBdfCacheEntry;
+
 #define TYPE_COSIM_PCIE_RC     "cosim-pcie-rc"
 
 OBJECT_DECLARE_SIMPLE_TYPE(CosimPCIeRC, COSIM_PCIE_RC)
@@ -49,6 +61,9 @@ struct CosimPCIeRC {
 
     /* 运行时 debug 开关 -- -device cosim-pcie-rc,...,debug=on */
     bool debug;
+
+    /* BDF 动态缓存 — config space 访问过滤 */
+    CosimBdfCacheEntry bdf_cache[COSIM_MAX_BUS][COSIM_MAX_DEV][COSIM_MAX_FUNC];
 
     /* Bridge 上下文 — 使用 opaque 指针避免在 QEMU 编译环境中引入 bridge 头文件 */
     void *bridge_ctx;
