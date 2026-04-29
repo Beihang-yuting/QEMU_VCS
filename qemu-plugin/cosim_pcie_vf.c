@@ -19,11 +19,8 @@
 /* Bridge API — linked dynamically (same as PF) */
 #include "bridge_qemu.h"
 #include "cosim_transport.h"
-
-/* SR-IOV helper — only available on QEMU builds with SR-IOV support */
-#ifdef CONFIG_PCI_SRIOV
 #include "hw/pci/pcie_sriov.h"
-#endif
+
 
 #define VF_DPRINTF(s, fmt, ...) do { \
     if ((s)->debug) fprintf(stderr, "cosim-vf%d: " fmt, \
@@ -112,23 +109,12 @@ static void cosim_pcie_vf_realize(PCIDevice *pci_dev, Error **errp)
     s->num_bars = 0;
 
     /* Find parent PF via SR-IOV framework */
-#ifdef CONFIG_PCI_SRIOV
     PCIDevice *pf_dev = pcie_sriov_get_pf(pci_dev);
     if (!pf_dev) {
         error_setg(errp, "cosim-vf: cannot find parent PF");
         return;
     }
     s->parent_pf = COSIM_PCIE_PF(pf_dev);
-#else
-    /* Without SR-IOV support, VFs should not be instantiated.
-     * Fallback: try to find PF0 in shared state. */
-    if (g_cosim_shared.num_pfs > 0 && g_cosim_shared.pf_devices[0]) {
-        s->parent_pf = g_cosim_shared.pf_devices[0];
-    } else {
-        error_setg(errp, "cosim-vf: no parent PF available (no SR-IOV)");
-        return;
-    }
-#endif
 
     CosimPCIePF *pf = s->parent_pf;
     s->debug = pf->debug;

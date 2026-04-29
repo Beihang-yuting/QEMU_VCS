@@ -15,6 +15,8 @@
 #include "exec/cpu-common.h"       /* cpu_physical_memory_read/write */
 #include "hw/qdev-properties.h"
 #include "qapi/error.h"
+#include "hw/pci/pcie_sriov.h"
+#include "hw/pci/msi.h"
 
 /* Debug macro: enabled via -device cosim-pcie-pf,...,debug=on */
 #define PF_DPRINTF(s, fmt, ...) do { \
@@ -244,6 +246,16 @@ static uint32_t cosim_pf_config_read(PCIDevice *pci_dev, uint32_t address, int l
     uint32_t val = dword >> (byte_offset * 8);
     if (len < 4) {
         val &= (1u << (len * 8)) - 1;
+    }
+
+    /* Inject multifunction bit into Header Type register for PF0
+     * so the Guest probes function 1..7 on the same slot */
+    if (s->pf_index == 0 && address <= PCI_HEADER_TYPE &&
+        address + len > PCI_HEADER_TYPE) {
+        int byte_pos = PCI_HEADER_TYPE - address;
+        if (g_cosim_shared.num_pfs > 1) {
+            val |= (uint32_t)PCI_HEADER_TYPE_MULTI_FUNCTION << (byte_pos * 8);
+        }
     }
 
     PF_DPRINTF(s, "cfg_read addr=0x%02x len=%d -> 0x%x\n", address, len, val);
@@ -585,7 +597,6 @@ static void cosim_pcie_pf_realize(PCIDevice *pci_dev, Error **errp)
     }
 
     /* ======== Step 5: SR-IOV (if available) ======== */
-#ifdef CONFIG_PCI_SRIOV
     if (s->num_vfs > 0) {
         /* Initialize SR-IOV capability for this PF */
         pcie_sriov_pf_init(pci_dev, COSIM_SRIOV_CAP_OFFSET,
@@ -593,8 +604,8 @@ static void cosim_pcie_pf_realize(PCIDevice *pci_dev, Error **errp)
                            s->vf_device_id,
                            s->num_vfs,    /* initial VFs */
                            s->num_vfs,    /* total VFs */
-                           1,             /* function dependency link */
-                           0);            /* VF offset (auto) */
+                           1,             /* vf_offset */
+                           1);            /* vf_stride */
 
         /* Register VF BARs with SR-IOV framework */
         for (int i = 0; i < 6; i += 2) {
@@ -610,12 +621,6 @@ static void cosim_pcie_pf_realize(PCIDevice *pci_dev, Error **errp)
         PF_DPRINTF(s, "SR-IOV initialized: %d VFs, vf_did=0x%04x\n",
                    s->num_vfs, s->vf_device_id);
     }
-#else
-    if (s->num_vfs > 0) {
-        qemu_log("cosim-pf%d: SR-IOV not available in this QEMU build, "
-                 "%d VFs will not be created\n", s->pf_index, s->num_vfs);
-    }
-#endif
 
     /* ======== Step 6: PF0 starts irq_poller + auto-creates PF1..N ======== */
     if (s->pf_index == 0) {
@@ -643,6 +648,10 @@ static void cosim_pcie_pf_realize(PCIDevice *pci_dev, Error **errp)
         g_cosim_shared.irq_poller = s->irq_poller;
         g_cosim_shared.initialized = true;
 
+        /* Mark PF0 as multifunction so QEMU allows func>0 devices */
+        pci_dev->cap_present |= QEMU_PCI_CAP_MULTIFUNCTION;
+        pci_dev->config[PCI_HEADER_TYPE] |= PCI_HEADER_TYPE_MULTI_FUNCTION;
+
         /* Auto-create PF1..N on the same bus */
         PCIBus *bus = pci_get_bus(pci_dev);
         for (int i = 1; i < g_cosim_shared.num_pfs && i < COSIM_MAX_PF_DEVICES; i++) {
@@ -653,9 +662,9 @@ static void cosim_pcie_pf_realize(PCIDevice *pci_dev, Error **errp)
             /* PF1..N share the bridge; transport properties not needed */
 
             Error *local_err = NULL;
-            /* Use the BDF from topology to pick the right devfn */
-            uint16_t bdf = g_cosim_shared.topo.pfs[i].bdf;
-            int devfn = bdf & 0xFF;  /* low 8 bits = dev:func */
+            /* Place on same slot as PF0, function = i */
+            int slot = PCI_SLOT(pci_dev->devfn);
+            int devfn = PCI_DEVFN(slot, i);
             qdev_prop_set_int32(vdev, "addr", devfn);
 
             if (!qdev_realize_and_unref(vdev, BUS(bus), &local_err)) {
@@ -712,11 +721,9 @@ static void cosim_pcie_pf_exit(PCIDevice *pci_dev)
         g_cosim_shared.pf_devices[s->pf_index] = NULL;
     }
 
-#ifdef CONFIG_PCI_SRIOV
     if (s->num_vfs > 0) {
         pcie_sriov_pf_exit(pci_dev);
     }
-#endif
 
     msix_uninit(pci_dev, &s->bars[0], &s->bars[0]);
 }

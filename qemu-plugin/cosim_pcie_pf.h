@@ -1,19 +1,19 @@
 /* cosim-platform/qemu-plugin/cosim_pcie_pf.h
  * QEMU SR-IOV PF device model for multi-function cosim
  *
- * Note: Uses "hw/pci/pci.h" not "hw/pci/pci_device.h" for QEMU 7.2 compat.
+ * Note: Uses "hw/pci/pci_device.h" not "hw/pci/pci_device.h" for QEMU 7.2 compat.
  * Place in QEMU source tree: qemu/include/hw/net/cosim_pcie_pf.h
  */
 #ifndef COSIM_PCIE_PF_H
 #define COSIM_PCIE_PF_H
 
 #include "qemu/osdep.h"
-#include "hw/pci/pci.h"
+#include "hw/pci/pci_device.h"
 #include "hw/pci/pcie.h"
 #include "hw/pci/msix.h"
 #include "qom/object.h"
 
-#include "cosim_topology.h"
+#include "hw/net/cosim_topology.h"
 
 #define TYPE_COSIM_PCIE_PF "cosim-pcie-pf"
 OBJECT_DECLARE_SIMPLE_TYPE(CosimPCIePF, COSIM_PCIE_PF)

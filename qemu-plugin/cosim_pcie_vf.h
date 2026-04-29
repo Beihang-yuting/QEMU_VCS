@@ -10,12 +10,12 @@
 #define COSIM_PCIE_VF_H
 
 #include "qemu/osdep.h"
-#include "hw/pci/pci.h"
+#include "hw/pci/pci_device.h"
 #include "hw/pci/pcie.h"
 #include "hw/pci/msix.h"
 #include "qom/object.h"
 
-#include "cosim_pcie_pf.h"
+#include "hw/net/cosim_pcie_pf.h"
 
 #define TYPE_COSIM_PCIE_VF "cosim-pcie-vf"
 OBJECT_DECLARE_SIMPLE_TYPE(CosimPCIeVF, COSIM_PCIE_VF)
