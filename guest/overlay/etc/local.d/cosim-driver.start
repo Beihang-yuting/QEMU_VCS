@@ -1,0 +1,18 @@
+#!/bin/sh
+# Load cosim NIC driver at boot (OpenRC local.d)
+if [ -f /etc/cosim/driver.conf ]; then
+    . /etc/cosim/driver.conf
+    case "$mode" in
+        stub|custom)
+            if [ -f "/lib/modules/${ko_name}" ]; then
+                insmod "/lib/modules/${ko_name}" 2>/dev/null
+                echo "[cosim] Loaded driver: ${ko_name}"
+            else
+                echo "[cosim] WARNING: ${ko_name} not found in /lib/modules/"
+            fi
+            ;;
+        none)
+            echo "[cosim] No driver loaded (manual mode)"
+            ;;
+    esac
+fi

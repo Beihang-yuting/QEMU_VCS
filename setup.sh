@@ -91,6 +91,8 @@ USAGE
 SETUP_MODE=""
 GUEST_TYPE=""
 QEMU_SRC_OPT=""
+DRIVER_MODE=""
+CUSTOM_KO=""
 
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -100,6 +102,10 @@ while [ $# -gt 0 ]; do
             GUEST_TYPE="$2"; shift 2 ;;
         --qemu-src)
             QEMU_SRC_OPT="$2"; shift 2 ;;
+        --driver)
+            DRIVER_MODE="$2"; shift 2 ;;
+        --ko)
+            CUSTOM_KO="$2"; shift 2 ;;
         --help|-h)
             usage ;;
         *)
@@ -168,6 +174,31 @@ interactive_menu() {
             esac
         done
         ok "Guest 环境: ${GUEST_TYPE}"
+        echo ""
+
+        # ---- 选择 PF 驱动模式 ----
+        if [ -z "$DRIVER_MODE" ]; then
+            echo -e "${BOLD}[2.5] 选择 PF 驱动模式${NC}"
+            echo ""
+            echo "  1) stub   — 内置 cosim_nic 驱动（默认，快速验证 SR-IOV）"
+            echo "  2) custom — 使用自定义驱动（.ko 文件）"
+            echo "  3) none   — 不加载驱动（手动操作）"
+            echo ""
+            read -rp "请选择 [1]: " driver_choice
+            case "${driver_choice:-1}" in
+                1) DRIVER_MODE="stub" ;;
+                2) DRIVER_MODE="custom"
+                   read -rp "请输入 .ko 文件路径: " CUSTOM_KO
+                   if [ ! -f "$CUSTOM_KO" ]; then
+                       fail "文件不存在: $CUSTOM_KO"
+                       exit 1
+                   fi ;;
+                3) DRIVER_MODE="none" ;;
+                *) DRIVER_MODE="stub" ;;
+            esac
+        fi
+        DRIVER_MODE="${DRIVER_MODE:-stub}"
+        ok "驱动模式: ${DRIVER_MODE}"
         echo ""
 
         # ---- 选择 QEMU 源码来源 ----
