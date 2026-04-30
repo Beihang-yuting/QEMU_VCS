@@ -170,8 +170,13 @@ static void cosim_remove(struct pci_dev *pdev)
 static int cosim_sriov_configure(struct pci_dev *dev, int num_vfs)
 {
 	if (num_vfs > 0) {
+		int ret;
+
 		dev_info(&dev->dev, "Enabling %d VFs\n", num_vfs);
-		return pci_enable_sriov(dev, num_vfs);
+		ret = pci_enable_sriov(dev, num_vfs);
+		if (ret)
+			return ret;
+		return num_vfs;  /* sriov_configure must return count on success */
 	}
 
 	dev_info(&dev->dev, "Disabling VFs\n");
