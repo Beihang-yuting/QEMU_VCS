@@ -649,14 +649,19 @@ static void cosim_pcie_pf_realize(PCIDevice *pci_dev, Error **errp)
     }
 
     if (s->num_vfs > 0 && pcie_cap_ret >= 0) {
-        /* Initialize SR-IOV capability for this PF */
+        /* Initialize SR-IOV capability for this PF.
+         * VF offset/stride must skip over all PF functions to avoid
+         * devfn collisions: PF0..PF(N-1) occupy func 0..(N-1),
+         * so VFs start at func N with stride N for interleaving. */
+        uint16_t npfs = g_cosim_shared.num_pfs > 1
+                      ? g_cosim_shared.num_pfs : 1;
         pcie_sriov_pf_init(pci_dev, COSIM_SRIOV_CAP_OFFSET,
                            TYPE_COSIM_PCIE_VF,
                            s->vf_device_id,
                            s->num_vfs,    /* initial VFs */
                            s->num_vfs,    /* total VFs */
-                           1,             /* vf_offset */
-                           1);            /* vf_stride */
+                           npfs,          /* vf_offset: skip PF functions */
+                           npfs);         /* vf_stride: interleave across PFs */
 
         /* Register VF BARs with SR-IOV framework */
         for (int i = 0; i < 6; i += 2) {

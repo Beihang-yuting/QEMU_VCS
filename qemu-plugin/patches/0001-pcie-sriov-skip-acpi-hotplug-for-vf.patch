@@ -1,0 +1,25 @@
+--- a/hw/acpi/pcihp.c
++++ b/hw/acpi/pcihp.c
+@@ -32,6 +32,7 @@
+ #include "hw/pci/pci_bridge.h"
+ #include "hw/pci/pci_host.h"
+ #include "hw/pci/pcie_port.h"
++#include "hw/pci/pcie_sriov.h"
+ #include "hw/pci-bridge/xio3130_downstream.h"
+ #include "hw/i386/acpi-build.h"
+ #include "hw/acpi/acpi.h"
+@@ -276,6 +277,14 @@
+     /* Only hotplugged devices need the hotplug capability. */
+     if (dev->hotplugged &&
+         acpi_pcihp_get_bsel(pci_get_bus(pdev)) < 0) {
++        /*
++         * SR-IOV VFs are discovered by the guest kernel through the PF's
++         * SR-IOV capability, not via ACPI hotplug events. Allow VF
++         * creation to succeed even on buses without bsel support (Q35 root).
++         */
++        if (pci_is_vf(pdev)) {
++            return;
++        }
+         error_setg(errp, "Unsupported bus. Bus doesn't have property '"
+                    ACPI_PCIHP_PROP_BSEL "' set");
+         return;
