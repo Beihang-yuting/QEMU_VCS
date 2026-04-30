@@ -479,7 +479,7 @@ help:
 	@echo "  ETH_SHM                ETH 共享内存名"
 	@echo "  SIM_TIMEOUT=600000     VCS 超时(ms)"
 	@echo "  VERBOSE=0|1            日志级别（默认 0 安静，1 详细+debug）"
-	@echo "  GUEST_TYPE=alpine|debian  Guest 系统（默认 alpine）"
+	@echo "  GUEST_TYPE=ubuntu|debian  Guest 系统（默认 ubuntu）"
 	@echo "  QEMU= SIMV= KERNEL= ROOTFS=  路径覆盖"
 	@echo ""
 	@echo "IP 地址分配（10.0.0.0/24 网段）:"

@@ -45,8 +45,8 @@ make test   # 需要 cmake >= 3.16, gcc >= 9, pthread/librt
 ### 2. 构建 Guest 系统
 
 ```bash
-# Alpine (推荐，轻量快速)
-./setup.sh --mode local --guest alpine
+# Ubuntu (推荐，6.8 内核 + 完整模块)
+./setup.sh --mode local --guest ubuntu
 
 # Debian (完整工具链，支持 Guest 内编译驱动)
 ./setup.sh --mode local --guest debian
@@ -90,7 +90,7 @@ echo 0 > /sys/bus/pci/devices/0000:00:03.0/sriov_numvfs   # 销毁 VF
 
 自定义驱动模式:
 ```bash
-./setup.sh --mode local --guest alpine --driver custom --ko /path/to/your_nic.ko
+./setup.sh --mode local --guest ubuntu --driver custom --ko /path/to/your_nic.ko
 ```
 
 ---
