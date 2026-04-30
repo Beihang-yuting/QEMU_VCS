@@ -173,6 +173,22 @@ class cosim_rc_driver extends pcie_tl_rc_driver;
             end
 
             if (ret > 0) begin
+                // Check for pending VF event from QEMU before sleeping
+                begin
+                    int vf_ev_type, vf_pf_idx, vf_num;
+                    if (bridge_vcs_poll_vf_event(vf_ev_type, vf_pf_idx, vf_num)) begin
+                        if (vf_ev_type == 0 && func_mgr != null) begin  // VF_EVENT_ENABLE
+                            func_mgr.enable_vfs(vf_pf_idx, vf_num);
+                            `uvm_info(get_name(), $sformatf(
+                                "VF event: ENABLE pf=%0d num_vfs=%0d", vf_pf_idx, vf_num),
+                                UVM_MEDIUM)
+                        end else if (vf_ev_type == 1 && func_mgr != null) begin  // VF_EVENT_DISABLE
+                            func_mgr.disable_vfs(vf_pf_idx);
+                            `uvm_info(get_name(), $sformatf(
+                                "VF event: DISABLE pf=%0d", vf_pf_idx), UVM_MEDIUM)
+                        end
+                    end
+                end
                 // No TLP available yet; wait one polling interval
                 #(polling_interval_ns * 1ns);
                 continue;

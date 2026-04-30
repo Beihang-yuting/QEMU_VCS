@@ -316,6 +316,23 @@ int bridge_query_topology(bridge_ctx_t *ctx, topology_resp_t *topo) {
     return 0;
 }
 
+int bridge_send_vf_event(bridge_ctx_t *ctx, const vf_event_t *ev) {
+    if (!ctx || !ev) return -1;
+
+    /* Encode vf_event in sync_msg payload (same format as bridge_vcs.c) */
+    sync_msg_t msg;
+    msg.type    = SYNC_MSG_VF_EVENT;
+    msg.payload = ((uint32_t)ev->event_type) |
+                  ((uint32_t)ev->pf_index << 8) |
+                  ((uint32_t)ev->num_vfs << 16);
+
+    if (ctx->transport) {
+        return ctx->transport->send_sync(ctx->transport, &msg);
+    }
+
+    return sock_sync_send(ctx->client_fd, &msg);
+}
+
 int bridge_send_tlp_bdf(bridge_ctx_t *ctx, tlp_entry_t *req,
                          uint16_t requester_id, uint16_t target_bdf) {
     req->requester_id = requester_id;

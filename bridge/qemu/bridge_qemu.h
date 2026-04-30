@@ -59,6 +59,9 @@ int bridge_connect_ex(bridge_ctx_t *ctx);
 /* P3: Topology query — retrieves PF/VF topology from VCS side */
 int bridge_query_topology(bridge_ctx_t *ctx, topology_resp_t *topo);
 
+/* P3: Notify VCS of SR-IOV VF enable/disable */
+int bridge_send_vf_event(bridge_ctx_t *ctx, const vf_event_t *ev);
+
 /* P3: BDF-aware TLP send — sets requester_id and target_bdf before sending */
 int bridge_send_tlp_bdf(bridge_ctx_t *ctx, tlp_entry_t *req,
                          uint16_t requester_id, uint16_t target_bdf);

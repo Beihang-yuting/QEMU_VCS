@@ -162,6 +162,7 @@ package cosim_bridge_pkg;
         input longint unsigned vf_bar3, input longint unsigned vf_bar4, input longint unsigned vf_bar5);
     import "DPI-C" function void bridge_vcs_finalize_topology(input int num_pfs, input int tag_width);
     import "DPI-C" function int bridge_vcs_send_vf_event(input int event_type, input int pf_index, input int num_vfs);
+    import "DPI-C" function int bridge_vcs_poll_vf_event(output int event_type, output int pf_index, output int num_vfs);
     import "DPI-C" function int bridge_vcs_get_tlp_target_bdf();
     import "DPI-C" function int bridge_vcs_get_tlp_requester_id();
     import "DPI-C" function void bridge_vcs_set_bar_base_bdf(input int bdf, input int bar_idx, input longint unsigned bar_addr);

@@ -22,6 +22,10 @@ static int g_topology_ready = 0;
 /* Counter for TLP_READY messages consumed during DMA waits (SHM mode only). */
 static int g_pending_tlp_ready = 0;
 
+/* Pending VF event from QEMU (set by poll_tlp when VF_EVENT sync arrives) */
+static int g_vf_event_pending = 0;
+static vf_event_t g_vf_event;
+
 /* TLP cache: TCP 模式 DMA read 期间消费的 TLP_READY 会立即 recv_tlp 缓存在此，
  * poll_tlp 优先从缓存读取，避免 pending 计数与 data channel 错位。 */
 #define TLP_CACHE_SIZE 1024
@@ -194,6 +198,18 @@ int bridge_vcs_get_tlp_requester_id(void) {
     return (int)g_last_entry.requester_id;
 }
 
+/* DPI-C: Check for pending VF event from QEMU.
+ * Returns 1 if an event is pending, 0 otherwise.
+ * event_type, pf_index, num_vfs are output parameters. */
+int bridge_vcs_poll_vf_event(int *event_type, int *pf_index, int *num_vfs) {
+    if (!g_vf_event_pending) return 0;
+    *event_type = g_vf_event.event_type;
+    *pf_index   = g_vf_event.pf_index;
+    *num_vfs    = g_vf_event.num_vfs;
+    g_vf_event_pending = 0;
+    return 1;
+}
+
 /* DPI-C: 轮询请求队列，获取一个 TLP
  * 返回: 0=成功取到, 1=队列空（无新事务）, -1=错误
  */
@@ -233,6 +249,13 @@ int bridge_vcs_poll_tlp(unsigned char *tlp_type, unsigned long long *addr,
                     tlp_cache_push(&entry);
                 continue;
             }
+            if (msg.type == SYNC_MSG_VF_EVENT) {
+                g_vf_event.event_type = (uint8_t)(msg.payload & 0xFF);
+                g_vf_event.pf_index   = (uint8_t)((msg.payload >> 8) & 0xFF);
+                g_vf_event.num_vfs    = (uint16_t)((msg.payload >> 16) & 0xFFFF);
+                g_vf_event_pending = 1;
+                continue;
+            }
             /* 非 TLP_READY 消息在 poll 中不应出现，记录并跳过 */
             fprintf(stderr, "[VCS poll] unexpected msg.type=%d in drain, discarding\n", msg.type);
         }
@@ -261,6 +284,13 @@ int bridge_vcs_poll_tlp(unsigned char *tlp_type, unsigned long long *addr,
         if (msg.type == SYNC_MSG_QUERY_TOPOLOGY) {
             bridge_vcs_handle_topology_query();
             return 1;  /* no TLP this iteration, let SV loop re-enter */
+        }
+        if (msg.type == SYNC_MSG_VF_EVENT) {
+            g_vf_event.event_type = (uint8_t)(msg.payload & 0xFF);
+            g_vf_event.pf_index   = (uint8_t)((msg.payload >> 8) & 0xFF);
+            g_vf_event.num_vfs    = (uint16_t)((msg.payload >> 16) & 0xFFFF);
+            g_vf_event_pending = 1;
+            return 1;
         }
         if (msg.type == SYNC_MSG_TLP_READY) {
             if (g_transport->recv_tlp(g_transport, &entry) < 0) return 1;
@@ -315,8 +345,15 @@ int bridge_vcs_poll_tlp(unsigned char *tlp_type, unsigned long long *addr,
         bridge_vcs_handle_topology_query();
         return 1;  /* handled, no TLP this iteration */
     }
+    if (msg.type == SYNC_MSG_SHUTDOWN) return -1;
+    if (msg.type == SYNC_MSG_VF_EVENT) {
+        g_vf_event.event_type = (uint8_t)(msg.payload & 0xFF);
+        g_vf_event.pf_index   = (uint8_t)((msg.payload >> 8) & 0xFF);
+        g_vf_event.num_vfs    = (uint16_t)((msg.payload >> 16) & 0xFFFF);
+        g_vf_event_pending = 1;
+        return 1; /* no TLP, but VF event is pending for SV to pick up */
+    }
     if (msg.type != SYNC_MSG_TLP_READY) {
-        if (msg.type == SYNC_MSG_SHUTDOWN) return -1;
         return 1; /* 非 TLP 消息，返回空 */
     }
 

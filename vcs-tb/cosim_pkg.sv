@@ -43,6 +43,7 @@ package cosim_pkg;
     import cosim_bridge_pkg::bridge_vcs_set_pf_topology;
     import cosim_bridge_pkg::bridge_vcs_finalize_topology;
     import cosim_bridge_pkg::bridge_vcs_send_vf_event;
+    import cosim_bridge_pkg::bridge_vcs_poll_vf_event;
     import cosim_bridge_pkg::bridge_vcs_set_bar_base_bdf;
 `ifdef COSIM_VIP_MODE
     import cosim_bridge_pkg::bridge_vcs_poll_tlp_ext;

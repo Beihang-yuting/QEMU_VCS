@@ -307,6 +307,33 @@ static void cosim_pf_config_write(PCIDevice *pci_dev, uint32_t address,
      * (this also triggers pcie_sriov_config_write for VF enable) */
     pci_default_write_config(pci_dev, address, data, len);
 
+    /* Detect SR-IOV VF Enable change and notify VCS via vf_event.
+     * SR-IOV Control is at SRIOV_CAP_OFFSET + PCI_SRIOV_CTRL (0x108).
+     * After pci_default_write_config → pcie_sriov_config_write creates/
+     * destroys VFs locally, we must tell VCS to enable/disable VF BDFs
+     * in its func_manager so CfgRd/CfgWr to VF BDFs are routed correctly. */
+    if (ctx && s->num_vfs > 0 &&
+        address == COSIM_SRIOV_CAP_OFFSET + PCI_SRIOV_CTRL && len == 2) {
+        bridge_ctx_t *bctx = (bridge_ctx_t *)ctx;
+        uint16_t num_vfs_active = pci_dev->exp.sriov_pf.num_vfs;
+        vf_event_t ev;
+
+        if ((data & PCI_SRIOV_CTRL_VFE) && num_vfs_active > 0) {
+            ev.event_type = VF_EVENT_ENABLE;
+            ev.pf_index   = s->pf_index;
+            ev.num_vfs    = num_vfs_active;
+        } else {
+            ev.event_type = VF_EVENT_DISABLE;
+            ev.pf_index   = s->pf_index;
+            ev.num_vfs    = 0;
+        }
+
+        bridge_send_vf_event(bctx, &ev);
+        PF_DPRINTF(s, "SR-IOV vf_event: type=%s pf=%d num_vfs=%d\n",
+                   ev.event_type == VF_EVENT_ENABLE ? "ENABLE" : "DISABLE",
+                   ev.pf_index, ev.num_vfs);
+    }
+
     /* Don't forward QEMU-managed capability writes to VCS */
     if (!ctx || cosim_pf_addr_is_local(pci_dev, address, len)) {
         PF_DPRINTF(s, "CfgWr addr=0x%02x len=%d data=0x%x (local only)\n",
