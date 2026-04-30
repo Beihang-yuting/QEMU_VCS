@@ -23,7 +23,7 @@ RUN_DIR       := $(PROJECT_DIR)/run
 QEMU          ?= $(firstword $(wildcard $(PROJECT_DIR)/third_party/qemu/build/qemu-system-x86_64) \
                               $(wildcard $(HOME)/workspace/qemu-9.2.0/build/qemu-system-x86_64))
 SIMV          ?= $(VCS_SIM_DIR)/simv_vip
-GUEST_TYPE    ?= alpine
+GUEST_TYPE    ?= ubuntu
 # 镜像路径: guest/images/<GUEST_TYPE>/
 KERNEL        ?= $(firstword $(wildcard $(PROJECT_DIR)/guest/images/$(GUEST_TYPE)/bzImage) \
                               $(wildcard $(PROJECT_DIR)/guest/images/$(GUEST_TYPE)/vmlinuz))

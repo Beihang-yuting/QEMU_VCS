@@ -1198,6 +1198,33 @@ if [ "$NEED_GUEST" = true ]; then
 fi
 
 # ============================================================
+# [步骤] 编译并注入 cosim_nic 驱动
+# ============================================================
+if [ "$NEED_GUEST" = true ] && [ "$DRIVER_MODE" = "stub" ]; then
+    next_step "编译 cosim_nic 驱动"
+
+    if [ -f "${IMAGES_DIR}/rootfs.ext4" ]; then
+        if "${PROJECT_DIR}/scripts/build_cosim_nic.sh" "${GUEST_TYPE}"; then
+            ok "cosim_nic.ko 编译并注入成功"
+            PASS_COUNT=$((PASS_COUNT + 1))
+        else
+            warn "cosim_nic.ko 自动化失败，可手动执行:"
+            warn "  ./scripts/build_cosim_nic.sh ${GUEST_TYPE}"
+            SKIP_COUNT=$((SKIP_COUNT + 1))
+        fi
+    else
+        info "跳过驱动编译（Guest 镜像不存在）"
+        SKIP_COUNT=$((SKIP_COUNT + 1))
+    fi
+elif [ "$NEED_GUEST" = true ] && [ "$DRIVER_MODE" = "custom" ] && [ -n "$CUSTOM_KO" ]; then
+    next_step "注入自定义驱动"
+
+    info "注入自定义驱动: ${CUSTOM_KO}"
+    COSIM_NIC_KO="$CUSTOM_KO" "${PROJECT_DIR}/scripts/build_cosim_nic.sh" "${GUEST_TYPE}" --inject-only 2>/dev/null || \
+        warn "自定义驱动注入失败，请手动将 ${CUSTOM_KO} 放入 Guest /lib/modules/"
+fi
+
+# ============================================================
 # [步骤] 运行单元测试
 # ============================================================
 if [ "$SETUP_MODE" = "local" ]; then
