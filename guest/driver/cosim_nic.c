@@ -37,9 +37,35 @@ struct cosim_nic {
 	struct net_device *netdev;
 	void __iomem    *bar0;
 	bool             is_vf;
+	struct list_head  sw_list;  /* software switch port list */
 };
 
 static int cosim_sriov_configure(struct pci_dev *dev, int num_vfs);
+
+/* ========== Software switch (all cosim_nic ports) ========== */
+
+static LIST_HEAD(cosim_sw_ports);
+static DEFINE_SPINLOCK(cosim_sw_lock);
+
+static struct net_device *cosim_sw_lookup_dst(const unsigned char *dmac,
+					      struct net_device *src)
+{
+	struct cosim_nic *p;
+
+	/* Broadcast/multicast: pick first port that isn't src */
+	if (is_multicast_ether_addr(dmac)) {
+		list_for_each_entry(p, &cosim_sw_ports, sw_list)
+			if (p->netdev != src && netif_running(p->netdev))
+				return p->netdev;
+		return NULL;
+	}
+
+	/* Unicast: match destination MAC */
+	list_for_each_entry(p, &cosim_sw_ports, sw_list)
+		if (p->netdev != src && ether_addr_equal(p->netdev->dev_addr, dmac))
+			return p->netdev;
+	return NULL;
+}
 
 /* ========== Net device ops ========== */
 
@@ -57,10 +83,48 @@ static int cosim_stop(struct net_device *ndev)
 
 static netdev_tx_t cosim_xmit(struct sk_buff *skb, struct net_device *ndev)
 {
-	/* Stub: drop packet, count stats.
-	 * ETH SHM data-plane integration is a future enhancement. */
+	struct net_device *dst;
+	struct sk_buff *nskb;
+
 	ndev->stats.tx_packets++;
 	ndev->stats.tx_bytes += skb->len;
+
+	/* Software switch: forward to destination port by MAC lookup */
+	spin_lock(&cosim_sw_lock);
+	dst = cosim_sw_lookup_dst(eth_hdr(skb)->h_dest, ndev);
+	if (dst) {
+		nskb = skb_clone(skb, GFP_ATOMIC);
+		if (nskb) {
+			nskb->dev = dst;
+			nskb->protocol = eth_type_trans(nskb, dst);
+			nskb->ip_summed = CHECKSUM_UNNECESSARY;
+			dst->stats.rx_packets++;
+			dst->stats.rx_bytes += nskb->len;
+			spin_unlock(&cosim_sw_lock);
+			netif_rx(nskb);
+		} else {
+			spin_unlock(&cosim_sw_lock);
+		}
+	} else {
+		/* Broadcast: flood to all other ports */
+		struct cosim_nic *p;
+
+		list_for_each_entry(p, &cosim_sw_ports, sw_list) {
+			if (p->netdev == ndev || !netif_running(p->netdev))
+				continue;
+			nskb = skb_clone(skb, GFP_ATOMIC);
+			if (!nskb)
+				continue;
+			nskb->dev = p->netdev;
+			nskb->protocol = eth_type_trans(nskb, p->netdev);
+			nskb->ip_summed = CHECKSUM_UNNECESSARY;
+			p->netdev->stats.rx_packets++;
+			p->netdev->stats.rx_bytes += nskb->len;
+			netif_rx(nskb);
+		}
+		spin_unlock(&cosim_sw_lock);
+	}
+
 	dev_kfree_skb_any(skb);
 	return NETDEV_TX_OK;
 }
@@ -129,6 +193,11 @@ static int cosim_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 
 	pci_set_drvdata(pdev, priv);
 
+	/* Register in software switch port list */
+	spin_lock(&cosim_sw_lock);
+	list_add_tail(&priv->sw_list, &cosim_sw_ports);
+	spin_unlock(&cosim_sw_lock);
+
 	dev_info(&pdev->dev, "%s: %s %s (BDF %04x:%02x:%02x.%x)\n",
 		 ndev->name, is_vf ? "VF" : "PF", DRV_NAME,
 		 pci_domain_nr(pdev->bus), pdev->bus->number,
@@ -153,6 +222,11 @@ static void cosim_remove(struct pci_dev *pdev)
 
 	if (!priv)
 		return;
+
+	/* Remove from software switch */
+	spin_lock(&cosim_sw_lock);
+	list_del(&priv->sw_list);
+	spin_unlock(&cosim_sw_lock);
 
 	if (!priv->is_vf && pdev->is_physfn)
 		pci_disable_sriov(pdev);
