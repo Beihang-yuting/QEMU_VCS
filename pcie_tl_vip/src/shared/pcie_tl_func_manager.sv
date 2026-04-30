@@ -141,10 +141,12 @@ class pcie_tl_func_manager extends uvm_object;
             // Create SR-IOV extended capability for this PF
             sriov_caps[pf] = pcie_tl_sriov_cap::type_id::create(
                 $sformatf("sriov_cap_%0d", pf));
-            sriov_caps[pf].pf_bdf       = pf_bdf;
-            sriov_caps[pf].total_vfs    = max_vfs_per_pf;
-            sriov_caps[pf].vf_device_id = vf_dev_id;
-            sriov_caps[pf].offset       = 12'h200;
+            sriov_caps[pf].pf_bdf          = pf_bdf;
+            sriov_caps[pf].total_vfs       = max_vfs_per_pf;
+            sriov_caps[pf].vf_device_id    = vf_dev_id;
+            sriov_caps[pf].first_vf_offset = num_pfs;
+            sriov_caps[pf].vf_stride       = num_pfs;
+            sriov_caps[pf].offset          = 12'h200;
             sriov_caps[pf].build_data();
             pf_ctx[pf].cfg_mgr.register_ext_capability(sriov_caps[pf]);
 

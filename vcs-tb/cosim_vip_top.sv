@@ -151,7 +151,9 @@ module cosim_vip_top;
     end
 
     /* === 波形 dump（默认开启，+NO_WAVE 关闭）===
-     * 输出 FSDB 格式（Verdi 可直接打开），包含完整 TLP 信号 */
+     * 输出 FSDB 格式（Verdi 可直接打开），包含完整 TLP 信号
+     * 编译时需要 FSDB PLI 库；无 Verdi 时用 +define+NO_FSDB 跳过 */
+`ifndef NO_FSDB
     initial begin
         string wave_file;
         if (!$test$plusargs("NO_WAVE")) begin
@@ -164,6 +166,7 @@ module cosim_vip_top;
             $display("[WAVE] Dumping waveform to %s (use +NO_WAVE to disable)", wave_file);
         end
     end
+`endif
 
     /* UVM must start at time 0 — config_db::set + run_test in a zero-delay block.
      * Bridge init is deferred to cosim_test::run_phase (after reset). */
