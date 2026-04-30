@@ -63,8 +63,8 @@ CoSim Platform 安装脚本
   vcs-only    仅 VCS 侧  — 编译 VCS + Bridge，QEMU 在远程机器（TCP 通信）
 
 Guest 环境 (--guest, 仅 local/qemu-only 模式):
-  alpine      Alpine Linux — 轻量快速，apk 包管理（推荐）
-  debian      Debian 精简版 — 完整工具链，apt 包管理
+  ubuntu      Ubuntu LTS — 6.8 内核，VFIO/RDMA/NVMe-oF 完整模块（推荐）
+  debian      Debian 精简版 — 6.1 内核，完整工具链，apt 包管理
   skip        跳过 Guest 构建，手动准备镜像
 
 QEMU 源码 (--qemu-src, 仅 local/qemu-only 模式):
@@ -77,9 +77,9 @@ QEMU 源码 (--qemu-src, 仅 local/qemu-only 模式):
 
 示例:
   ./setup.sh                                          # 交互式菜单
-  ./setup.sh --mode local --guest alpine              # 本地全栈 + Alpine（推荐）
+  ./setup.sh --mode local --guest ubuntu              # 本地全栈 + Ubuntu（推荐）
   ./setup.sh --mode local --guest debian              # 本地全栈 + Debian 完整工具链
-  ./setup.sh --mode qemu-only --guest alpine          # QEMU 侧远程部署
+  ./setup.sh --mode qemu-only --guest ubuntu          # QEMU 侧远程部署
   ./setup.sh --mode vcs-only                          # VCS 侧远程部署
 USAGE
     exit 0
@@ -156,10 +156,10 @@ interactive_menu() {
     if [ "$SETUP_MODE" != "vcs-only" ]; then
         echo -e "${BOLD}[2] 选择 Guest 环境${NC}"
         echo ""
-        echo "  1) Alpine Linux  — 轻量快速，apk 包管理（推荐）"
-        echo "     镜像 ~50MB，启动 ~3 秒"
+        echo "  1) Ubuntu LTS   — 6.8 内核，VFIO/RDMA/NVMe-oF 完整模块（推荐）"
+        echo "     镜像 ~480MB，启动 ~10 秒"
         echo ""
-        echo "  2) Debian 精简版 — 完整工具链，apt 包管理"
+        echo "  2) Debian 精简版 — 6.1 内核，完整工具链，apt 包管理"
         echo "     镜像 ~500MB，启动 ~15 秒"
         echo ""
         echo "  3) 跳过 — 手动准备 rootfs 到 guest/images/"
@@ -167,7 +167,7 @@ interactive_menu() {
         while true; do
             read -rp "请选择 [1/2/3]: " choice
             case "$choice" in
-                1) GUEST_TYPE="alpine"; break ;;
+                1) GUEST_TYPE="ubuntu"; break ;;
                 2) GUEST_TYPE="debian"; break ;;
                 3) GUEST_TYPE="skip"; break ;;
                 *) echo "  无效选择，请输入 1、2 或 3" ;;
@@ -247,14 +247,14 @@ esac
 
 # QEMU 相关模式需要 guest 类型
 if [ "$SETUP_MODE" != "vcs-only" ]; then
-    GUEST_TYPE="${GUEST_TYPE:-alpine}"
+    GUEST_TYPE="${GUEST_TYPE:-ubuntu}"
     QEMU_SRC_OPT="${QEMU_SRC_OPT:-download}"
 
     case "$GUEST_TYPE" in
-        alpine|debian|skip) ;;
+        ubuntu|debian|alpine|skip) ;;
         *)
             fail "无效的 Guest 类型: ${GUEST_TYPE}"
-            fail "可选: alpine, debian, skip"
+            fail "可选: ubuntu, debian, skip"
             exit 1
             ;;
     esac
@@ -343,10 +343,12 @@ BUILD_DIR="${PROJECT_DIR}/build"
 BRIDGE_LIB_DIR="${BUILD_DIR}/bridge"
 VCS_SIM_DIR="${PROJECT_DIR}/vcs-tb/sim_build"
 # IMAGES_DIR 根据 GUEST_TYPE 指向子目录
-if [ "${GUEST_TYPE:-alpine}" = "debian" ]; then
+if [ "${GUEST_TYPE:-ubuntu}" = "debian" ]; then
     IMAGES_DIR="${PROJECT_DIR}/guest/images/debian"
-else
+elif [ "${GUEST_TYPE:-ubuntu}" = "alpine" ]; then
     IMAGES_DIR="${PROJECT_DIR}/guest/images/alpine"
+else
+    IMAGES_DIR="${PROJECT_DIR}/guest/images/ubuntu"
 fi
 
 info "项目目录: ${PROJECT_DIR}"
