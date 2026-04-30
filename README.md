@@ -14,6 +14,11 @@
   - 快速模式：事务级，~1000-10000 事务/秒，适合功能回归
   - 精确模式：周期级锁步，~10-100 事务/秒，适合时序调试
 - **运行时模式切换** + **CSV / JSON 事务追踪日志**
+- **SR-IOV 多 Function 验证**：
+  - 4 PF × 16 VF 动态创建/销毁（标准 `sriov_numvfs` sysfs 接口）
+  - Guest stub 驱动（cosim_nic.ko）自动绑定 PF/VF
+  - 支持自定义驱动切换（`--driver stub/custom/none`）
+  - VF 间软件 switch 数据面（iperf3 ~787 Mbits/sec）
 - POSIX SHM + Unix Domain Socket 低开销 IPC
 
 ---
@@ -65,6 +70,27 @@ cosim-stop           # 退出
 调试模式（显示详细日志）:
 ```bash
 make run-qemu VERBOSE=1
+```
+
+### 4. SR-IOV 多 Function 验证
+
+```bash
+# 终端 A：启 QEMU（4 PF，每 PF 最多 16 VF）
+make run-qemu NUM_PFS=4 MAX_VFS=16
+
+# 终端 B：启 VCS
+make run-vcs NUM_PFS=4 MAX_VFS=16
+
+# Guest 内操作:
+insmod /lib/modules/cosim_nic.ko          # 加载驱动（4 PF 自动绑定）
+echo 4 > /sys/bus/pci/devices/0000:00:03.0/sriov_numvfs   # 创建 4 VF
+lspci | grep Vada                         # 查看 PF + VF
+echo 0 > /sys/bus/pci/devices/0000:00:03.0/sriov_numvfs   # 销毁 VF
+```
+
+自定义驱动模式:
+```bash
+./setup.sh --mode local --guest alpine --driver custom --ko /path/to/your_nic.ko
 ```
 
 ---

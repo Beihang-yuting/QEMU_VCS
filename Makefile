@@ -165,10 +165,17 @@ endif
 # 运行时库路径（确保源码编译的 glib 等库可被找到）
 _QEMU_LD_PATH = LD_LIBRARY_PATH=/usr/local/lib:/usr/local/lib/x86_64-linux-gnu:$(BRIDGE_LIB_DIR):$${LD_LIBRARY_PATH:-}
 
-ifeq ($(TRANSPORT),tcp)
-  _QEMU_DEV = cosim-pcie-rc,transport=tcp,port_base=$(PORT_BASE),instance_id=$(INSTANCE_ID)$(_COSIM_DEBUG)
+# 设备模型选择: NUM_PFS>1 使用 cosim-pcie-pf (多 Function SR-IOV)，否则 cosim-pcie-rc (单设备)
+ifeq ($(shell test $(NUM_PFS) -gt 1 && echo yes),yes)
+  _COSIM_DEV_TYPE = cosim-pcie-pf
 else
-  _QEMU_DEV = cosim-pcie-rc,shm_name=$(SHM_NAME),sock_path=$(SOCK_PATH)$(_COSIM_DEBUG)
+  _COSIM_DEV_TYPE = cosim-pcie-rc
+endif
+
+ifeq ($(TRANSPORT),tcp)
+  _QEMU_DEV = $(_COSIM_DEV_TYPE),transport=tcp,port_base=$(PORT_BASE),instance_id=$(INSTANCE_ID)$(_COSIM_DEBUG)
+else
+  _QEMU_DEV = $(_COSIM_DEV_TYPE),shm_name=$(SHM_NAME),sock_path=$(SOCK_PATH)$(_COSIM_DEBUG)
 endif
 
 ifneq ($(ROOTFS),)
@@ -275,6 +282,7 @@ endif
 	@echo "  MAC: de:ad:be:ef:00:0$(MAC_LAST)  ETH Role: $(ETH_ROLE)"
 	@echo "  日志: $(LOG_DIR)/vcs.log"
 	@echo "============================================"
+	export LM_LICENSE_FILE=$${LM_LICENSE_FILE:-/opt/synopsys/license/license.dat} && \
 	cd $(VCS_SIM_DIR) && ./simv_vip $(_VCS_ARGS) 2>&1 | tee $(LOG_DIR)/vcs.log
 
 # ============================================================
