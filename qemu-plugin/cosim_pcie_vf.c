@@ -40,8 +40,13 @@ static uint32_t cosim_vf_config_read(PCIDevice *pci_dev, uint32_t address,
         return pci_default_read_config(pci_dev, address, len);
     }
 
-    /* VF BDF: compute from PCI bus position */
-    uint16_t vf_bdf = pci_get_bdf(pci_dev);
+    /* VF BDF: map QEMU-side BDF to VCS-side BDF.
+     * VCS expects: PF_BDF + vf_offset + vf_index * vf_stride */
+    CosimPCIePF *pf = s->parent_pf;
+    uint16_t pf_bdf = g_cosim_shared.topo.pfs[pf->pf_index].bdf;
+    uint16_t npfs = g_cosim_shared.num_pfs > 1
+                  ? g_cosim_shared.num_pfs : 1;
+    uint16_t vf_bdf = pf_bdf + npfs + s->vf_index * npfs;
 
     uint32_t dword_addr  = address & ~3u;
     uint32_t byte_offset = address & 3u;
@@ -84,7 +89,12 @@ static void cosim_vf_config_write(PCIDevice *pci_dev, uint32_t address,
 
     if (!ctx) return;
 
-    uint16_t vf_bdf = pci_get_bdf(pci_dev);
+    /* Map to VCS-side VF BDF (same logic as config_read) */
+    CosimPCIePF *pf = s->parent_pf;
+    uint16_t pf_bdf = g_cosim_shared.topo.pfs[pf->pf_index].bdf;
+    uint16_t npfs = g_cosim_shared.num_pfs > 1
+                  ? g_cosim_shared.num_pfs : 1;
+    uint16_t vf_bdf = pf_bdf + npfs + s->vf_index * npfs;
 
     tlp_entry_t req = {0};
     req.type = TLP_CFGWR;
