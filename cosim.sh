@@ -428,7 +428,6 @@ run_single_phase() {
     log_info "启动 QEMU..."
     "$qemu_bin" \
         -M q35 -m "${GUEST_MEMORY}" -smp 1 \
-        -nodefaults -vga none -no-hpet \
         -kernel "$kernel_bin" \
         -initrd "$initrd_bin" \
         -append "$append_str" \
@@ -569,7 +568,6 @@ run_dual_phase() {
     log_info "启动 QEMU1 (Server: $SERVER_IP)..."
     "$qemu_bin" \
         -M q35 -m "${GUEST_MEMORY}" -smp 1 \
-        -nodefaults -vga none -no-hpet \
         -kernel "$kernel_bin" \
         -initrd "$initrd_bin" \
         -append "console=ttyS0 init=/init guest_ip=$SERVER_IP peer_ip=$CLIENT_IP $role_append_server" \
@@ -586,7 +584,6 @@ run_dual_phase() {
     log_info "启动 QEMU2 (Client: $CLIENT_IP)..."
     "$qemu_bin" \
         -M q35 -m "${GUEST_MEMORY}" -smp 1 \
-        -nodefaults -vga none -no-hpet \
         -kernel "$kernel_bin" \
         -initrd "$initrd_bin" \
         -append "console=ttyS0 init=/init guest_ip=$CLIENT_IP peer_ip=$SERVER_IP $role_append_client" \
@@ -756,7 +753,6 @@ run_tap_test() {
     log_info "启动 QEMU (Guest: $GUEST_IP)..."
     "$qemu_bin" \
         -M q35 -m "${GUEST_MEMORY}" -smp 1 \
-        -nodefaults -vga none -no-hpet \
         -kernel "$kernel_bin" \
         -initrd "$initrd_bin" \
         -append "console=ttyS0 init=/init" \
@@ -1072,7 +1068,6 @@ cmd_start_qemu() {
     # ---- 构建 QEMU 命令行 ----
     local QEMU_ARGS=(
         -M q35 -m "${GUEST_MEMORY}" -smp 1
-        -nodefaults -vga none -no-hpet
         -device "$device_arg"
         -no-reboot
     )

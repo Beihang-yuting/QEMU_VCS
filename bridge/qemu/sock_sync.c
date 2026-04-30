@@ -6,7 +6,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <errno.h>
-#include <poll.h>
+#include <fcntl.h>
 
 int sock_sync_listen(const char *path) {
     int fd = socket(AF_UNIX, SOCK_STREAM, 0);
@@ -28,28 +28,38 @@ int sock_sync_listen(const char *path) {
 }
 
 int sock_sync_accept(int listen_fd) {
-    /* poll 循环：每 2 秒检查一次，允许 Ctrl+C (SIGINT) 中断 */
-    struct pollfd pfd = { .fd = listen_fd, .events = POLLIN };
+    /* Non-blocking accept loop: avoids poll()/select() for VCS Q-2020
+     * compatibility on Linux 6.17+ kernels. */
     int printed = 0;
+    /* Set listen socket to non-blocking */
+    int flags = fcntl(listen_fd, F_GETFL, 0);
+    fcntl(listen_fd, F_SETFL, flags | O_NONBLOCK);
+
     while (1) {
-        int ret = poll(&pfd, 1, 2000);
-        if (ret > 0) {
-            int fd = accept(listen_fd, NULL, NULL);
-            if (fd < 0) perror("accept");
-            else fprintf(stderr, "[bridge] VCS connected.\n");
+        int fd = accept(listen_fd, NULL, NULL);
+        if (fd >= 0) {
+            /* Restore blocking mode on listen socket */
+            fcntl(listen_fd, F_SETFL, flags);
+            fprintf(stderr, "[bridge] VCS connected.\n");
             return fd;
         }
-        if (ret < 0) {
-            if (errno == EINTR) return -1;  /* 收到信号，允许退出 */
-            perror("poll");
+        if (errno == EAGAIN || errno == EWOULDBLOCK) {
+            if (!printed) {
+                fprintf(stderr,
+                    "[bridge] Waiting for VCS connection...\n"
+                    "  Please start VCS in another terminal: make run-vcs\n");
+                printed = 1;
+            }
+            usleep(500000);  /* 0.5s between retries */
+            continue;
+        }
+        if (errno == EINTR) {
+            fcntl(listen_fd, F_SETFL, flags);
             return -1;
         }
-        if (!printed) {
-            fprintf(stderr,
-                "[bridge] Waiting for VCS connection...\n"
-                "  Please start VCS in another terminal: make run-vcs\n");
-            printed = 1;
-        }
+        perror("accept");
+        fcntl(listen_fd, F_SETFL, flags);
+        return -1;
     }
 }
 
@@ -88,16 +98,43 @@ int sock_sync_recv(int fd, sync_msg_t *msg) {
 }
 
 /* Non-blocking recv with timeout (milliseconds).
- * Returns: 0=success, 1=timeout (no data), -1=error */
+ * Returns: 0=success, 1=timeout (no data), -1=error
+ *
+ * NOTE: Avoids poll()/select() — VCS Q-2020 runtime segfaults when
+ * these syscalls are active on Linux 6.17+ kernels. Uses non-blocking
+ * recv() with MSG_DONTWAIT + usleep spin instead. */
 int sock_sync_recv_timed(int fd, sync_msg_t *msg, int timeout_ms) {
-    struct pollfd pfd = { .fd = fd, .events = POLLIN };
-    int ret = poll(&pfd, 1, timeout_ms);
-    if (ret < 0) {
-        perror("sock_sync_recv_timed: poll");
+    int elapsed_us = 0;
+    int limit_us = timeout_ms * 1000;
+    int spin_us = (timeout_ms == 0) ? 0 : 500;  /* 0.5ms spin interval */
+
+    for (;;) {
+        ssize_t n = recv(fd, msg, sizeof(*msg), MSG_DONTWAIT);
+        if (n == (ssize_t)sizeof(*msg)) return 0;  /* success */
+        if (n == 0) {
+            fprintf(stderr, "sock_sync_recv_timed: connection closed\n");
+            return -1;
+        }
+        if (n < 0) {
+            if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                /* No data available */
+                if (elapsed_us >= limit_us) return 1;  /* timeout */
+                if (spin_us > 0) {
+                    usleep(spin_us);
+                    elapsed_us += spin_us;
+                } else {
+                    return 1;  /* timeout_ms == 0, immediate return */
+                }
+                continue;
+            }
+            perror("sock_sync_recv_timed: recv");
+            return -1;
+        }
+        /* Partial read — shouldn't happen with SOCK_STREAM + small msg */
+        fprintf(stderr, "sock_sync_recv_timed: partial read %zd/%zu\n",
+                n, sizeof(*msg));
         return -1;
     }
-    if (ret == 0) return 1;  /* timeout */
-    return sock_sync_recv(fd, msg);
 }
 
 void sock_sync_close(int fd) {

@@ -45,26 +45,62 @@ MODDIR="/lib/modules/$KVER"
 if [ -d "$MODDIR" ]; then
     # 静默加载模块
 
-    # 按依赖顺序加载：先核心、再总线、再设备驱动、再文件系统
+    # 辅助函数：尝试 modprobe，失败则 insmod（适配空 modules.dep 场景）
+    try_load() {
+        local mod_path="$1"
+        local name=$(basename "$mod_path" | sed 's/\.ko.*$//')
+        modprobe "$name" 2>/dev/null || insmod "$mod_path" 2>/dev/null || true
+    }
+
+    # 精确依赖顺序加载关键模块（insmod 不解析 modules.dep）
+    # virtio 链: virtio -> virtio_ring -> virtio_pci_modern_dev -> virtio_pci_legacy_dev -> virtio_pci
+    # vfio 链:   vfio -> vfio_iommu_type1 -> vfio_pci_core -> vfio_pci -> mdev
+    ORDERED_MODULES="
+        virtio
+        virtio_ring
+        virtio_pci_modern_dev
+        virtio_pci_legacy_dev
+        virtio_pci
+        virtio_blk
+        virtio_net
+        pci-stub
+        crc16
+        crc32c_generic
+        libcrc32c
+        mbcache
+        jbd2
+        ext4
+        irqbypass
+        vfio
+        vfio_iommu_type1
+        vfio-pci-core
+        vfio-pci
+        mdev
+    "
+    for name in $ORDERED_MODULES; do
+        mod_path=$(find "$MODDIR" -name "${name}.ko*" 2>/dev/null | head -1)
+        if [ -n "$mod_path" ]; then
+            try_load "$mod_path"
+        fi
+    done
+
+    # 加载剩余模块（其他子目录中的非关键模块）
     for subdir in \
-        kernel/drivers/virtio \
-        kernel/drivers/pci \
         kernel/drivers/ata \
         kernel/drivers/scsi \
-        kernel/drivers/block \
         kernel/drivers/nvme \
-        kernel/drivers/net \
         kernel/fs; do
         dir="$MODDIR/$subdir"
         if [ -d "$dir" ]; then
-            find "$dir" -name '*.ko*' | while read mod; do
-                name=$(basename "$mod" | sed 's/\.ko.*$//')
-                modprobe "$name" 2>/dev/null
+            find "$dir" -maxdepth 1 -name '*.ko*' | while read mod; do
+                try_load "$mod"
             done
         fi
     done
 
-    :  # 模块加载完成
+    # 报告已加载的模块
+    LOADED=$(lsmod 2>/dev/null | tail -n +2 | wc -l)
+    echo "[cosim-init] Loaded $LOADED modules"
 else
     echo "[cosim-init] WARNING: $MODDIR not found, no modules to load"
 fi
@@ -111,6 +147,22 @@ if ! mount -t auto "$ROOT" /sysroot; then
 fi
 
 :  # 挂载成功，切换到真实 root
+
+# ---- 安装 cosim 驱动到真实 root（从 initramfs 复制）----
+if [ -f /lib/modules/cosim_nic.ko ]; then
+    mkdir -p /sysroot/lib/modules
+    cp /lib/modules/cosim_nic.ko /sysroot/lib/modules/ 2>/dev/null
+    echo "[cosim-init] Installed cosim_nic.ko to rootfs"
+fi
+if [ -f /etc/cosim/driver.conf ]; then
+    mkdir -p /sysroot/etc/cosim
+    cp /etc/cosim/driver.conf /sysroot/etc/cosim/ 2>/dev/null
+fi
+if [ -f /etc/local.d/cosim-driver.start ]; then
+    mkdir -p /sysroot/etc/local.d
+    cp /etc/local.d/cosim-driver.start /sysroot/etc/local.d/ 2>/dev/null
+    chmod +x /sysroot/etc/local.d/cosim-driver.start 2>/dev/null
+fi
 
 # 自动探测 init 路径（Alpine=/sbin/init, Debian=/lib/systemd/systemd）
 if [ ! -e "/sysroot${INIT}" ]; then

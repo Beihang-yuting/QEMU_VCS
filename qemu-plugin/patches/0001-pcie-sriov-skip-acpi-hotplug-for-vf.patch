@@ -23,3 +23,12 @@
          error_setg(errp, "Unsupported bus. Bus doesn't have property '"
                     ACPI_PCIHP_PROP_BSEL "' set");
          return;
+@@ -329,6 +338,10 @@
+
+     bsel = acpi_pcihp_get_bsel(bus);
++    /* SR-IOV VFs skip ACPI hotplug notification */
++    if (bsel < 0 && pci_is_vf(pdev)) {
++        return;
++    }
+     g_assert(bsel >= 0);
+     s->acpi_pcihp_pci_status[bsel].up |= (1U << slot);

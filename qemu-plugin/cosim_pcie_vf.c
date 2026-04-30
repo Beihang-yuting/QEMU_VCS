@@ -151,23 +151,30 @@ static void cosim_pcie_vf_realize(PCIDevice *pci_dev, Error **errp)
     pci_set_word(pci_dev->config + PCI_COMMAND,
                  PCI_COMMAND_MEMORY | PCI_COMMAND_MASTER);
 
-    /* MSI-X init for VF */
-    if (s->msix_vectors > 0) {
+    /* MSI-X init for VF — only if BAR0 exists and is large enough */
+    if (s->msix_vectors > 0 && s->num_bars > 0) {
         uint32_t table_size = s->msix_vectors * PCI_MSIX_ENTRY_SIZE;
         uint32_t pba_offset = QEMU_ALIGN_UP(table_size, 0x1000);
+        uint64_t bar0_size = pf->vf_bar_sizes[0];
         int bar_nr = 0;
 
-        Error *msix_err = NULL;
-        int ret = msix_init(pci_dev, s->msix_vectors,
-                            &s->bars[bar_nr], bar_nr, 0,
-                            &s->bars[bar_nr], bar_nr, pba_offset,
-                            0, &msix_err);
-        if (ret < 0) {
-            VF_DPRINTF(s, "msix_init failed: %s\n",
-                       msix_err ? error_get_pretty(msix_err) : "?");
-            error_free(msix_err);
+        if (bar0_size >= pba_offset + 8) {
+            Error *msix_err = NULL;
+            int ret = msix_init(pci_dev, s->msix_vectors,
+                                &s->bars[bar_nr], bar_nr, 0,
+                                &s->bars[bar_nr], bar_nr, pba_offset,
+                                0, &msix_err);
+            if (ret < 0) {
+                VF_DPRINTF(s, "msix_init failed: %s\n",
+                           msix_err ? error_get_pretty(msix_err) : "?");
+                error_free(msix_err);
+            } else {
+                VF_DPRINTF(s, "MSI-X initialized: %d vectors\n",
+                           s->msix_vectors);
+            }
         } else {
-            VF_DPRINTF(s, "MSI-X initialized: %d vectors\n", s->msix_vectors);
+            VF_DPRINTF(s, "VF BAR0 too small for MSI-X (need 0x%x, have 0x%lx)"
+                       ", skipping\n", pba_offset + 8, (unsigned long)bar0_size);
         }
     }
 
