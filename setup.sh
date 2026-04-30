@@ -903,20 +903,55 @@ if [ "$NEED_QEMU" = true ]; then
 
     if [ "$NEED_QEMU" = true ] && [ -d "$QEMU_DIR" ]; then
         # ---- 注入自定义设备代码 ----
-        info "注入 cosim_pcie_rc 设备到 QEMU 源码树..."
+        info "注入 CoSim PCIe 设备到 QEMU 源码树..."
+
+        # RC 设备（单 Function 模式）
         cp "${PROJECT_DIR}/qemu-plugin/cosim_pcie_rc.c" "${QEMU_DIR}/hw/net/"
         cp "${PROJECT_DIR}/qemu-plugin/cosim_pcie_rc.h" "${QEMU_DIR}/include/hw/net/"
+
+        # PF/VF 设备（多 Function SR-IOV 模式）
+        cp "${PROJECT_DIR}/qemu-plugin/cosim_pcie_pf.c" "${QEMU_DIR}/hw/net/"
+        cp "${PROJECT_DIR}/qemu-plugin/cosim_pcie_pf.h" "${QEMU_DIR}/include/hw/net/"
+        cp "${PROJECT_DIR}/qemu-plugin/cosim_pcie_vf.c" "${QEMU_DIR}/hw/net/"
+        cp "${PROJECT_DIR}/qemu-plugin/cosim_pcie_vf.h" "${QEMU_DIR}/include/hw/net/"
+
+        # 共享头文件（topology 等）
+        cp "${PROJECT_DIR}/bridge/common/cosim_topology.h" "${QEMU_DIR}/include/hw/net/"
 
         MESON_FILE="${QEMU_DIR}/hw/net/meson.build"
         if ! grep -q "cosim_pcie_rc" "$MESON_FILE"; then
             {
                 echo ""
-                echo "# CoSim PCIe RC device"
+                echo "# CoSim PCIe devices"
                 echo "system_ss.add(files('cosim_pcie_rc.c'))"
+                echo "system_ss.add(files('cosim_pcie_pf.c'))"
+                echo "system_ss.add(files('cosim_pcie_vf.c'))"
             } >> "$MESON_FILE"
-            ok "已修补 meson.build"
+            ok "已修补 meson.build (RC + PF + VF)"
+        elif ! grep -q "cosim_pcie_pf" "$MESON_FILE"; then
+            {
+                echo ""
+                echo "# CoSim PCIe PF/VF devices (SR-IOV)"
+                echo "system_ss.add(files('cosim_pcie_pf.c'))"
+                echo "system_ss.add(files('cosim_pcie_vf.c'))"
+            } >> "$MESON_FILE"
+            ok "已补充 meson.build (PF + VF)"
         else
-            info "meson.build 已包含 cosim_pcie_rc，无需修改"
+            info "meson.build 已包含 cosim_pcie_pf/vf，无需修改"
+        fi
+
+        # ---- 应用 QEMU patch（SR-IOV VF hotplug 支持）----
+        PATCH_DIR="${PROJECT_DIR}/qemu-plugin/patches"
+        if [ -d "$PATCH_DIR" ]; then
+            for patch_file in "$PATCH_DIR"/*.patch; do
+                [ -f "$patch_file" ] || continue
+                if git -C "$QEMU_DIR" apply --check "$patch_file" 2>/dev/null; then
+                    git -C "$QEMU_DIR" apply "$patch_file"
+                    ok "已应用 patch: $(basename "$patch_file")"
+                else
+                    info "Patch 已应用或不适用: $(basename "$patch_file")"
+                fi
+            done
         fi
 
         # ---- 配置 + 编译 QEMU ----
@@ -1074,9 +1109,10 @@ if [ "$NEED_GUEST" = true ]; then
 
     mkdir -p "$IMAGES_DIR"
 
-    if [ -f "${IMAGES_DIR}/bzImage" ] && [ -f "${IMAGES_DIR}/rootfs.ext4" ]; then
+    _GUEST_KERNEL=$(ls "${IMAGES_DIR}/bzImage" "${IMAGES_DIR}/vmlinuz" 2>/dev/null | head -1)
+    if [ -n "$_GUEST_KERNEL" ] && [ -f "${IMAGES_DIR}/rootfs.ext4" ]; then
         ok "Guest 镜像已存在:"
-        ok "  Kernel: ${IMAGES_DIR}/bzImage"
+        ok "  Kernel: ${_GUEST_KERNEL}"
         ok "  Rootfs: ${IMAGES_DIR}/rootfs.ext4"
         PASS_COUNT=$((PASS_COUNT + 1))
     elif [ "$GUEST_TYPE" = "skip" ]; then
@@ -1140,8 +1176,8 @@ if [ "$NEED_GUEST" = true ]; then
             FAIL_COUNT=$((FAIL_COUNT + 1))
         fi
 
-        if [ ! -f "${IMAGES_DIR}/bzImage" ]; then
-            warn "bzImage 不存在，请手动准备: ${IMAGES_DIR}/bzImage"
+        if [ ! -f "${IMAGES_DIR}/bzImage" ] && [ ! -f "${IMAGES_DIR}/vmlinuz" ]; then
+            warn "内核不存在，请手动准备: ${IMAGES_DIR}/bzImage 或 vmlinuz"
         fi
     fi
 
@@ -1260,6 +1296,12 @@ case "$SETUP_MODE" in
         echo "  TAP 桥接（Guest↔主机网络）:"
         echo "    make tap-check                    # 检查权限"
         echo "    make run-tap                      # 启动 TAP bridge"
+        echo ""
+        echo "  SR-IOV 多 Function 模式（4 PF × 16 VF）:"
+        echo "    终端1: make run-qemu NUM_PFS=4 MAX_VFS=16"
+        echo "    终端2: make run-vcs  NUM_PFS=4 MAX_VFS=16"
+        echo "    Guest: insmod /lib/modules/cosim_nic.ko"
+        echo "           echo 4 > /sys/bus/pci/devices/0000:00:03.0/sriov_numvfs"
         ;;
     qemu-only)
         echo "  启动 QEMU（TCP server，等待 VCS 连接）:"
