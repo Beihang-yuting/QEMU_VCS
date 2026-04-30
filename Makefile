@@ -25,7 +25,8 @@ QEMU          ?= $(firstword $(wildcard $(PROJECT_DIR)/third_party/qemu/build/qe
 SIMV          ?= $(VCS_SIM_DIR)/simv_vip
 GUEST_TYPE    ?= alpine
 # 镜像路径: guest/images/<GUEST_TYPE>/
-KERNEL        ?= $(wildcard $(PROJECT_DIR)/guest/images/$(GUEST_TYPE)/bzImage)
+KERNEL        ?= $(firstword $(wildcard $(PROJECT_DIR)/guest/images/$(GUEST_TYPE)/bzImage) \
+                              $(wildcard $(PROJECT_DIR)/guest/images/$(GUEST_TYPE)/vmlinuz))
 ROOTFS        ?= $(wildcard $(PROJECT_DIR)/guest/images/$(GUEST_TYPE)/rootfs.ext4)
 INITRD        ?= $(wildcard $(PROJECT_DIR)/guest/images/$(GUEST_TYPE)/initramfs.gz)
 TAP_BRIDGE    ?= $(PROJECT_DIR)/tools/eth_tap_bridge
