@@ -172,7 +172,7 @@ else
 endif
 
 ifneq ($(ROOTFS),)
-  _GUEST_ARGS  = -drive file=$(ROOTFS),format=raw,if=virtio $(if $(INITRD),-initrd $(INITRD))
+  _GUEST_ARGS  = -drive file=$(ROOTFS),format=raw,if=none,id=rootdisk -device virtio-blk-pci,drive=rootdisk,addr=0x10 $(if $(INITRD),-initrd $(INITRD))
   _QEMU_APPEND = console=ttyS0 root=/dev/vda rw $(_LOGLEVEL) guest_ip=$(GUEST_IP) peer_ip=$(PEER_IP)
 else
   _GUEST_ARGS  =

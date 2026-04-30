@@ -115,6 +115,11 @@ int bridge_wait_completion(bridge_ctx_t *ctx, uint16_t tag, cpl_entry_t *cpl) {
         if (ctx->trace_enabled) trace_log_cpl(&ctx->trace, cpl);
 
         if (cpl->tag == tag) {
+            if (ctx->debug)
+                fprintf(stderr, "[cpl] tag=%d len=%d data[0..7]=%02x %02x %02x %02x %02x %02x %02x %02x\n",
+                        cpl->tag, cpl->len,
+                        cpl->data[0], cpl->data[1], cpl->data[2], cpl->data[3],
+                        cpl->data[4], cpl->data[5], cpl->data[6], cpl->data[7]);
             return 0;
         }
         /* Stale cpl (likely from a prior fire-and-forget TLP) — drop and retry. */
