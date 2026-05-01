@@ -943,13 +943,32 @@ if [ "$NEED_QEMU" = true ]; then
         # ---- 应用 QEMU patch（SR-IOV VF hotplug 支持）----
         PATCH_DIR="${PROJECT_DIR}/qemu-plugin/patches"
         if [ -d "$PATCH_DIR" ]; then
+            _IS_GIT_REPO=false
+            if git -C "$QEMU_DIR" rev-parse --git-dir &>/dev/null; then
+                _IS_GIT_REPO=true
+            fi
+
             for patch_file in "$PATCH_DIR"/*.patch; do
                 [ -f "$patch_file" ] || continue
-                if git -C "$QEMU_DIR" apply --check "$patch_file" 2>/dev/null; then
-                    git -C "$QEMU_DIR" apply "$patch_file"
-                    ok "已应用 patch: $(basename "$patch_file")"
+                _PATCH_NAME="$(basename "$patch_file")"
+                if [ "$_IS_GIT_REPO" = true ]; then
+                    if git -C "$QEMU_DIR" apply --check "$patch_file" 2>/dev/null; then
+                        git -C "$QEMU_DIR" apply "$patch_file"
+                        ok "已应用 patch: ${_PATCH_NAME}"
+                    else
+                        info "Patch 已应用或不适用: ${_PATCH_NAME}"
+                    fi
                 else
-                    info "Patch 已应用或不适用: $(basename "$patch_file")"
+                    # tarball 解压的 QEMU，使用 patch 命令
+                    if patch -d "$QEMU_DIR" -p1 --dry-run < "$patch_file" &>/dev/null; then
+                        patch -d "$QEMU_DIR" -p1 < "$patch_file"
+                        ok "已应用 patch (patch -p1): ${_PATCH_NAME}"
+                    elif patch -d "$QEMU_DIR" -p1 -R --dry-run < "$patch_file" &>/dev/null; then
+                        info "Patch 已应用，跳过: ${_PATCH_NAME}"
+                    else
+                        warn "Patch 无法应用: ${_PATCH_NAME}"
+                        warn "  请检查 QEMU 版本是否为 ${QEMU_VERSION}"
+                    fi
                 fi
             done
         fi
@@ -1109,7 +1128,7 @@ if [ "$NEED_GUEST" = true ]; then
 
     mkdir -p "$IMAGES_DIR"
 
-    _GUEST_KERNEL=$(ls "${IMAGES_DIR}/bzImage" "${IMAGES_DIR}/vmlinuz" 2>/dev/null | head -1)
+    _GUEST_KERNEL=$(ls "${IMAGES_DIR}/bzImage" "${IMAGES_DIR}/vmlinuz" 2>/dev/null | head -1 || true)
     if [ -n "$_GUEST_KERNEL" ] && [ -f "${IMAGES_DIR}/rootfs.ext4" ]; then
         ok "Guest 镜像已存在:"
         ok "  Kernel: ${_GUEST_KERNEL}"
