@@ -1216,35 +1216,61 @@ if [ "$NEED_GUEST" = true ]; then
             if [ "$GUEST_TYPE" = "debian" ]; then
                 header "构建 Debian rootfs"
                 sudo "${PROJECT_DIR}/scripts/build_rootfs_debian.sh" "$IMAGES_DIR"
-            fi
 
-            if [ -f "${IMAGES_DIR}/rootfs.ext4" ]; then
-                ok "Rootfs 构建完成: ${IMAGES_DIR}/rootfs.ext4"
-                PASS_COUNT=$((PASS_COUNT + 1))
-            else
-                fail "Rootfs 构建失败"
-                FAIL_COUNT=$((FAIL_COUNT + 1))
-            fi
+                if [ -f "${IMAGES_DIR}/rootfs.ext4" ]; then
+                    ok "Rootfs 构建完成: ${IMAGES_DIR}/rootfs.ext4"
+                    PASS_COUNT=$((PASS_COUNT + 1))
+                else
+                    fail "Rootfs 构建失败"
+                    FAIL_COUNT=$((FAIL_COUNT + 1))
+                fi
 
-            if [ ! -f "${IMAGES_DIR}/bzImage" ] && [ ! -f "${IMAGES_DIR}/vmlinuz" ]; then
-                warn "内核不存在，请手动准备: ${IMAGES_DIR}/bzImage 或 vmlinuz"
-            fi
-        fi
-    fi
+                if [ ! -f "${IMAGES_DIR}/bzImage" ] && [ ! -f "${IMAGES_DIR}/vmlinuz" ]; then
+                    warn "内核不存在，请手动准备: ${IMAGES_DIR}/bzImage 或 vmlinuz"
+                fi
+            elif [ "$GUEST_TYPE" = "ubuntu" ]; then
+                # Ubuntu 流程: 提取内核 → 用 debian rootfs 做基础注入模块生成 ubuntu rootfs
+                _UBUNTU_DIR="${PROJECT_DIR}/guest/images/ubuntu"
+                _DEBIAN_ROOTFS="${PROJECT_DIR}/guest/images/debian/rootfs.ext4"
 
-    # ---- Ubuntu LTS 内核提取（含 VFIO/RDMA/NVMe-oF 模块）----
-    # 无 sudo 或无网络时已在上方提示完整操作步骤，跳过
-    local UBUNTU_DIR="${PROJECT_DIR}/guest/images/ubuntu"
-    if [ -f "${UBUNTU_DIR}/vmlinuz" ] && [ -f "${UBUNTU_DIR}/rootfs.ext4" ]; then
-        ok "Ubuntu LTS 内核已存在: ${UBUNTU_DIR}/vmlinuz"
-    elif [ "$HAS_INTERNET" = false ] || [ "${_HAS_SUDO:-true}" = false ]; then
-        : # 已在上方给出完整操作指引，此处静默跳过
-    else
-        header "提取 Ubuntu LTS 内核"
-        mkdir -p "${UBUNTU_DIR}" 2>/dev/null || true
-        "${PROJECT_DIR}/scripts/setup-ubuntu-kernel.sh" "6.8.0-107-generic" || warn "Ubuntu 内核提取失败"
-        if [ -f "${UBUNTU_DIR}/modules.tar.gz" ] && [ -f "${IMAGES_DIR}/rootfs.ext4" ]; then
-            "${PROJECT_DIR}/scripts/inject-modules.sh" ubuntu || warn "Ubuntu 模块注入失败"
+                # 步骤 1: 提取 Ubuntu LTS 内核
+                if [ -f "${_UBUNTU_DIR}/vmlinuz" ] && [ -f "${_UBUNTU_DIR}/modules.tar.gz" ]; then
+                    ok "Ubuntu LTS 内核已存在: ${_UBUNTU_DIR}/vmlinuz"
+                else
+                    header "提取 Ubuntu LTS 内核"
+                    mkdir -p "${_UBUNTU_DIR}" 2>/dev/null || true
+                    "${PROJECT_DIR}/scripts/setup-ubuntu-kernel.sh" "6.8.0-107-generic" || {
+                        warn "Ubuntu 内核提取失败"
+                    }
+                fi
+
+                # 步骤 2: 注入模块生成 ubuntu rootfs（需要基础 rootfs）
+                if [ -f "${_UBUNTU_DIR}/modules.tar.gz" ]; then
+                    if [ -f "${_UBUNTU_DIR}/rootfs.ext4" ]; then
+                        ok "Ubuntu rootfs 已存在: ${_UBUNTU_DIR}/rootfs.ext4"
+                    elif [ -f "$_DEBIAN_ROOTFS" ]; then
+                        header "注入 Ubuntu 模块到 rootfs"
+                        "${PROJECT_DIR}/scripts/inject-modules.sh" ubuntu || warn "Ubuntu 模块注入失败"
+                    else
+                        warn "缺少基础 rootfs，需要先构建 Debian rootfs:"
+                        warn "  sudo ${PROJECT_DIR}/scripts/build_rootfs_debian.sh ${PROJECT_DIR}/guest/images/debian"
+                        warn "  然后重新运行 ./setup.sh"
+                    fi
+                fi
+
+                # 检查最终结果
+                if [ -f "${IMAGES_DIR}/rootfs.ext4" ]; then
+                    ok "Rootfs 就绪: ${IMAGES_DIR}/rootfs.ext4"
+                    PASS_COUNT=$((PASS_COUNT + 1))
+                else
+                    fail "Ubuntu rootfs 未生成"
+                    FAIL_COUNT=$((FAIL_COUNT + 1))
+                fi
+
+                if [ ! -f "${IMAGES_DIR}/vmlinuz" ]; then
+                    warn "vmlinuz 不存在: ${IMAGES_DIR}/vmlinuz"
+                fi
+            fi
         fi
     fi
 fi
