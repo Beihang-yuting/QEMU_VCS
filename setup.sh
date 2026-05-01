@@ -968,6 +968,9 @@ if [ "$NEED_QEMU" = true ]; then
                     else
                         warn "Patch 无法应用: ${_PATCH_NAME}"
                         warn "  请检查 QEMU 版本是否为 ${QEMU_VERSION}"
+                        warn "  该 patch 不影响编译，但 SR-IOV VF 热插拔可能在运行时报错:"
+                        warn "    \"Unsupported bus. Bus doesn't have property 'acpi-pcihp-bsel' set\""
+                        warn "  如需 SR-IOV 功能，请手动应用: patch -d ${QEMU_DIR} -p1 < ${patch_file}"
                     fi
                 fi
             done
@@ -1150,16 +1153,38 @@ if [ "$NEED_GUEST" = true ]; then
         if [ "$HAS_INTERNET" = false ]; then
             warn "内网环境无法自动构建 Guest 镜像（需要下载内核和软件包）"
             echo ""
-            fail "  请在有网络的机器上构建 Guest 镜像，然后拷贝到本机："
-            fail "  ────────────────────────────────────────"
+            info "请在有外网的机器上执行以下操作，然后将产物拷贝到本机："
+            echo ""
+            echo "  ────────────────────────────────────────"
+            echo "  # === 在有外网的机器上操作 ==="
+            echo ""
+            echo "  # 1. 克隆项目仓库"
+            echo "  git clone https://github.com/Beihang-yuting/QEMU_VCS.git"
+            echo "  cd QEMU_VCS"
+            echo ""
             if [ "$GUEST_TYPE" = "debian" ]; then
-                fail "  # 在有网络的机器上:"
-                fail "  sudo ./scripts/build_rootfs_debian.sh"
-                fail "  # 将产物拷贝到本机:"
-                fail "  scp guest/images/debian/{bzImage,initramfs.gz,rootfs.ext4} <用户>@<本机IP>:${IMAGES_DIR}/"
+                echo "  # 2. 构建 Debian rootfs（需要 sudo）"
+                echo "  sudo ./scripts/build_rootfs_debian.sh guest/images/debian"
+                echo ""
+                echo "  # 3. 提取 Ubuntu LTS 内核"
+                echo "  ./scripts/setup-ubuntu-kernel.sh 6.8.0-107-generic"
+                echo ""
+                echo "  # 4. 注入 Ubuntu 模块到 rootfs"
+                echo "  ./scripts/inject-modules.sh ubuntu"
+                echo ""
+                echo "  # === 将产物拷贝到本机 ==="
+                echo ""
+                echo "  # 5. Debian 镜像"
+                echo "  scp guest/images/debian/{bzImage,initramfs.gz,rootfs.ext4} \\"
+                echo "      <用户>@<本机IP>:${IMAGES_DIR}/"
+                echo ""
+                echo "  # 6. Ubuntu 内核 + rootfs"
+                echo "  scp guest/images/ubuntu/{vmlinuz,modules.tar.gz,rootfs.ext4} \\"
+                echo "      <用户>@<本机IP>:${PROJECT_DIR}/guest/images/ubuntu/"
             fi
-            fail "  ────────────────────────────────────────"
-            fail "  完成后重新运行 ./setup.sh 即可跳过此步骤"
+            echo "  ────────────────────────────────────────"
+            echo ""
+            info "完成后重新运行 ./setup.sh，已有的镜像会自动识别并跳过"
             FAIL_COUNT=$((FAIL_COUNT + 1))
         elif [ "$_HAS_SUDO" = false ]; then
             warn "构建 rootfs 需要 sudo 权限（mount/chroot），当前用户无免密 sudo"
