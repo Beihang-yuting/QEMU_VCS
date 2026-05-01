@@ -1264,6 +1264,7 @@ if [ "$NEED_GUEST" = true ]; then
                     PASS_COUNT=$((PASS_COUNT + 1))
                 else
                     fail "Ubuntu rootfs 未生成"
+                    info "请按上方提示手动下载 deb 包后重新运行 ./setup.sh"
                     FAIL_COUNT=$((FAIL_COUNT + 1))
                 fi
 
