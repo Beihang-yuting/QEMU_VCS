@@ -251,7 +251,7 @@ if [ "$SETUP_MODE" != "vcs-only" ]; then
     QEMU_SRC_OPT="${QEMU_SRC_OPT:-download}"
 
     case "$GUEST_TYPE" in
-        ubuntu|debian|alpine|skip) ;;
+        ubuntu|debian|skip) ;;
         *)
             fail "无效的 Guest 类型: ${GUEST_TYPE}"
             fail "可选: ubuntu, debian, skip"
@@ -345,8 +345,6 @@ VCS_SIM_DIR="${PROJECT_DIR}/vcs-tb/sim_build"
 # IMAGES_DIR 根据 GUEST_TYPE 指向子目录
 if [ "${GUEST_TYPE:-ubuntu}" = "debian" ]; then
     IMAGES_DIR="${PROJECT_DIR}/guest/images/debian"
-elif [ "${GUEST_TYPE:-ubuntu}" = "alpine" ]; then
-    IMAGES_DIR="${PROJECT_DIR}/guest/images/alpine"
 else
     IMAGES_DIR="${PROJECT_DIR}/guest/images/ubuntu"
 fi
@@ -1130,9 +1128,7 @@ if [ "$NEED_GUEST" = true ]; then
             fail "当前用户无免密 sudo 权限，无法自动构建 Guest 镜像"
             fail "请以 root 用户手动执行以下命令，然后重新运行 setup.sh："
             echo ""
-            if [ "$GUEST_TYPE" = "alpine" ]; then
-                fail "  sudo ${PROJECT_DIR}/scripts/build_rootfs_alpine.sh ${IMAGES_DIR}"
-            elif [ "$GUEST_TYPE" = "debian" ]; then
+            if [ "$GUEST_TYPE" = "debian" ]; then
                 fail "  sudo ${PROJECT_DIR}/scripts/build_rootfs_debian.sh ${IMAGES_DIR}"
             fi
             echo ""
@@ -1143,12 +1139,7 @@ if [ "$NEED_GUEST" = true ]; then
             echo ""
             fail "  请在有网络的机器上构建 Guest 镜像，然后拷贝到本机："
             fail "  ────────────────────────────────────────"
-            if [ "$GUEST_TYPE" = "alpine" ]; then
-                fail "  # 在有网络的机器上:"
-                fail "  sudo ./scripts/build_rootfs_alpine.sh"
-                fail "  # 将产物拷贝到本机:"
-                fail "  scp guest/images/alpine/{bzImage,initramfs.gz,rootfs.ext4} <用户>@<本机IP>:${IMAGES_DIR}/"
-            elif [ "$GUEST_TYPE" = "debian" ]; then
+            if [ "$GUEST_TYPE" = "debian" ]; then
                 fail "  # 在有网络的机器上:"
                 fail "  sudo ./scripts/build_rootfs_debian.sh"
                 fail "  # 将产物拷贝到本机:"
@@ -1161,10 +1152,7 @@ if [ "$NEED_GUEST" = true ]; then
             info "编译自定义测试工具..."
             "${PROJECT_DIR}/scripts/build_guest_tools.sh" || warn "部分工具编译失败"
 
-            if [ "$GUEST_TYPE" = "alpine" ]; then
-                header "构建 Alpine rootfs"
-                sudo "${PROJECT_DIR}/scripts/build_rootfs_alpine.sh" "$IMAGES_DIR"
-            elif [ "$GUEST_TYPE" = "debian" ]; then
+            if [ "$GUEST_TYPE" = "debian" ]; then
                 header "构建 Debian rootfs"
                 sudo "${PROJECT_DIR}/scripts/build_rootfs_debian.sh" "$IMAGES_DIR"
             fi

@@ -12,7 +12,7 @@ NC='\033[0m'
 
 echo ""
 echo -e "${CYAN}╔══════════════════════════════════════════════╗${NC}"
-echo -e "${CYAN}║${BOLD_CYAN}        CoSim Guest — Alpine Linux            ${NC}${CYAN}║${NC}"
+echo -e "${CYAN}║${BOLD_CYAN}        CoSim Guest — $(uname -r)       ${NC}${CYAN}║${NC}"
 echo -e "${CYAN}╠══════════════════════════════════════════════╣${NC}"
 echo -e "${CYAN}║${NC}                                              ${CYAN}║${NC}"
 echo -e "${CYAN}║${BOLD_GREEN}  Welcome to CoSim Platform!                  ${NC}${CYAN}║${NC}"

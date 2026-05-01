@@ -1,17 +1,21 @@
 #!/bin/bash
 # inject-modules.sh — 将内核模块注入 rootfs
-# 用法: ./scripts/inject-modules.sh [ubuntu|alpine]
+# 用法: ./scripts/inject-modules.sh [ubuntu|debian]
 set -euo pipefail
 
 SYSTEM="${1:-ubuntu}"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 COSIM_DIR="${PROJECT_DIR}/guest/images/${SYSTEM}"
-ALPINE_DIR="${PROJECT_DIR}/guest/images/alpine"
 
 MODULES_TAR="${COSIM_DIR}/modules.tar.gz"
-SRC_ROOTFS="${ALPINE_DIR}/rootfs.ext4"
+SRC_ROOTFS="${COSIM_DIR}/rootfs.ext4"
 DST_ROOTFS="${COSIM_DIR}/rootfs.ext4"
+
+# 如果目标 rootfs 不存在，尝试用 Debian 基础 rootfs
+if [ ! -f "$SRC_ROOTFS" ] && [ -f "${PROJECT_DIR}/guest/images/debian/rootfs.ext4" ]; then
+    SRC_ROOTFS="${PROJECT_DIR}/guest/images/debian/rootfs.ext4"
+fi
 
 if [ ! -f "$MODULES_TAR" ]; then
     echo "ERROR: 找不到模块包: $MODULES_TAR"
@@ -20,12 +24,12 @@ if [ ! -f "$MODULES_TAR" ]; then
 fi
 
 if [ ! -f "$SRC_ROOTFS" ]; then
-    echo "ERROR: 找不到 Alpine 基础 rootfs: $SRC_ROOTFS"
+    echo "ERROR: 找不到基础 rootfs: $SRC_ROOTFS"
     exit 1
 fi
 
 # ---- 1. 复制基础 rootfs ----
-echo "[1/4] 复制 Alpine rootfs 为 ${SYSTEM} rootfs..."
+echo "[1/4] 复制基础 rootfs 为 ${SYSTEM} rootfs..."
 if [ -f "$DST_ROOTFS" ]; then
     echo "  目标已存在，备份为 rootfs.ext4.bak"
     mv "$DST_ROOTFS" "${DST_ROOTFS}.bak"
@@ -34,9 +38,6 @@ cp "$SRC_ROOTFS" "$DST_ROOTFS"
 
 # ---- 2. 扩展 rootfs ----
 EXTRA_MB=200
-if [ "$SYSTEM" = "alpine" ]; then
-    EXTRA_MB=50
-fi
 echo "[2/4] 扩展 rootfs (+${EXTRA_MB}MB)..."
 truncate -s "+${EXTRA_MB}M" "$DST_ROOTFS"
 e2fsck -fy "$DST_ROOTFS" 2>/dev/null || true
