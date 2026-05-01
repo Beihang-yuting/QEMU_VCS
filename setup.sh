@@ -1122,19 +1122,13 @@ if [ "$NEED_GUEST" = true ]; then
         info "    ${IMAGES_DIR}/rootfs.ext4   -- Guest 磁盘镜像"
         SKIP_COUNT=$((SKIP_COUNT + 1))
     else
-        if ! sudo -n true 2>/dev/null; then
-            warn "构建 rootfs 需要 sudo 权限（mount/chroot）"
-            echo ""
-            fail "当前用户无免密 sudo 权限，无法自动构建 Guest 镜像"
-            fail "请以 root 用户手动执行以下命令，然后重新运行 setup.sh："
-            echo ""
-            if [ "$GUEST_TYPE" = "debian" ]; then
-                fail "  sudo ${PROJECT_DIR}/scripts/build_rootfs_debian.sh ${IMAGES_DIR}"
-            fi
-            echo ""
-            fail "完成后重新运行 ./setup.sh 即可跳过此步骤"
-            FAIL_COUNT=$((FAIL_COUNT + 1))
-        elif [ "$HAS_INTERNET" = false ]; then
+        # 检查 sudo 权限（构建 rootfs 需要 mount/chroot）
+        _HAS_SUDO=false
+        if sudo -n true 2>/dev/null; then
+            _HAS_SUDO=true
+        fi
+
+        if [ "$HAS_INTERNET" = false ]; then
             warn "内网环境无法自动构建 Guest 镜像（需要下载内核和软件包）"
             echo ""
             fail "  请在有网络的机器上构建 Guest 镜像，然后拷贝到本机："
@@ -1148,6 +1142,29 @@ if [ "$NEED_GUEST" = true ]; then
             fail "  ────────────────────────────────────────"
             fail "  完成后重新运行 ./setup.sh 即可跳过此步骤"
             FAIL_COUNT=$((FAIL_COUNT + 1))
+        elif [ "$_HAS_SUDO" = false ]; then
+            warn "构建 rootfs 需要 sudo 权限（mount/chroot），当前用户无免密 sudo"
+            echo ""
+            info "请使用有 sudo 权限的账户执行以下命令："
+            echo ""
+            echo "  ────────────────────────────────────────"
+            echo "  # 步骤 1: 构建 Guest 测试工具"
+            echo "  ${PROJECT_DIR}/scripts/build_guest_tools.sh"
+            echo ""
+            if [ "$GUEST_TYPE" = "debian" ]; then
+                echo "  # 步骤 2: 构建 Debian rootfs（需要 sudo）"
+                echo "  sudo ${PROJECT_DIR}/scripts/build_rootfs_debian.sh ${IMAGES_DIR}"
+                echo ""
+            fi
+            echo "  # 步骤 3: 提取 Ubuntu LTS 内核（不需要 sudo）"
+            echo "  ${PROJECT_DIR}/scripts/setup-ubuntu-kernel.sh 6.8.0-107-generic"
+            echo ""
+            echo "  # 步骤 4: 注入 Ubuntu 模块到 rootfs（不需要 sudo）"
+            echo "  ${PROJECT_DIR}/scripts/inject-modules.sh ubuntu"
+            echo "  ────────────────────────────────────────"
+            echo ""
+            info "完成后重新运行 ./setup.sh，已构建的镜像会自动识别并跳过"
+            FAIL_COUNT=$((FAIL_COUNT + 1))
         else
             info "编译自定义测试工具..."
             "${PROJECT_DIR}/scripts/build_guest_tools.sh" || warn "部分工具编译失败"
@@ -1156,34 +1173,35 @@ if [ "$NEED_GUEST" = true ]; then
                 header "构建 Debian rootfs"
                 sudo "${PROJECT_DIR}/scripts/build_rootfs_debian.sh" "$IMAGES_DIR"
             fi
-        fi
 
-        if [ -f "${IMAGES_DIR}/rootfs.ext4" ]; then
-            ok "Rootfs 构建完成: ${IMAGES_DIR}/rootfs.ext4"
-            PASS_COUNT=$((PASS_COUNT + 1))
-        else
-            fail "Rootfs 构建失败"
-            FAIL_COUNT=$((FAIL_COUNT + 1))
-        fi
+            if [ -f "${IMAGES_DIR}/rootfs.ext4" ]; then
+                ok "Rootfs 构建完成: ${IMAGES_DIR}/rootfs.ext4"
+                PASS_COUNT=$((PASS_COUNT + 1))
+            else
+                fail "Rootfs 构建失败"
+                FAIL_COUNT=$((FAIL_COUNT + 1))
+            fi
 
-        if [ ! -f "${IMAGES_DIR}/bzImage" ] && [ ! -f "${IMAGES_DIR}/vmlinuz" ]; then
-            warn "内核不存在，请手动准备: ${IMAGES_DIR}/bzImage 或 vmlinuz"
+            if [ ! -f "${IMAGES_DIR}/bzImage" ] && [ ! -f "${IMAGES_DIR}/vmlinuz" ]; then
+                warn "内核不存在，请手动准备: ${IMAGES_DIR}/bzImage 或 vmlinuz"
+            fi
         fi
     fi
 
     # ---- Ubuntu LTS 内核提取（含 VFIO/RDMA/NVMe-oF 模块）----
+    # 无 sudo 或无网络时已在上方提示完整操作步骤，跳过
     local UBUNTU_DIR="${PROJECT_DIR}/guest/images/ubuntu"
     if [ -f "${UBUNTU_DIR}/vmlinuz" ] && [ -f "${UBUNTU_DIR}/rootfs.ext4" ]; then
         ok "Ubuntu LTS 内核已存在: ${UBUNTU_DIR}/vmlinuz"
-    elif [ "$HAS_INTERNET" = true ]; then
+    elif [ "$HAS_INTERNET" = false ] || [ "${_HAS_SUDO:-true}" = false ]; then
+        : # 已在上方给出完整操作指引，此处静默跳过
+    else
         header "提取 Ubuntu LTS 内核"
         mkdir -p "${UBUNTU_DIR}" 2>/dev/null || true
         "${PROJECT_DIR}/scripts/setup-ubuntu-kernel.sh" "6.8.0-107-generic" || warn "Ubuntu 内核提取失败"
         if [ -f "${UBUNTU_DIR}/modules.tar.gz" ] && [ -f "${IMAGES_DIR}/rootfs.ext4" ]; then
             "${PROJECT_DIR}/scripts/inject-modules.sh" ubuntu || warn "Ubuntu 模块注入失败"
         fi
-    else
-        info "跳过 Ubuntu 内核提取（无网络）"
     fi
 fi
 
