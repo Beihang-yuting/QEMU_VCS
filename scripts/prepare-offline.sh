@@ -108,7 +108,7 @@ fi
 # [2/5] 构建 Debian rootfs
 # ============================================================
 echo ""
-echo -e "${BOLD}[2/5] Debian rootfs${NC}"
+echo -e "${BOLD}[2/5] Debian rootfs（Ubuntu rootfs 的基础镜像）${NC}"
 
 DEBIAN_DIR="${PROJECT_DIR}/guest/images/debian"
 if [ -f "${DEBIAN_DIR}/rootfs.ext4" ] && [ -f "${DEBIAN_DIR}/bzImage" ]; then
