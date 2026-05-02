@@ -140,7 +140,33 @@ import_offline() {
         return 1
     fi
 
-    info "解压离线包: $zip_file"
+    # 校验 zip 完整性
+    info "校验离线包: $zip_file ($(du -h "$zip_file" | cut -f1))"
+
+    # 检查 md5（如果有 .md5 文件）
+    if [ -f "${zip_file}.md5" ]; then
+        if md5sum -c "${zip_file}.md5" &>/dev/null; then
+            ok "MD5 校验通过"
+        else
+            fail "MD5 校验失败，文件可能在传输中损坏"
+            fail "请重新拷贝离线包"
+            return 1
+        fi
+    fi
+
+    if ! unzip -tq "$zip_file" &>/dev/null; then
+        fail "zip 文件损坏，无法解压"
+        fail "  文件: $zip_file"
+        fail "  大小: $(du -h "$zip_file" | cut -f1)"
+        fail "  请检查:"
+        fail "    1. 文件传输是否完整（scp 中断？磁盘空间不足？）"
+        fail "    2. 在外网机器上重新运行: ./setup.sh --prepare-offline"
+        fail "    3. 传输前后对比 md5sum"
+        return 1
+    fi
+    ok "zip 校验通过"
+
+    info "解压离线包..."
     local tmpdir="${PROJECT_DIR}/build/offline-import"
     rm -rf "$tmpdir"
     mkdir -p "$tmpdir"

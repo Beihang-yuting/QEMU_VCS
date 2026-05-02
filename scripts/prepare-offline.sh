@@ -308,10 +308,29 @@ echo ""
 echo -e "${BOLD}打包离线安装包...${NC}"
 
 cd "$STAGING"
-zip -qr "$OUTPUT" .
+info "正在压缩（大文件可能需要几分钟）..."
+if ! zip -qr "$OUTPUT" .; then
+    fail "zip 打包失败（磁盘空间不足？）"
+    cd "$PROJECT_DIR"
+    rm -rf "$STAGING"
+    exit 1
+fi
+
+# 校验 zip 完整性
+info "校验 zip 完整性..."
+if ! zip -T "$OUTPUT" &>/dev/null; then
+    fail "zip 文件校验失败，文件可能损坏"
+    cd "$PROJECT_DIR"
+    rm -rf "$STAGING"
+    exit 1
+fi
+ok "zip 校验通过"
 
 cd "$PROJECT_DIR"
 rm -rf "$STAGING"
+
+# 生成 md5sum 便于传输后校验
+md5sum "$OUTPUT" > "${OUTPUT}.md5"
 
 echo ""
 echo -e "${BOLD}============================================================${NC}"
@@ -320,13 +339,15 @@ echo -e "${BOLD}============================================================${NC
 echo ""
 echo "  文件: ${OUTPUT}"
 echo "  大小: $(du -h "$OUTPUT" | cut -f1)"
+echo "  MD5:  $(cut -d' ' -f1 "${OUTPUT}.md5")"
 echo "  成功: ${PASS}  失败: ${FAIL_COUNT}"
 echo ""
 
 echo -e "${BOLD}  内网使用方法:${NC}"
-echo "    1. 将 $(basename "$OUTPUT") 拷贝到内网机器的项目目录"
-echo "    2. 运行 ./setup.sh"
-echo "    3. 选择「导入离线包」"
+echo "    1. 将 $(basename "$OUTPUT") 和 $(basename "${OUTPUT}.md5") 拷贝到内网机器"
+echo "    2. 校验: md5sum -c $(basename "${OUTPUT}.md5")"
+echo "    3. 将 zip 放到项目目录，运行 ./setup.sh"
+echo "    4. 选择「导入离线包」"
 echo ""
 
 if [ $FAIL_COUNT -gt 0 ]; then
