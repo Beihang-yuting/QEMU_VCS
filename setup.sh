@@ -119,7 +119,7 @@ while [ $# -gt 0 ]; do
         --import)
             OFFLINE_ZIP="$2"; shift 2 ;;
         --prepare-offline)
-            exec "${PROJECT_DIR}/scripts/prepare-offline.sh" "${@:2}"
+            exec bash "${PROJECT_DIR}/scripts/prepare-offline.sh" "${@:2}"
             ;;
         --help|-h)
             usage ;;
