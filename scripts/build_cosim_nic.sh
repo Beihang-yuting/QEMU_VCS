@@ -85,34 +85,51 @@ download_headers() {
 
     case "$GUEST_TYPE" in
         ubuntu)
-            local hdr_pkg="linux-headers-${KVER}"
-            info "下载 Ubuntu kernel headers: ${hdr_pkg}..."
+            # Ubuntu headers 分两个包:
+            #   linux-headers-<KVER>          -- 通用 scripts/Makefile
+            #   linux-headers-<KVER>-generic  -- 架构相关配置（即 $KVER 本身带 -generic）
+            local base_ver="${KVER%-generic}"  # e.g. 6.8.0-107
+            local hdr_common="linux-headers-${base_ver}"
+            local hdr_arch="linux-headers-${KVER}"
 
-            # 尝试 apt download（最可靠）
-            if command -v apt &>/dev/null; then
-                apt download "$hdr_pkg" 2>/dev/null || true
-            fi
+            mkdir -p "$headers_dir"
 
-            local deb_file=$(ls ${hdr_pkg}*.deb 2>/dev/null | head -1)
+            for hdr_pkg in "$hdr_common" "$hdr_arch"; do
+                info "下载 Ubuntu kernel headers: ${hdr_pkg}..."
+                local deb_file=""
 
-            # fallback: 从镜像下载
-            if [ -z "$deb_file" ]; then
-                local base_ver="${KVER%-generic}"
-                for mirror in \
-                    "https://mirrors.tuna.tsinghua.edu.cn/ubuntu/pool/main/l/linux" \
-                    "http://archive.ubuntu.com/ubuntu/pool/main/l/linux"; do
-                    wget -q --timeout=60 -O "${hdr_pkg}.deb" \
-                        "${mirror}/${hdr_pkg}_${base_ver}.${base_ver##*-}_amd64.deb" 2>/dev/null && \
-                        deb_file="${hdr_pkg}.deb" && break || true
-                done
-            fi
+                # 已下载则跳过
+                deb_file=$(ls "${hdr_pkg}"_*.deb 2>/dev/null | head -1 || true)
+                if [ -n "$deb_file" ] && [ -s "$deb_file" ]; then
+                    info "  ${hdr_pkg} 已存在，跳过下载"
+                else
+                    # 尝试 apt download
+                    if command -v apt &>/dev/null; then
+                        apt download "$hdr_pkg" 2>/dev/null || true
+                    fi
+                    deb_file=$(ls "${hdr_pkg}"_*.deb 2>/dev/null | head -1 || true)
 
-            if [ -n "$deb_file" ] && [ -s "$deb_file" ]; then
-                mkdir -p "$headers_dir"
-                ar x "$deb_file"
-                tar xf data.tar.* -C "$headers_dir" 2>/dev/null
-                ok "Headers 提取完成"
-            fi
+                    # fallback: 从镜像下载
+                    if [ -z "$deb_file" ]; then
+                        for mirror in \
+                            "https://mirrors.tuna.tsinghua.edu.cn/ubuntu/pool/main/l/linux" \
+                            "http://archive.ubuntu.com/ubuntu/pool/main/l/linux"; do
+                            wget -q --timeout=60 -O "${hdr_pkg}.deb" \
+                                "${mirror}/${hdr_pkg}_${base_ver}.${base_ver##*-}_amd64.deb" 2>/dev/null && \
+                                deb_file="${hdr_pkg}.deb" && break || true
+                        done
+                    fi
+                fi
+
+                if [ -n "$deb_file" ] && [ -s "$deb_file" ]; then
+                    ar x "$deb_file"
+                    tar xf data.tar.* -C "$headers_dir" 2>/dev/null
+                    rm -f data.tar.* control.tar.* debian-binary
+                    ok "  ${hdr_pkg} 提取完成"
+                else
+                    warn "  ${hdr_pkg} 下载失败"
+                fi
+            done
             ;;
 
         debian)
