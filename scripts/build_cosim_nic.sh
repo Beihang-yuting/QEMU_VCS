@@ -59,23 +59,63 @@ check_prebuilt() {
     return 1
 }
 
+# ---- 验证 headers 目录可用于编译（关键 symlinks 不 broken）----
+_verify_headers() {
+    local hdr_dir="$1"
+    [ -f "${hdr_dir}/Makefile" ] || return 1
+    # 检查 scripts/ 目录存在且不是 broken symlink
+    if [ -L "${hdr_dir}/scripts" ]; then
+        [ -d "${hdr_dir}/scripts" ] || return 1
+    fi
+    # 检查 Makefile.ubsan 是否可达
+    if grep -q "Makefile.ubsan" "${hdr_dir}/Makefile" 2>/dev/null; then
+        local ubsan_path
+        ubsan_path=$(grep "Makefile.ubsan" "${hdr_dir}/Makefile" | head -1 | grep -oP '\S*Makefile\.ubsan' || true)
+        if [ -n "$ubsan_path" ] && [ ! -f "${hdr_dir}/${ubsan_path}" ]; then
+            return 1
+        fi
+    fi
+    return 0
+}
+
+# ---- 修复 broken symlinks（common 包缺失时用 arch 包自身的文件补全）----
+_fix_broken_symlinks() {
+    local hdr_dir="$1"
+    local base_ver="${KVER%-generic}"
+    local common_dir
+    common_dir="$(dirname "$hdr_dir")/linux-headers-${base_ver}"
+
+    # 如果 scripts 是 broken symlink 且 common 目录不存在
+    if [ -L "${hdr_dir}/scripts" ] && [ ! -d "${hdr_dir}/scripts" ]; then
+        if [ -d "$common_dir/scripts" ]; then
+            info "修复 scripts symlink -> ${common_dir}/scripts"
+            rm -f "${hdr_dir}/scripts"
+            ln -sf "${common_dir}/scripts" "${hdr_dir}/scripts"
+        else
+            # common 目录也没有 scripts，无法修复
+            return 1
+        fi
+    fi
+    return 0
+}
+
 # ---- 下载并提取 kernel headers ----
 download_headers() {
     local headers_dir="${PROJECT_DIR}/build/kheaders-${KVER}"
 
     # 检查缓存：deb 解压后在 usr/src/linux-headers-*/
     local cached_root=""
-    cached_root=$(find "$headers_dir" -maxdepth 4 -type d -name "linux-headers-*" 2>/dev/null | head -1)
-    if [ -n "$cached_root" ] && [ -f "${cached_root}/Makefile" ]; then
+    cached_root=$(find "$headers_dir" -maxdepth 4 -type d -name "linux-headers-${KVER}" 2>/dev/null | head -1)
+    if [ -n "$cached_root" ] && _verify_headers "$cached_root"; then
         info "Kernel headers 已缓存: ${cached_root}"
         KDIR="$cached_root"
         return 0
     fi
 
-    # 检查本机是否有匹配的 headers
-    if [ -d "/lib/modules/${KVER}/build" ] && [ -f "/lib/modules/${KVER}/build/Makefile" ]; then
+    # 检查本机是否有匹配 Guest 内核版本的 headers
+    if [ -d "/lib/modules/${KVER}/build" ] && _verify_headers "/lib/modules/${KVER}/build"; then
         KDIR="/lib/modules/${KVER}/build"
-        ok "使用本机 kernel headers: ${KDIR}"
+        ok "使用本机 kernel headers（精确匹配）: ${KDIR}"
         return 0
     fi
 
@@ -192,32 +232,45 @@ download_headers() {
     # 清理下载临时文件
     rm -rf "$download_dir"
 
-    # 查找顶层 headers 目录（排除子目录如 kernel/Makefile）
+    # 查找 arch-specific headers 目录（如 linux-headers-6.8.0-107-generic）
     local hdr_root=""
-    hdr_root=$(find "$headers_dir" -maxdepth 4 -type d -name "linux-headers-*" 2>/dev/null | head -1)
+    hdr_root=$(find "$headers_dir" -maxdepth 4 -type d -name "linux-headers-${KVER}" 2>/dev/null | head -1)
+    if [ -z "$hdr_root" ]; then
+        # fallback: 任意 linux-headers-* 目录
+        hdr_root=$(find "$headers_dir" -maxdepth 4 -type d -name "linux-headers-*" 2>/dev/null | head -1)
+    fi
+
     if [ -n "$hdr_root" ] && [ -f "${hdr_root}/Makefile" ]; then
-        KDIR="$hdr_root"
-        ok "Kernel build dir: ${KDIR}"
+        # 尝试修复 broken symlinks（common 包下载失败时）
+        _fix_broken_symlinks "$hdr_root" 2>/dev/null || true
+
+        if _verify_headers "$hdr_root"; then
+            KDIR="$hdr_root"
+            ok "Kernel build dir: ${KDIR}"
+            return 0
+        else
+            warn "Headers 目录不完整（通用包下载失败）: ${hdr_root}"
+        fi
+    fi
+
+    # ---- fallback: 使用 host 内核 headers ----
+    local host_kver
+    host_kver=$(uname -r)
+    local host_kdir="/lib/modules/${host_kver}/build"
+    if [ -d "$host_kdir" ] && _verify_headers "$host_kdir"; then
+        warn "Guest 内核 headers 不可用，回退使用 host 内核 headers"
+        warn "  Guest 内核: ${KVER}"
+        warn "  Host  内核: ${host_kver}"
+        warn "  cosim_nic.ko 将按 host 内核编译，Guest 中需要 insmod --force"
+        KDIR="$host_kdir"
+        FORCE_INSMOD=true
         return 0
     fi
 
-    # fallback: 找包含 include/ 或 scripts/ 的 Makefile 所在目录（确保是顶层）
-    local makefile_path=""
-    makefile_path=$(find "$headers_dir" -maxdepth 5 -name "Makefile" 2>/dev/null | \
-        while read -r f; do
-            d="$(dirname "$f")"
-            if [ -d "$d/include" ] || [ -d "$d/scripts" ]; then
-                echo "$f"
-                break
-            fi
-        done)
-    if [ -n "$makefile_path" ]; then
-        KDIR="$(dirname "$makefile_path")"
-        ok "Kernel build dir: ${KDIR}"
-        return 0
-    fi
-
-    fail "未找到 kernel headers Makefile"
+    fail "未找到可用的 kernel headers"
+    fail "  Guest 版本 ${KVER} 的 headers 下载不完整"
+    fail "  Host 版本 ${host_kver} 的 headers 也未安装"
+    fail "  请安装: sudo apt install linux-headers-${host_kver}"
     return 1
 }
 
@@ -246,7 +299,7 @@ compile_driver() {
         command -v "$ld" &>/dev/null && make_args="$make_args LD=$ld"
     fi
 
-    make clean 2>/dev/null || true
+    make $make_args clean 2>/dev/null || true
     if make $make_args 2>&1 | tail -5; then
         if [ -f "${DRIVER_DIR}/cosim_nic.ko" ]; then
             ok "cosim_nic.ko 编译成功"
@@ -277,7 +330,9 @@ inject_driver() {
         rm -rf "$work" && mkdir -p "$work/lib/modules" "$work/etc/cosim" "$work/etc/local.d"
 
         cp "$COSIM_NIC_KO" "$work/lib/modules/cosim_nic.ko"
-        printf "mode=stub\nko_name=cosim_nic.ko\n" > "$work/etc/cosim/driver.conf"
+        local _insmod_opts=""
+        [ "$FORCE_INSMOD" = true ] && _insmod_opts="force=true"
+        printf "mode=stub\nko_name=cosim_nic.ko\n${_insmod_opts:+${_insmod_opts}\n}" > "$work/etc/cosim/driver.conf"
         cp "${PROJECT_DIR}/guest/overlay/etc/local.d/cosim-driver.start" "$work/etc/local.d/" 2>/dev/null || true
         chmod +x "$work/etc/local.d/cosim-driver.start" 2>/dev/null || true
 
@@ -294,7 +349,9 @@ inject_driver() {
             sudo mount -o loop "$rootfs" "$mnt"
             sudo mkdir -p "$mnt/lib/modules" "$mnt/etc/cosim" "$mnt/etc/local.d"
             sudo cp "$COSIM_NIC_KO" "$mnt/lib/modules/cosim_nic.ko"
-            printf "mode=stub\nko_name=cosim_nic.ko\n" | sudo tee "$mnt/etc/cosim/driver.conf" > /dev/null
+            local _insmod_opts=""
+            [ "$FORCE_INSMOD" = true ] && _insmod_opts="force=true"
+            printf "mode=stub\nko_name=cosim_nic.ko\n${_insmod_opts:+${_insmod_opts}\n}" | sudo tee "$mnt/etc/cosim/driver.conf" > /dev/null
             sudo cp "${PROJECT_DIR}/guest/overlay/etc/local.d/cosim-driver.start" "$mnt/etc/local.d/" 2>/dev/null || true
             sudo chmod +x "$mnt/etc/local.d/cosim-driver.start" 2>/dev/null || true
             sudo umount "$mnt"
@@ -317,6 +374,8 @@ inject_driver() {
 # ============================================================
 # 主流程
 # ============================================================
+FORCE_INSMOD=false
+
 info "=== cosim_nic.ko 自动编译+注入 (${GUEST_TYPE}) ==="
 
 detect_kernel_version
@@ -331,7 +390,11 @@ fi
 # 步骤 2: 下载 headers + 编译
 if download_headers && compile_driver; then
     inject_driver
-    ok "=== 完成（新编译 .ko）==="
+    if [ "$FORCE_INSMOD" = true ]; then
+        warn "=== 完成（用 host 内核编译，Guest 中需 insmod --force）==="
+    else
+        ok "=== 完成（新编译 .ko）==="
+    fi
     exit 0
 fi
 
