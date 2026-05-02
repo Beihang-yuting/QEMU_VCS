@@ -1144,25 +1144,29 @@ if [ "$NEED_GUEST" = true ]; then
         info "    ${IMAGES_DIR}/rootfs.ext4   -- Guest 磁盘镜像"
         SKIP_COUNT=$((SKIP_COUNT + 1))
     else
-        # 检查 sudo 权限（构建 rootfs 需要 mount/chroot）
+        # 检查 sudo 权限（仅构建 Debian rootfs 需要 mount/chroot）
         _HAS_SUDO=false
         if sudo -n true 2>/dev/null; then
             _HAS_SUDO=true
         fi
 
-        if [ "$HAS_INTERNET" = false ]; then
-            warn "内网环境无法自动构建 Guest 镜像（需要下载内核和软件包）"
-            echo ""
-            info "请在有外网的机器上执行以下操作，然后将产物拷贝到本机："
-            echo ""
-            echo "  ────────────────────────────────────────"
-            echo "  # === 在有外网的机器上操作 ==="
-            echo ""
-            echo "  # 1. 克隆项目仓库"
-            echo "  git clone https://github.com/Beihang-yuting/QEMU_VCS.git"
-            echo "  cd QEMU_VCS"
-            echo ""
-            if [ "$GUEST_TYPE" = "debian" ]; then
+        _UBUNTU_DIR="${PROJECT_DIR}/guest/images/ubuntu"
+        _DEBIAN_ROOTFS="${PROJECT_DIR}/guest/images/debian/rootfs.ext4"
+
+        # ---- 阶段 1: Debian rootfs（需要 sudo + 网络）----
+        if [ ! -f "$_DEBIAN_ROOTFS" ]; then
+            if [ "$HAS_INTERNET" = false ]; then
+                warn "内网环境无法自动构建 Debian rootfs（需要下载软件包）"
+                echo ""
+                info "请在有外网的机器上执行以下操作，然后将产物拷贝到本机："
+                echo ""
+                echo "  ────────────────────────────────────────"
+                echo "  # === 在有外网的机器上操作 ==="
+                echo ""
+                echo "  # 1. 克隆项目仓库"
+                echo "  git clone https://github.com/Beihang-yuting/QEMU_VCS.git"
+                echo "  cd QEMU_VCS"
+                echo ""
                 echo "  # 2. 构建 Debian rootfs（需要 sudo）"
                 echo "  sudo ./scripts/build_rootfs_debian.sh guest/images/debian"
                 echo ""
@@ -1176,102 +1180,85 @@ if [ "$NEED_GUEST" = true ]; then
                 echo ""
                 echo "  # 5. Debian 镜像"
                 echo "  scp guest/images/debian/{bzImage,initramfs.gz,rootfs.ext4} \\"
-                echo "      <用户>@<本机IP>:${IMAGES_DIR}/"
+                echo "      <用户>@<本机IP>:${PROJECT_DIR}/guest/images/debian/"
                 echo ""
                 echo "  # 6. Ubuntu 内核 + rootfs"
                 echo "  scp guest/images/ubuntu/{vmlinuz,modules.tar.gz,rootfs.ext4} \\"
-                echo "      <用户>@<本机IP>:${PROJECT_DIR}/guest/images/ubuntu/"
-            fi
-            echo "  ────────────────────────────────────────"
-            echo ""
-            info "完成后重新运行 ./setup.sh，已有的镜像会自动识别并跳过"
-            FAIL_COUNT=$((FAIL_COUNT + 1))
-        elif [ "$_HAS_SUDO" = false ]; then
-            warn "构建 rootfs 需要 sudo 权限（mount/chroot），当前用户无免密 sudo"
-            echo ""
-            info "请使用有 sudo 权限的账户执行以下命令："
-            echo ""
-            echo "  ────────────────────────────────────────"
-            echo "  # 步骤 1: 构建 Guest 测试工具"
-            echo "  ${PROJECT_DIR}/scripts/build_guest_tools.sh"
-            echo ""
-            if [ "$GUEST_TYPE" = "debian" ]; then
-                echo "  # 步骤 2: 构建 Debian rootfs（需要 sudo）"
-                echo "  sudo ${PROJECT_DIR}/scripts/build_rootfs_debian.sh ${IMAGES_DIR}"
+                echo "      <用户>@<本机IP>:${_UBUNTU_DIR}/"
+                echo "  ────────────────────────────────────────"
                 echo ""
-            fi
-            echo "  # 步骤 3: 提取 Ubuntu LTS 内核（不需要 sudo）"
-            echo "  ${PROJECT_DIR}/scripts/setup-ubuntu-kernel.sh 6.8.0-107-generic"
-            echo ""
-            echo "  # 步骤 4: 注入 Ubuntu 模块到 rootfs（不需要 sudo）"
-            echo "  ${PROJECT_DIR}/scripts/inject-modules.sh ubuntu"
-            echo "  ────────────────────────────────────────"
-            echo ""
-            info "完成后重新运行 ./setup.sh，已构建的镜像会自动识别并跳过"
-            FAIL_COUNT=$((FAIL_COUNT + 1))
-        else
-            info "编译自定义测试工具..."
-            "${PROJECT_DIR}/scripts/build_guest_tools.sh" || warn "部分工具编译失败"
+                info "完成后重新运行 ./setup.sh，已有的镜像会自动识别并跳过"
+                FAIL_COUNT=$((FAIL_COUNT + 1))
+            elif [ "$_HAS_SUDO" = false ]; then
+                warn "构建 Debian rootfs 需要 sudo 权限（mount/chroot），当前用户无免密 sudo"
+                echo ""
+                info "请使用有 sudo 权限的账户执行以下命令："
+                echo ""
+                echo "  ────────────────────────────────────────"
+                echo "  # 1. 构建 Guest 测试工具"
+                echo "  ${PROJECT_DIR}/scripts/build_guest_tools.sh"
+                echo ""
+                echo "  # 2. 构建 Debian rootfs（需要 sudo）"
+                echo "  sudo ${PROJECT_DIR}/scripts/build_rootfs_debian.sh ${PROJECT_DIR}/guest/images/debian"
+                echo "  ────────────────────────────────────────"
+                echo ""
+                info "完成后重新运行 ./setup.sh，后续步骤（Ubuntu 内核提取等）不需要 sudo"
+                FAIL_COUNT=$((FAIL_COUNT + 1))
+            else
+                info "编译自定义测试工具..."
+                "${PROJECT_DIR}/scripts/build_guest_tools.sh" || warn "部分工具编译失败"
 
-            if [ "$GUEST_TYPE" = "debian" ]; then
                 header "构建 Debian rootfs"
-                sudo "${PROJECT_DIR}/scripts/build_rootfs_debian.sh" "$IMAGES_DIR"
+                sudo "${PROJECT_DIR}/scripts/build_rootfs_debian.sh" "${PROJECT_DIR}/guest/images/debian"
+            fi
+        else
+            ok "Debian rootfs 已存在: $_DEBIAN_ROOTFS"
+        fi
 
-                if [ -f "${IMAGES_DIR}/rootfs.ext4" ]; then
-                    ok "Rootfs 构建完成: ${IMAGES_DIR}/rootfs.ext4"
-                    PASS_COUNT=$((PASS_COUNT + 1))
+        # ---- 阶段 2: Ubuntu 内核提取 + inject-modules（不需要 sudo）----
+        # 只要 debian rootfs 存在就可以继续，不受 sudo 限制
+        if [ -f "$_DEBIAN_ROOTFS" ]; then
+            # 提取 Ubuntu LTS 内核
+            if [ -f "${_UBUNTU_DIR}/vmlinuz" ] && [ -f "${_UBUNTU_DIR}/modules.tar.gz" ]; then
+                ok "Ubuntu LTS 内核已存在: ${_UBUNTU_DIR}/vmlinuz"
+            elif [ "$HAS_INTERNET" = true ]; then
+                header "提取 Ubuntu LTS 内核"
+                mkdir -p "${_UBUNTU_DIR}" 2>/dev/null || true
+                "${PROJECT_DIR}/scripts/setup-ubuntu-kernel.sh" "6.8.0-107-generic" || {
+                    warn "Ubuntu 内核提取失败（详见上方提示）"
+                }
+            else
+                warn "内网环境无法自动提取 Ubuntu 内核"
+                info "请在外网机器上执行后拷贝到本机:"
+                info "  ./scripts/setup-ubuntu-kernel.sh 6.8.0-107-generic"
+                info "  scp guest/images/ubuntu/{vmlinuz,modules.tar.gz} <用户>@<本机IP>:${_UBUNTU_DIR}/"
+            fi
+
+            # 注入模块生成 ubuntu rootfs
+            if [ -f "${_UBUNTU_DIR}/modules.tar.gz" ]; then
+                if [ -f "${_UBUNTU_DIR}/rootfs.ext4" ]; then
+                    ok "Ubuntu rootfs 已存在: ${_UBUNTU_DIR}/rootfs.ext4"
                 else
-                    fail "Rootfs 构建失败"
-                    FAIL_COUNT=$((FAIL_COUNT + 1))
-                fi
-
-                if [ ! -f "${IMAGES_DIR}/bzImage" ] && [ ! -f "${IMAGES_DIR}/vmlinuz" ]; then
-                    warn "内核不存在，请手动准备: ${IMAGES_DIR}/bzImage 或 vmlinuz"
-                fi
-            elif [ "$GUEST_TYPE" = "ubuntu" ]; then
-                # Ubuntu 流程: 提取内核 → 用 debian rootfs 做基础注入模块生成 ubuntu rootfs
-                _UBUNTU_DIR="${PROJECT_DIR}/guest/images/ubuntu"
-                _DEBIAN_ROOTFS="${PROJECT_DIR}/guest/images/debian/rootfs.ext4"
-
-                # 步骤 1: 提取 Ubuntu LTS 内核
-                if [ -f "${_UBUNTU_DIR}/vmlinuz" ] && [ -f "${_UBUNTU_DIR}/modules.tar.gz" ]; then
-                    ok "Ubuntu LTS 内核已存在: ${_UBUNTU_DIR}/vmlinuz"
-                else
-                    header "提取 Ubuntu LTS 内核"
-                    mkdir -p "${_UBUNTU_DIR}" 2>/dev/null || true
-                    "${PROJECT_DIR}/scripts/setup-ubuntu-kernel.sh" "6.8.0-107-generic" || {
-                        warn "Ubuntu 内核提取失败"
-                    }
-                fi
-
-                # 步骤 2: 注入模块生成 ubuntu rootfs（需要基础 rootfs）
-                if [ -f "${_UBUNTU_DIR}/modules.tar.gz" ]; then
-                    if [ -f "${_UBUNTU_DIR}/rootfs.ext4" ]; then
-                        ok "Ubuntu rootfs 已存在: ${_UBUNTU_DIR}/rootfs.ext4"
-                    elif [ -f "$_DEBIAN_ROOTFS" ]; then
-                        header "注入 Ubuntu 模块到 rootfs"
-                        "${PROJECT_DIR}/scripts/inject-modules.sh" ubuntu || warn "Ubuntu 模块注入失败"
-                    else
-                        warn "缺少基础 rootfs，需要先构建 Debian rootfs:"
-                        warn "  sudo ${PROJECT_DIR}/scripts/build_rootfs_debian.sh ${PROJECT_DIR}/guest/images/debian"
-                        warn "  然后重新运行 ./setup.sh"
-                    fi
-                fi
-
-                # 检查最终结果
-                if [ -f "${IMAGES_DIR}/rootfs.ext4" ]; then
-                    ok "Rootfs 就绪: ${IMAGES_DIR}/rootfs.ext4"
-                    PASS_COUNT=$((PASS_COUNT + 1))
-                else
-                    fail "Ubuntu rootfs 未生成"
-                    info "请按上方提示手动下载 deb 包后重新运行 ./setup.sh"
-                    FAIL_COUNT=$((FAIL_COUNT + 1))
-                fi
-
-                if [ ! -f "${IMAGES_DIR}/vmlinuz" ]; then
-                    warn "vmlinuz 不存在: ${IMAGES_DIR}/vmlinuz"
+                    header "注入 Ubuntu 模块到 rootfs"
+                    "${PROJECT_DIR}/scripts/inject-modules.sh" ubuntu || warn "Ubuntu 模块注入失败"
                 fi
             fi
+        fi
+
+        # ---- 最终结果检查 ----
+        if [ -f "${IMAGES_DIR}/rootfs.ext4" ]; then
+            _result_kernel=$(ls "${IMAGES_DIR}/bzImage" "${IMAGES_DIR}/vmlinuz" 2>/dev/null | head -1 || true)
+            if [ -n "$_result_kernel" ]; then
+                ok "Guest 镜像就绪: ${IMAGES_DIR}/rootfs.ext4"
+                PASS_COUNT=$((PASS_COUNT + 1))
+            else
+                ok "Rootfs 就绪: ${IMAGES_DIR}/rootfs.ext4"
+                warn "内核不存在，请手动准备: ${IMAGES_DIR}/bzImage 或 vmlinuz"
+                PASS_COUNT=$((PASS_COUNT + 1))
+            fi
+        elif [ -f "$_DEBIAN_ROOTFS" ] && [ "$GUEST_TYPE" = "debian" ]; then
+            ok "Guest 镜像就绪: $_DEBIAN_ROOTFS"
+            PASS_COUNT=$((PASS_COUNT + 1))
         fi
     fi
 fi
