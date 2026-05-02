@@ -30,7 +30,7 @@ int sock_sync_listen(const char *path) {
 
 /* Default timeout for VCS connection (seconds). Override via environment:
  *   export COSIM_CONNECT_TIMEOUT=120 */
-#define COSIM_DEFAULT_CONNECT_TIMEOUT 60
+#define COSIM_DEFAULT_CONNECT_TIMEOUT 180
 
 int sock_sync_accept(int listen_fd) {
     /* Non-blocking accept loop: avoids poll()/select() for VCS Q-2020
