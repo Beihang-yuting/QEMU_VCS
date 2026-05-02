@@ -7,6 +7,7 @@
 #include <string.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <stdlib.h>
 
 int sock_sync_listen(const char *path) {
     int fd = socket(AF_UNIX, SOCK_STREAM, 0);
@@ -27,10 +28,25 @@ int sock_sync_listen(const char *path) {
     return fd;
 }
 
+/* Default timeout for VCS connection (seconds). Override via environment:
+ *   export COSIM_CONNECT_TIMEOUT=120 */
+#define COSIM_DEFAULT_CONNECT_TIMEOUT 60
+
 int sock_sync_accept(int listen_fd) {
     /* Non-blocking accept loop: avoids poll()/select() for VCS Q-2020
      * compatibility on Linux 6.17+ kernels. */
     int printed = 0;
+    int elapsed_ms = 0;
+
+    /* Read timeout from environment (seconds), default 60s */
+    int timeout_sec = COSIM_DEFAULT_CONNECT_TIMEOUT;
+    const char *env_timeout = getenv("COSIM_CONNECT_TIMEOUT");
+    if (env_timeout) {
+        int val = atoi(env_timeout);
+        if (val > 0) timeout_sec = val;
+    }
+    int timeout_ms = timeout_sec * 1000;
+
     /* Set listen socket to non-blocking */
     int flags = fcntl(listen_fd, F_GETFL, 0);
     fcntl(listen_fd, F_SETFL, flags | O_NONBLOCK);
@@ -46,14 +62,37 @@ int sock_sync_accept(int listen_fd) {
         if (errno == EAGAIN || errno == EWOULDBLOCK) {
             if (!printed) {
                 fprintf(stderr,
-                    "[bridge] Waiting for VCS connection...\n"
-                    "  Please start VCS in another terminal: make run-vcs\n");
+                    "[bridge] Waiting for VCS connection (timeout %ds)...\n"
+                    "  Please start VCS in another terminal: make run-vcs\n"
+                    "  Press Ctrl+C to cancel\n",
+                    timeout_sec);
                 printed = 1;
             }
+
+            /* Check timeout */
+            if (elapsed_ms >= timeout_ms) {
+                fprintf(stderr,
+                    "[bridge] ERROR: VCS connection timeout after %ds\n"
+                    "  VCS 未在 %d 秒内连接，QEMU 自动退出\n"
+                    "  如需更长等待时间: export COSIM_CONNECT_TIMEOUT=300\n",
+                    timeout_sec, timeout_sec);
+                fcntl(listen_fd, F_SETFL, flags);
+                return -1;
+            }
+
+            /* Print countdown every 10s */
+            if (elapsed_ms > 0 && elapsed_ms % 10000 == 0) {
+                int remaining = (timeout_ms - elapsed_ms) / 1000;
+                fprintf(stderr, "[bridge] Still waiting... %ds remaining\n",
+                        remaining);
+            }
+
             usleep(500000);  /* 0.5s between retries */
+            elapsed_ms += 500;
             continue;
         }
         if (errno == EINTR) {
+            fprintf(stderr, "[bridge] Interrupted, shutting down.\n");
             fcntl(listen_fd, F_SETFL, flags);
             return -1;
         }

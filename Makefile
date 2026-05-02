@@ -243,9 +243,21 @@ endif
 	@echo -e "\033[0;36m║\033[0m  日志:  $(LOG_DIR)/qemu.log\033[0;36m               ║\033[0m"
 	@echo -e "\033[0;36m╠══════════════════════════════════════════════╣\033[0m"
 	@echo -e "\033[0;36m║\033[0;33m  调试:  make run-qemu VERBOSE=1\033[0m\033[0;36m             ║\033[0m"
-	@echo -e "\033[0;36m║\033[0;33m  退出:  Ctrl+A X 或 cosim-stop\033[0m\033[0;36m              ║\033[0m"
+	@echo -e "\033[0;36m║\033[0;33m  超时:  COSIM_CONNECT_TIMEOUT=60（秒）\033[0m\033[0;36m      ║\033[0m"
+	@echo -e "\033[0;36m║\033[0;33m  退出:  Ctrl+C 取消 / Ctrl+A X 退出 Guest\033[0m\033[0;36m  ║\033[0m"
 	@echo -e "\033[0;36m╚══════════════════════════════════════════════╝\033[0m"
 	@echo ""
+	@QEMU_PID=""; \
+	cleanup() { \
+		if [ -n "$$QEMU_PID" ] && kill -0 $$QEMU_PID 2>/dev/null; then \
+			echo ""; \
+			echo "[cosim] 正在停止 QEMU (PID $$QEMU_PID)..."; \
+			kill -TERM $$QEMU_PID 2>/dev/null; \
+			wait $$QEMU_PID 2>/dev/null; \
+		fi; \
+		echo "[cosim] 已清理退出"; \
+	}; \
+	trap cleanup INT TERM; \
 	$(_QEMU_LD_PATH) \
 	$(QEMU) -M q35 -m $(GUEST_MEMORY) -smp 1 \
 		-kernel $(KERNEL) $(_GUEST_ARGS) \
@@ -253,7 +265,14 @@ endif
 		-device '$(strip $(_QEMU_DEV))' \
 		-nographic -no-reboot -action panic=shutdown \
 		-d unimp -D $(LOG_DIR)/qemu_debug.log \
-		2>&1 | tee $(LOG_DIR)/qemu.log
+		2>&1 | tee $(LOG_DIR)/qemu.log & \
+	QEMU_PID=$$!; \
+	wait $$QEMU_PID 2>/dev/null; \
+	EXIT_CODE=$$?; \
+	trap - INT TERM; \
+	if [ $$EXIT_CODE -ne 0 ]; then \
+		echo "[cosim] QEMU 退出码: $$EXIT_CODE"; \
+	fi
 
 # ============================================================
 # 运行 — VCS
