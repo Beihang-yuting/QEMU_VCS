@@ -86,11 +86,24 @@ download_headers() {
     case "$GUEST_TYPE" in
         ubuntu)
             # Ubuntu headers 分两个包:
-            #   linux-headers-<KVER>          -- 通用 scripts/Makefile
-            #   linux-headers-<KVER>-generic  -- 架构相关配置（即 $KVER 本身带 -generic）
+            #   linux-headers-<base_ver>          -- 通用 scripts/Makefile（all 架构）
+            #   linux-headers-<KVER>              -- 架构相关配置（amd64）
             local base_ver="${KVER%-generic}"  # e.g. 6.8.0-107
             local hdr_common="linux-headers-${base_ver}"
             local hdr_arch="linux-headers-${KVER}"
+
+            # 推断 Ubuntu suite
+            local _kver_major="${KVER%%.*}"
+            local _kver_rest="${KVER#*.}"
+            local _kver_minor="${_kver_rest%%.*}"
+            local _suite="noble"
+            case "${_kver_major}.${_kver_minor}" in
+                6.8|6.11) _suite="noble" ;;
+                6.5) _suite="mantic" ;;
+                5.15) _suite="jammy" ;;
+                5.4) _suite="focal" ;;
+            esac
+            local _mirror="http://archive.ubuntu.com/ubuntu"
 
             mkdir -p "$headers_dir"
 
@@ -109,15 +122,30 @@ download_headers() {
                     fi
                     deb_file=$(ls "${hdr_pkg}"_*.deb 2>/dev/null | head -1 || true)
 
-                    # fallback: 从镜像下载
+                    # fallback: 查询 Packages.gz 索引获取精确 URL
                     if [ -z "$deb_file" ]; then
-                        for mirror in \
-                            "https://mirrors.tuna.tsinghua.edu.cn/ubuntu/pool/main/l/linux" \
-                            "http://archive.ubuntu.com/ubuntu/pool/main/l/linux"; do
-                            wget -q --timeout=60 -O "${hdr_pkg}.deb" \
-                                "${mirror}/${hdr_pkg}_${base_ver}.${base_ver##*-}_amd64.deb" 2>/dev/null && \
-                                deb_file="${hdr_pkg}.deb" && break || true
+                        # 通用包是 all 架构，arch 包是 amd64
+                        local _pkg_arch="amd64"
+                        if [ "$hdr_pkg" = "$hdr_common" ]; then
+                            _pkg_arch="all"
+                        fi
+                        local _pkg_url=""
+                        for _component in "${_suite}-updates" "${_suite}"; do
+                            local _idx_url="${_mirror}/dists/${_component}/main/binary-${_pkg_arch}/Packages.gz"
+                            _pkg_url=$(curl -sf "$_idx_url" 2>/dev/null | gunzip 2>/dev/null | \
+                                awk -v pkg="$hdr_pkg" '
+                                    /^Package:/ { found = ($2 == pkg) }
+                                    found && /^Filename:/ { print $2; exit }
+                                ') || true
+                            [ -n "$_pkg_url" ] && break
                         done
+                        if [ -n "$_pkg_url" ]; then
+                            local _filename
+                            _filename=$(basename "$_pkg_url")
+                            info "  从 ${_suite} 镜像下载: ${_filename}"
+                            curl -fSL -o "$_filename" "${_mirror}/${_pkg_url}" 2>/dev/null && \
+                                deb_file="$_filename" || true
+                        fi
                     fi
                 fi
 
