@@ -61,7 +61,7 @@ check_prebuilt() {
 
 # ---- 下载并提取 kernel headers ----
 download_headers() {
-    local headers_dir="/tmp/cosim-kheaders-${KVER}"
+    local headers_dir="${PROJECT_DIR}/build/kheaders-${KVER}"
 
     # 检查缓存：deb 解压后在 usr/src/linux-headers-*/
     local cached_root=""
@@ -79,8 +79,9 @@ download_headers() {
         return 0
     fi
 
-    mkdir -p /tmp/cosim-kheaders-download
-    cd /tmp/cosim-kheaders-download
+    local download_dir="${PROJECT_DIR}/build/kheaders-download"
+    mkdir -p "$download_dir"
+    cd "$download_dir"
 
     case "$GUEST_TYPE" in
         ubuntu)
@@ -142,6 +143,9 @@ download_headers() {
             fi
             ;;
     esac
+
+    # 清理下载临时文件
+    rm -rf "$download_dir"
 
     # 查找顶层 headers 目录（排除子目录如 kernel/Makefile）
     local hdr_root=""
@@ -224,7 +228,7 @@ inject_driver() {
     if [ -f "$initramfs" ]; then
         # Debian: 有 initramfs，追加 .ko
         info "注入到 initramfs..."
-        local work="/tmp/cosim-initramfs-inject"
+        local work="${PROJECT_DIR}/build/initramfs-inject"
         rm -rf "$work" && mkdir -p "$work/lib/modules" "$work/etc/cosim" "$work/etc/local.d"
 
         cp "$COSIM_NIC_KO" "$work/lib/modules/cosim_nic.ko"
@@ -234,11 +238,13 @@ inject_driver() {
 
         cd "$work"
         find . | cpio -o -H newc 2>/dev/null | gzip >> "$initramfs"
+        cd "$PROJECT_DIR"
+        rm -rf "$work"
         ok "已追加到 initramfs"
     elif [ -f "$rootfs" ]; then
         # Ubuntu: 无 initramfs，注入 rootfs
         if [ "$(id -u)" = "0" ] || sudo -n true 2>/dev/null; then
-            local mnt="/tmp/cosim-rootfs-mnt"
+            local mnt="${PROJECT_DIR}/build/rootfs-mnt"
             mkdir -p "$mnt"
             sudo mount -o loop "$rootfs" "$mnt"
             sudo mkdir -p "$mnt/lib/modules" "$mnt/etc/cosim" "$mnt/etc/local.d"
@@ -247,6 +253,7 @@ inject_driver() {
             sudo cp "${PROJECT_DIR}/guest/overlay/etc/local.d/cosim-driver.start" "$mnt/etc/local.d/" 2>/dev/null || true
             sudo chmod +x "$mnt/etc/local.d/cosim-driver.start" 2>/dev/null || true
             sudo umount "$mnt"
+            rmdir "$mnt" 2>/dev/null || true
             ok "已写入 rootfs"
         else
             warn "注入 rootfs 需要 sudo 权限"

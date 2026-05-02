@@ -3,16 +3,16 @@
 # 用于 cosim guest，包含 VFIO/RDMA/NVMe-oF 等完整模块
 #
 # 支持预下载: 将 .deb 文件放到 WORK_DIR 可跳过下载
-#   /tmp/cosim-ubuntu-kernel-<KVER>/linux-image-unsigned-<KVER>_*.deb
-#   /tmp/cosim-ubuntu-kernel-<KVER>/linux-modules-<KVER>_*.deb
-#   /tmp/cosim-ubuntu-kernel-<KVER>/linux-modules-extra-<KVER>_*.deb
+#   <PROJECT>/build/ubuntu-kernel/linux-image-unsigned-<KVER>_*.deb
+#   <PROJECT>/build/ubuntu-kernel/linux-modules-<KVER>_*.deb
+#   <PROJECT>/build/ubuntu-kernel/linux-modules-extra-<KVER>_*.deb
 set -euo pipefail
 
 KVER="${1:-6.8.0-107-generic}"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 OUTPUT_DIR="${PROJECT_DIR}/guest/images/ubuntu"
-WORK_DIR="/tmp/cosim-ubuntu-kernel-${KVER}"
+WORK_DIR="${PROJECT_DIR}/build/ubuntu-kernel"
 
 # 从内核版本推断 Ubuntu 代号（用于构建下载 URL）
 _kver_major="${KVER%%.*}"
@@ -186,6 +186,10 @@ if [ $MISSING -eq 1 ]; then
 else
     echo "  所有关键模块验证通过"
 fi
+
+# ---- 清理临时解压目录（保留 .deb 便于重复使用）----
+cd "$WORK_DIR"
+rm -rf extract
 
 echo ""
 echo "============================================"
