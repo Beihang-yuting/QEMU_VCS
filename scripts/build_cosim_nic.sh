@@ -342,29 +342,40 @@ inject_driver() {
         rm -rf "$work"
         ok "已追加到 initramfs"
     elif [ -f "$rootfs" ]; then
-        # Ubuntu: 无 initramfs，注入 rootfs
-        if [ "$(id -u)" = "0" ] || sudo -n true 2>/dev/null; then
-            local mnt="${PROJECT_DIR}/build/rootfs-mnt"
-            mkdir -p "$mnt"
-            sudo mount -o loop "$rootfs" "$mnt"
-            sudo mkdir -p "$mnt/lib/modules" "$mnt/etc/cosim" "$mnt/etc/local.d"
-            sudo cp "$COSIM_NIC_KO" "$mnt/lib/modules/cosim_nic.ko"
-            local _insmod_opts=""
-            [ "$FORCE_INSMOD" = true ] && _insmod_opts="force=true"
-            printf "mode=stub\nko_name=cosim_nic.ko\n${_insmod_opts:+${_insmod_opts}\n}" | sudo tee "$mnt/etc/cosim/driver.conf" > /dev/null
-            sudo cp "${PROJECT_DIR}/guest/overlay/etc/local.d/cosim-driver.start" "$mnt/etc/local.d/" 2>/dev/null || true
-            sudo chmod +x "$mnt/etc/local.d/cosim-driver.start" 2>/dev/null || true
-            sudo umount "$mnt"
-            rmdir "$mnt" 2>/dev/null || true
-            ok "已写入 rootfs"
-        else
-            warn "注入 rootfs 需要 sudo 权限"
-            warn "请手动执行:"
-            warn "  sudo mount -o loop ${rootfs} /mnt"
-            warn "  sudo cp ${COSIM_NIC_KO} /mnt/lib/modules/"
-            warn "  sudo umount /mnt"
+        # Ubuntu: 无 initramfs，用 debugfs 注入 rootfs（不需要 sudo）
+        if ! command -v debugfs &>/dev/null; then
+            fail "debugfs 未安装，请安装: sudo apt install e2fsprogs"
             return 1
         fi
+
+        local _insmod_opts=""
+        [ "$FORCE_INSMOD" = true ] && _insmod_opts="force=true"
+
+        # 准备要注入的文件
+        local work="${PROJECT_DIR}/build/driver-inject"
+        rm -rf "$work" && mkdir -p "$work/lib/modules" "$work/etc/cosim" "$work/etc/local.d"
+        cp "$COSIM_NIC_KO" "$work/lib/modules/cosim_nic.ko"
+        printf "mode=stub\nko_name=cosim_nic.ko\n${_insmod_opts:+${_insmod_opts}\n}" > "$work/etc/cosim/driver.conf"
+        cp "${PROJECT_DIR}/guest/overlay/etc/local.d/cosim-driver.start" "$work/etc/local.d/" 2>/dev/null || true
+
+        # 生成 debugfs 命令
+        local cmds
+        cmds=$(mktemp)
+        cd "$work"
+        find . -type d | sort | while read -r dir; do
+            [ "$dir" = "." ] && continue
+            echo "mkdir ${dir#./}" >> "$cmds"
+        done
+        find . -type f | sort | while read -r file; do
+            echo "write $(pwd)/${file#./} ${file#./}" >> "$cmds"
+        done
+
+        info "debugfs 注入 $(wc -l < "$cmds") 个文件..."
+        debugfs -w -f "$cmds" "$rootfs" 2>/dev/null
+        cd "$PROJECT_DIR"
+        rm -f "$cmds"
+        rm -rf "$work"
+        ok "已写入 rootfs（debugfs）"
     else
         fail "未找到 initramfs 或 rootfs"
         return 1
