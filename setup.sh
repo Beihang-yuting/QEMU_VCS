@@ -229,28 +229,39 @@ interactive_menu() {
     echo ""
 
     # ---- 选择安装来源 ----
-    # 自动检测是否有离线包
-    local _found_zips
-    _found_zips=$(ls "${PROJECT_DIR}"/cosim-offline-*.zip 2>/dev/null | head -3 || true)
+    # 自动检测离线包（项目目录 + 当前工作目录）
+    local _found_zips=""
+    local _zip
+    for _zip in "${PROJECT_DIR}"/cosim-offline-*.zip "$(pwd)"/cosim-offline-*.zip; do
+        [ -f "$_zip" ] || continue
+        # 去重（PROJECT_DIR 可能等于 pwd）
+        case "$_found_zips" in
+            *"$_zip"*) ;;
+            *) _found_zips="${_found_zips:+${_found_zips}
+}${_zip}" ;;
+        esac
+    done
 
+    echo -e "${BOLD}[0] 离线包导入${NC}"
+    echo ""
     if [ -n "$_found_zips" ]; then
-        echo -e "${BOLD}[0] 检测到离线包${NC}"
-        echo ""
-        echo "$_found_zips" | while read -r f; do
-            echo "  $(basename "$f")  ($(du -h "$f" | cut -f1))"
+        echo "  检测到离线包:"
+        echo "$_found_zips" | while IFS= read -r f; do
+            echo "    $(basename "$f")  ($(du -h "$f" | cut -f1))  [$f]"
         done
         echo ""
-        echo "  i) 导入离线包 — 从外网打包的素材中导入（内网推荐）"
-        echo "  n) 跳过导入   — 直接进入本地构建流程"
+        echo "  i) 导入上方检测到的离线包（内网推荐）"
+        echo "  p) 手动输入离线包路径"
+        echo "  n) 跳过导入 — 直接进入本地构建流程"
         echo ""
 
         while true; do
-            read -rp "是否导入离线包？[i/n]: " _import_choice
+            read -rp "请选择 [i/p/n]: " _import_choice
             case "$_import_choice" in
                 i|I)
                     local _zip_list=()
                     while IFS= read -r f; do
-                        _zip_list+=("$f")
+                        [ -n "$f" ] && _zip_list+=("$f")
                     done <<< "$_found_zips"
 
                     if [ ${#_zip_list[@]} -eq 1 ]; then
@@ -268,12 +279,44 @@ interactive_menu() {
                     fi
                     import_offline "$OFFLINE_ZIP"
                     break ;;
+                p|P)
+                    read -rp "请输入离线包完整路径: " _manual_path
+                    if [ -f "$_manual_path" ]; then
+                        import_offline "$_manual_path"
+                    else
+                        fail "文件不存在: $_manual_path"
+                    fi
+                    break ;;
+                n|N) break ;;
+                *) echo "  请输入 i、p 或 n" ;;
+            esac
+        done
+    else
+        echo "  未在以下位置检测到 cosim-offline-*.zip:"
+        echo "    - ${PROJECT_DIR}/"
+        echo "    - $(pwd)/"
+        echo ""
+        echo "  i) 手动输入离线包路径"
+        echo "  n) 跳过，直接进入本地构建流程"
+        echo ""
+
+        while true; do
+            read -rp "请选择 [i/n]: " _import_choice
+            case "$_import_choice" in
+                i|I)
+                    read -rp "请输入离线包完整路径: " _manual_path
+                    if [ -f "$_manual_path" ]; then
+                        import_offline "$_manual_path"
+                    else
+                        fail "文件不存在: $_manual_path"
+                    fi
+                    break ;;
                 n|N) break ;;
                 *) echo "  请输入 i 或 n" ;;
             esac
         done
-        echo ""
     fi
+    echo ""
 
     # ---- 选择部署模式 ----
     echo -e "${BOLD}[1] 选择部署模式${NC}"
