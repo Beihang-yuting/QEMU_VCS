@@ -63,9 +63,12 @@ check_prebuilt() {
 download_headers() {
     local headers_dir="/tmp/cosim-kheaders-${KVER}"
 
-    if [ -d "${headers_dir}" ] && [ -f "${headers_dir}/Makefile" ]; then
-        info "Kernel headers 已缓存: ${headers_dir}"
-        KDIR="$headers_dir"
+    # 检查缓存：deb 解压后在 usr/src/linux-headers-*/
+    local cached_root=""
+    cached_root=$(find "$headers_dir" -maxdepth 4 -type d -name "linux-headers-*" 2>/dev/null | head -1)
+    if [ -n "$cached_root" ] && [ -f "${cached_root}/Makefile" ]; then
+        info "Kernel headers 已缓存: ${cached_root}"
+        KDIR="$cached_root"
         return 0
     fi
 
@@ -140,13 +143,25 @@ download_headers() {
             ;;
     esac
 
-    # 查找 Makefile 位置
-    local makefile_path=$(find "$headers_dir" -maxdepth 5 -name "Makefile" \
-        -path "*/linux-headers-*/Makefile" 2>/dev/null | head -1)
-    if [ -z "$makefile_path" ]; then
-        makefile_path=$(find "$headers_dir" -maxdepth 3 -name "Makefile" 2>/dev/null | head -1)
+    # 查找顶层 headers 目录（排除子目录如 kernel/Makefile）
+    local hdr_root=""
+    hdr_root=$(find "$headers_dir" -maxdepth 4 -type d -name "linux-headers-*" 2>/dev/null | head -1)
+    if [ -n "$hdr_root" ] && [ -f "${hdr_root}/Makefile" ]; then
+        KDIR="$hdr_root"
+        ok "Kernel build dir: ${KDIR}"
+        return 0
     fi
 
+    # fallback: 找包含 include/ 或 scripts/ 的 Makefile 所在目录（确保是顶层）
+    local makefile_path=""
+    makefile_path=$(find "$headers_dir" -maxdepth 5 -name "Makefile" 2>/dev/null | \
+        while read -r f; do
+            d="$(dirname "$f")"
+            if [ -d "$d/include" ] || [ -d "$d/scripts" ]; then
+                echo "$f"
+                break
+            fi
+        done)
     if [ -n "$makefile_path" ]; then
         KDIR="$(dirname "$makefile_path")"
         ok "Kernel build dir: ${KDIR}"
