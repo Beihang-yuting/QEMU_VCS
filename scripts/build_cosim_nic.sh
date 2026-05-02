@@ -167,15 +167,11 @@ download_headers() {
                     deb_file=$(ls "${hdr_pkg}"_*.deb 2>/dev/null | head -1 || true)
 
                     # fallback: 查询 Packages.gz 索引获取精确 URL
+                    # 注意: all 架构的包也列在 binary-amd64 索引中
                     if [ -z "$deb_file" ]; then
-                        # 通用包是 all 架构，arch 包是 amd64
-                        local _pkg_arch="amd64"
-                        if [ "$hdr_pkg" = "$hdr_common" ]; then
-                            _pkg_arch="all"
-                        fi
                         local _pkg_url=""
                         for _component in "${_suite}-updates" "${_suite}"; do
-                            local _idx_url="${_mirror}/dists/${_component}/main/binary-${_pkg_arch}/Packages.gz"
+                            local _idx_url="${_mirror}/dists/${_component}/main/binary-amd64/Packages.gz"
                             _pkg_url=$(curl -sf "$_idx_url" 2>/dev/null | gunzip 2>/dev/null | \
                                 awk -v pkg="$hdr_pkg" '
                                     /^Package:/ { found = ($2 == pkg) }
