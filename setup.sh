@@ -72,6 +72,10 @@ QEMU 源码 (--qemu-src, 仅 local/qemu-only 模式):
   path:<dir>  使用本地已有源码，例: --qemu-src path:/home/user/qemu
   skip        跳过 QEMU 编译（仅编译 Bridge）
 
+离线部署:
+  --prepare-offline         在外网打包离线安装包（zip）
+  --import <zip>            导入离线包后继续安装
+
 其他选项:
   --help      显示此帮助信息
 
@@ -81,6 +85,11 @@ QEMU 源码 (--qemu-src, 仅 local/qemu-only 模式):
   ./setup.sh --mode local --guest debian              # 本地全栈 + Debian 完整工具链
   ./setup.sh --mode qemu-only --guest ubuntu          # QEMU 侧远程部署
   ./setup.sh --mode vcs-only                          # VCS 侧远程部署
+
+  # 离线部署流程:
+  # 外网: ./setup.sh --prepare-offline                # 生成 cosim-offline-<date>.zip
+  # 内网: ./setup.sh --import cosim-offline-*.zip     # 导入后自动编译
+  # 内网: ./setup.sh                                  # 交互菜单自动检测离线包
 USAGE
     exit 0
 }
@@ -93,6 +102,7 @@ GUEST_TYPE=""
 QEMU_SRC_OPT=""
 DRIVER_MODE=""
 CUSTOM_KO=""
+OFFLINE_ZIP=""
 
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -106,6 +116,11 @@ while [ $# -gt 0 ]; do
             DRIVER_MODE="$2"; shift 2 ;;
         --ko)
             CUSTOM_KO="$2"; shift 2 ;;
+        --import)
+            OFFLINE_ZIP="$2"; shift 2 ;;
+        --prepare-offline)
+            exec "${PROJECT_DIR}/scripts/prepare-offline.sh" "${@:2}"
+            ;;
         --help|-h)
             usage ;;
         *)
@@ -113,6 +128,95 @@ while [ $# -gt 0 ]; do
             usage ;;
     esac
 done
+
+# ============================================================
+# 离线包导入
+# ============================================================
+import_offline() {
+    local zip_file="$1"
+
+    if [ ! -f "$zip_file" ]; then
+        fail "离线包不存在: $zip_file"
+        return 1
+    fi
+
+    info "解压离线包: $zip_file"
+    local tmpdir="${PROJECT_DIR}/build/offline-import"
+    rm -rf "$tmpdir"
+    mkdir -p "$tmpdir"
+    unzip -qo "$zip_file" -d "$tmpdir"
+
+    # 读取元数据
+    if [ -f "$tmpdir/offline-meta.env" ]; then
+        source "$tmpdir/offline-meta.env"
+        ok "离线包版本: ${OFFLINE_DATE:-unknown}"
+        ok "Guest 类型:  ${OFFLINE_GUEST_TYPE:-unknown}"
+        ok "内核版本:    ${OFFLINE_KVER:-unknown}"
+    else
+        warn "离线包缺少元数据文件，尝试继续导入..."
+    fi
+
+    local imported=0
+
+    # QEMU 源码
+    local qemu_tar
+    qemu_tar=$(ls "$tmpdir"/qemu-src/qemu-*.tar.* 2>/dev/null | head -1 || true)
+    if [ -n "$qemu_tar" ]; then
+        mkdir -p "${PROJECT_DIR}/third_party"
+        cp "$qemu_tar" "${PROJECT_DIR}/third_party/"
+        ok "QEMU 源码已导入: third_party/$(basename "$qemu_tar")"
+        imported=$((imported + 1))
+    fi
+
+    # Debian 镜像
+    if [ -f "$tmpdir/guest/debian/rootfs.ext4" ]; then
+        mkdir -p "${PROJECT_DIR}/guest/images/debian"
+        cp "$tmpdir"/guest/debian/* "${PROJECT_DIR}/guest/images/debian/"
+        ok "Debian 镜像已导入: guest/images/debian/"
+        imported=$((imported + 1))
+    fi
+
+    # Ubuntu 镜像
+    if [ -f "$tmpdir/guest/ubuntu/vmlinuz" ]; then
+        mkdir -p "${PROJECT_DIR}/guest/images/ubuntu"
+        cp "$tmpdir"/guest/ubuntu/* "${PROJECT_DIR}/guest/images/ubuntu/"
+        ok "Ubuntu 镜像已导入: guest/images/ubuntu/"
+        imported=$((imported + 1))
+    fi
+
+    # Kernel headers
+    if ls "$tmpdir"/kheaders/*.deb &>/dev/null; then
+        local kheaders_dest="${PROJECT_DIR}/build/kheaders-download"
+        mkdir -p "$kheaders_dest"
+        cp "$tmpdir"/kheaders/*.deb "$kheaders_dest/"
+        ok "Kernel headers 已导入: build/kheaders-download/"
+        imported=$((imported + 1))
+    fi
+
+    # 预编译 cosim_nic.ko
+    if ls "$tmpdir"/driver/cosim_nic_*.ko &>/dev/null; then
+        mkdir -p "${PROJECT_DIR}/guest/driver/prebuilt"
+        cp "$tmpdir"/driver/cosim_nic_*.ko "${PROJECT_DIR}/guest/driver/prebuilt/"
+        ok "cosim_nic.ko 已导入: guest/driver/prebuilt/"
+        imported=$((imported + 1))
+    fi
+
+    # Guest 测试工具
+    if [ -d "$tmpdir/guest_tools" ] && [ "$(ls "$tmpdir/guest_tools" 2>/dev/null | wc -l)" -gt 0 ]; then
+        mkdir -p "${PROJECT_DIR}/build/guest_tools"
+        cp "$tmpdir"/guest_tools/* "${PROJECT_DIR}/build/guest_tools/"
+        ok "Guest 测试工具已导入: build/guest_tools/"
+        imported=$((imported + 1))
+    fi
+
+    rm -rf "$tmpdir"
+
+    echo ""
+    ok "离线包导入完成，共导入 ${imported} 个组件"
+    echo ""
+    info "接下来 setup.sh 将使用导入的素材进行本地编译（QEMU、Bridge 等）"
+    echo ""
+}
 
 # ============================================================
 # 交互式菜单（无参数时）
@@ -123,6 +227,53 @@ interactive_menu() {
     echo -e "${BOLD}       CoSim Platform 安装向导${NC}"
     echo -e "${BOLD}============================================================${NC}"
     echo ""
+
+    # ---- 选择安装来源 ----
+    # 自动检测是否有离线包
+    local _found_zips
+    _found_zips=$(ls "${PROJECT_DIR}"/cosim-offline-*.zip 2>/dev/null | head -3 || true)
+
+    if [ -n "$_found_zips" ]; then
+        echo -e "${BOLD}[0] 检测到离线包${NC}"
+        echo ""
+        echo "$_found_zips" | while read -r f; do
+            echo "  $(basename "$f")  ($(du -h "$f" | cut -f1))"
+        done
+        echo ""
+        echo "  i) 导入离线包 — 从外网打包的素材中导入（内网推荐）"
+        echo "  n) 跳过导入   — 直接进入本地构建流程"
+        echo ""
+
+        while true; do
+            read -rp "是否导入离线包？[i/n]: " _import_choice
+            case "$_import_choice" in
+                i|I)
+                    local _zip_list=()
+                    while IFS= read -r f; do
+                        _zip_list+=("$f")
+                    done <<< "$_found_zips"
+
+                    if [ ${#_zip_list[@]} -eq 1 ]; then
+                        OFFLINE_ZIP="${_zip_list[0]}"
+                    else
+                        echo ""
+                        local _idx=1
+                        for f in "${_zip_list[@]}"; do
+                            echo "  ${_idx}) $(basename "$f")"
+                            _idx=$((_idx + 1))
+                        done
+                        read -rp "请选择 [1]: " _zip_choice
+                        _zip_choice="${_zip_choice:-1}"
+                        OFFLINE_ZIP="${_zip_list[$((_zip_choice - 1))]}"
+                    fi
+                    import_offline "$OFFLINE_ZIP"
+                    break ;;
+                n|N) break ;;
+                *) echo "  请输入 i 或 n" ;;
+            esac
+        done
+        echo ""
+    fi
 
     # ---- 选择部署模式 ----
     echo -e "${BOLD}[1] 选择部署模式${NC}"
@@ -229,6 +380,15 @@ interactive_menu() {
         ok "QEMU 源码: ${QEMU_SRC_OPT}"
     fi
 }
+
+# 命令行指定 --import 时，先导入再继续
+if [ -n "$OFFLINE_ZIP" ] && [ -z "$SETUP_MODE" ]; then
+    # --import 但没指定 --mode，导入后进入交互菜单
+    import_offline "$OFFLINE_ZIP"
+elif [ -n "$OFFLINE_ZIP" ]; then
+    # --import + --mode，导入后继续非交互流程
+    import_offline "$OFFLINE_ZIP"
+fi
 
 # 如果未通过命令行指定模式，进入交互式菜单
 if [ -z "$SETUP_MODE" ]; then
