@@ -1286,8 +1286,13 @@ elif [ "$NEED_GUEST" = true ] && [ "$DRIVER_MODE" = "custom" ] && [ -n "$CUSTOM_
     next_step "注入自定义驱动"
 
     info "注入自定义驱动: ${CUSTOM_KO}"
-    COSIM_NIC_KO="$CUSTOM_KO" "${PROJECT_DIR}/scripts/build_cosim_nic.sh" "${GUEST_TYPE}" --inject-only 2>/dev/null || \
+    if COSIM_NIC_KO="$CUSTOM_KO" "${PROJECT_DIR}/scripts/build_cosim_nic.sh" "${GUEST_TYPE}" --inject-only; then
+        ok "自定义驱动注入成功"
+        PASS_COUNT=$((PASS_COUNT + 1))
+    else
         warn "自定义驱动注入失败，请手动将 ${CUSTOM_KO} 放入 Guest /lib/modules/"
+        SKIP_COUNT=$((SKIP_COUNT + 1))
+    fi
 fi
 
 # ============================================================

@@ -16,6 +16,10 @@ DRIVER_DIR="${PROJECT_DIR}/guest/driver"
 PREBUILT_DIR="${DRIVER_DIR}/prebuilt"
 
 GUEST_TYPE="${1:-ubuntu}"
+INJECT_ONLY=false
+if [ "${2:-}" = "--inject-only" ]; then
+    INJECT_ONLY=true
+fi
 IMAGES_DIR="${PROJECT_DIR}/guest/images/${GUEST_TYPE}"
 
 RED='\033[0;31m'
@@ -377,6 +381,19 @@ inject_driver() {
 FORCE_INSMOD=false
 
 info "=== cosim_nic.ko 自动编译+注入 (${GUEST_TYPE}) ==="
+
+# --inject-only 模式: 跳过编译，直接注入用户指定的 .ko
+if [ "$INJECT_ONLY" = true ]; then
+    if [ -z "${COSIM_NIC_KO:-}" ] || [ ! -f "${COSIM_NIC_KO:-}" ]; then
+        fail "COSIM_NIC_KO 未设置或文件不存在: ${COSIM_NIC_KO:-（未设置）}"
+        fail "用法: COSIM_NIC_KO=/path/to/your.ko $0 ${GUEST_TYPE} --inject-only"
+        exit 1
+    fi
+    info "注入自定义驱动: ${COSIM_NIC_KO}"
+    inject_driver
+    ok "=== 完成（自定义驱动注入）==="
+    exit 0
+fi
 
 detect_kernel_version
 
