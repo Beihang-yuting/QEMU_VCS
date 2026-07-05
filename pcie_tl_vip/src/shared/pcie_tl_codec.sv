@@ -131,10 +131,10 @@ class pcie_tl_codec extends uvm_object;
                 payload_len = bytes.size() - payload_start - 4;
             else if (!tlp.td)
                 payload_len = bytes.size() - payload_start;
-
-            /* CoSim 本地补丁：防止 payload_len 为负（cosim glue 可能发
-               fmt=WITH_DATA 但无实际 payload 的 TLP） */
+            // 防御性检查：防止 payload_len 为负（cosim glue 可能发
+            // fmt=WITH_DATA 但无实际 payload 的 TLP）
             if (payload_len < 0) payload_len = 0;
+
             tlp.payload = new[payload_len];
             for (int i = 0; i < payload_len; i++)
                 tlp.payload[i] = bytes[payload_start + i];

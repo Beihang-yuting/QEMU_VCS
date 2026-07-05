@@ -88,6 +88,8 @@ bridge:
 VCS_FLAGS  = -full64 -sverilog -timescale=1ns/1ps +v2k -debug_access+all -cc gcc
 VCS_UVM    = -ntb_opts uvm-1.2
 VIP_SRC    = pcie_tl_vip/src
+# host_mem 统一内存模型：上游 pcie_tl_pkg.sv 无条件 import host_mem_pkg，为硬依赖
+HOST_MEM_SRC = third_party/host_mem/src
 
 BRIDGE_C_SRCS = \
 	bridge/vcs/bridge_vcs.c bridge/vcs/sock_sync_vcs.c \
@@ -107,12 +109,13 @@ vcs-vip:
 	@echo "[BUILD] 编译 VCS VIP 模式..."
 	@mkdir -p $(VCS_SIM_DIR)
 	vcs $(VCS_FLAGS) $(VCS_UVM) \
-		+define+COSIM_VIP_MODE \
+		+define+COSIM_VIP_MODE +define+PCIE_COSIM_ENABLE \
 		-Mdir=$(VCS_SIM_DIR)/csrc \
 		-CFLAGS "$(VCS_CFLAGS)" \
 		-LDFLAGS "$(VCS_LDFLAGS)" \
-		+incdir+bridge/vcs +incdir+$(VIP_SRC) +incdir+vcs-tb \
+		+incdir+bridge/vcs +incdir+$(HOST_MEM_SRC) +incdir+$(VIP_SRC) +incdir+vcs-tb \
 		bridge/vcs/bridge_vcs.sv \
+		$(HOST_MEM_SRC)/host_mem_pkg.sv $(HOST_MEM_SRC)/host_mem_manager.sv \
 		$(VIP_SRC)/pcie_tl_if.sv $(VIP_SRC)/pcie_tl_pkg.sv \
 		vcs-tb/tb_top.sv vcs-tb/pcie_ep_stub.sv \
 		vcs-tb/glue_if_to_stub.sv vcs-tb/cosim_pkg.sv vcs-tb/cosim_vip_top.sv \
@@ -134,11 +137,12 @@ vcs-legacy:
 vcs-vip-perf:
 	@mkdir -p $(VCS_SIM_DIR)
 	vcs $(VCS_FLAGS) $(VCS_UVM) \
-		+define+COSIM_VIP_MODE +define+COSIM_PERF_EN \
+		+define+COSIM_VIP_MODE +define+COSIM_PERF_EN +define+PCIE_COSIM_ENABLE \
 		-Mdir=$(VCS_SIM_DIR)/csrc_perf \
 		-CFLAGS "$(VCS_CFLAGS)" -LDFLAGS "$(VCS_LDFLAGS)" \
-		+incdir+bridge/vcs +incdir+$(VIP_SRC) +incdir+vcs-tb \
+		+incdir+bridge/vcs +incdir+$(HOST_MEM_SRC) +incdir+$(VIP_SRC) +incdir+vcs-tb \
 		bridge/vcs/bridge_vcs.sv \
+		$(HOST_MEM_SRC)/host_mem_pkg.sv $(HOST_MEM_SRC)/host_mem_manager.sv \
 		$(VIP_SRC)/pcie_tl_if.sv $(VIP_SRC)/pcie_tl_pkg.sv \
 		vcs-tb/tb_top.sv vcs-tb/pcie_ep_stub.sv \
 		vcs-tb/glue_if_to_stub.sv vcs-tb/cosim_pkg.sv vcs-tb/cosim_vip_top.sv \
@@ -284,6 +288,7 @@ else
 endif
 
 _VCS_ARGS = $(_VCS_TRANS) \
+	+BYPASS_CONFIG=1 \
 	+ETH_SHM=$(ETH_SHM) +ETH_ROLE=$(ETH_ROLE) +ETH_CREATE=$(ETH_CREATE) \
 	+MAC_LAST=$(MAC_LAST) +SIM_TIMEOUT_MS=$(SIM_TIMEOUT) \
 	+UVM_TESTNAME=$(VCS_TEST) +NO_WAVE \
@@ -347,13 +352,13 @@ run-dual:
 		-d unimp -D $$LOGDIR/qemu2_debug.log > $$LOGDIR/qemu2.log 2>&1 & \
 	PIDS="$$PIDS $$!"; sleep 2; \
 	echo "[3/4] VCS1 (RoleA, MAC=01)..."; \
-	cd $(VCS_SIM_DIR) && ./simv_vip $$VT1 \
+	cd $(VCS_SIM_DIR) && ./simv_vip $$VT1 +BYPASS_CONFIG=1 \
 		+ETH_SHM=$(ETH_SHM) +ETH_ROLE=0 +ETH_CREATE=1 +MAC_LAST=1 \
 		+SIM_TIMEOUT_MS=$(SIM_TIMEOUT) +UVM_TESTNAME=cosim_test +NO_WAVE \
 		> $$LOGDIR/vcs1.log 2>&1 & \
 	PIDS="$$PIDS $$!"; sleep 3; \
 	echo "[4/4] VCS2 (RoleB, MAC=02)..."; \
-	cd $(VCS_SIM_DIR) && ./simv_vip $$VT2 \
+	cd $(VCS_SIM_DIR) && ./simv_vip $$VT2 +BYPASS_CONFIG=1 \
 		+ETH_SHM=$(ETH_SHM) +ETH_ROLE=1 +ETH_CREATE=0 +MAC_LAST=2 \
 		+SIM_TIMEOUT_MS=$(SIM_TIMEOUT) +UVM_TESTNAME=cosim_test +NO_WAVE \
 		> $$LOGDIR/vcs2.log 2>&1 & \

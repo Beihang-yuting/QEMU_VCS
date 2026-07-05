@@ -205,6 +205,37 @@ class pcie_tl_tlp extends uvm_sequence_item;
         return s;
     endfunction
 
+    // do_copy：深拷贝所有字段，使 clone() 正确复制对象
+    virtual function void do_copy(uvm_object rhs);
+        pcie_tl_tlp rhs_;
+        super.do_copy(rhs);
+        if (!$cast(rhs_, rhs)) return;
+        // 拷贝 TLP 头部公共字段
+        this.fmt                 = rhs_.fmt;
+        this.type_f              = rhs_.type_f;
+        this.kind                = rhs_.kind;
+        this.tc                  = rhs_.tc;
+        this.th                  = rhs_.th;
+        this.td                  = rhs_.td;
+        this.ep_bit              = rhs_.ep_bit;
+        this.attr                = rhs_.attr;
+        this.length              = rhs_.length;
+        this.requester_id        = rhs_.requester_id;
+        this.tag                 = rhs_.tag;
+        // 深拷贝 payload 动态数组
+        this.payload             = new[rhs_.payload.size()](rhs_.payload);
+        // 拷贝错误注入元数据
+        this.inject_ecrc_err     = rhs_.inject_ecrc_err;
+        this.inject_lcrc_err     = rhs_.inject_lcrc_err;
+        this.inject_poisoned     = rhs_.inject_poisoned;
+        this.violate_ordering    = rhs_.violate_ordering;
+        this.field_bitmask       = rhs_.field_bitmask;
+        this.constraint_mode_sel = rhs_.constraint_mode_sel;
+        // 拷贝 TLP Prefix 队列
+        this.prefixes            = rhs_.prefixes;
+        this.has_prefix          = rhs_.has_prefix;
+    endfunction : do_copy
+
     virtual function bit do_compare(uvm_object rhs, uvm_comparer comparer);
         pcie_tl_tlp rhs_;
         if (!$cast(rhs_, rhs)) return 0;
@@ -320,6 +351,19 @@ class pcie_tl_mem_tlp extends pcie_tl_tlp;
     function new(string name = "pcie_tl_mem_tlp");
         super.new(name);
     endfunction
+
+    // do_copy：拷贝 mem_tlp 子类特有字段
+    virtual function void do_copy(uvm_object rhs);
+        pcie_tl_mem_tlp rhs_;
+        super.do_copy(rhs);
+        if (!$cast(rhs_, rhs)) return;
+        this.addr           = rhs_.addr;
+        this.first_be       = rhs_.first_be;
+        this.last_be        = rhs_.last_be;
+        this.is_64bit       = rhs_.is_64bit;
+        this.cfg_mps_bytes  = rhs_.cfg_mps_bytes;
+        this.cfg_mrrs_bytes = rhs_.cfg_mrrs_bytes;
+    endfunction : do_copy
 
     virtual function string convert2string();
         string s = super.convert2string();
@@ -439,6 +483,18 @@ class pcie_tl_cpl_tlp extends pcie_tl_tlp;
     function new(string name = "pcie_tl_cpl_tlp");
         super.new(name);
     endfunction
+
+    // do_copy：拷贝 cpl_tlp 子类特有字段
+    virtual function void do_copy(uvm_object rhs);
+        pcie_tl_cpl_tlp rhs_;
+        super.do_copy(rhs);
+        if (!$cast(rhs_, rhs)) return;
+        this.completer_id = rhs_.completer_id;
+        this.cpl_status   = rhs_.cpl_status;
+        this.bcm          = rhs_.bcm;
+        this.byte_count   = rhs_.byte_count;
+        this.lower_addr   = rhs_.lower_addr;
+    endfunction : do_copy
 endclass
 
 //=============================================================================

@@ -15,6 +15,7 @@ class pcie_tl_enum_then_dma_vseq extends pcie_tl_base_vseq;
         // Phase 2: DMA
         dma_seq = pcie_tl_dma_rdwr_seq::type_id::create("dma_seq");
         dma_seq.addr = dma_addr; dma_seq.xfer_size = dma_size;
+        dma_seq.max_payload = 256;   // must be non-zero or body() loops forever
         dma_seq.is_read = 0;
         dma_seq.start(rc_seqr);
     endtask

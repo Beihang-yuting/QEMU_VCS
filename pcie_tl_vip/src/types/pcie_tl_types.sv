@@ -240,7 +240,8 @@ typedef enum int {
     SWITCH_ROUTE_USP    = 0,
     SWITCH_ROUTE_LOCAL  = -1,
     SWITCH_ROUTE_DROP   = -2,
-    SWITCH_ROUTE_BCAST  = -3
+    SWITCH_ROUTE_BCAST  = -3,
+    SWITCH_ROUTE_CROSS_ROOT = -4
 } switch_route_special_e;
 
 // Switch route table entry (per port)

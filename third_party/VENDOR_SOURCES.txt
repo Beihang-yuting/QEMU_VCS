@@ -1,0 +1,5 @@
+# Vendored upstream sources (2026-07-04T16:47Z)
+host_mem     2fb54d16a4685e988fac9508db0788898c33840a  branch feat/host_mem_api-and-buddy-fix
+axis_vip     dd9083fda2c7f9492b147b2e212e877425f9f893  branch master
+xilinx_pcie  3707581ed8837b2e9a34ec3ddb73d8d152861960  branch feat/adapter-mode
+pcie_work    1e2d62eda0e59dcfc3b4484bbc0b1e99795f45a7  branch main  (-> synced into ./pcie_tl_vip)

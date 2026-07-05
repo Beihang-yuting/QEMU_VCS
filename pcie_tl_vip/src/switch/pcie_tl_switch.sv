@@ -9,7 +9,8 @@ class pcie_tl_switch extends uvm_component;
     pcie_tl_switch_config  sw_cfg;
 
     //--- Ports ---
-    pcie_tl_switch_port    usp;
+    pcie_tl_switch_port    usps[];   // [num_usp]
+    pcie_tl_switch_port    usp;       // alias = usps[0]; back-compat for env/tests (single-root)
     pcie_tl_switch_port    dsp[];
 
     //--- All ports flat array for fabric ---
@@ -29,40 +30,53 @@ class pcie_tl_switch extends uvm_component;
     endfunction
 
     function void build_phase(uvm_phase phase);
-        int n;
+        int nu, nd;
         super.build_phase(phase);
 
         if (sw_cfg == null)
             `uvm_fatal("SWITCH", "sw_cfg is null")
 
-        n = sw_cfg.num_ds_ports;
+        // dsp_owner[] is filled by init_defaults(); the env/test calls it before switch build.
+        if (sw_cfg.dsp_owner.size() != sw_cfg.num_ds_ports)
+            sw_cfg.init_defaults();
 
-        usp = pcie_tl_switch_port::type_id::create("usp", this);
-        usp.role    = SWITCH_USP;
-        usp.port_id = 0;
+        nu = sw_cfg.num_usp;
+        nd = sw_cfg.num_ds_ports;
 
-        dsp = new[n];
-        for (int i = 0; i < n; i++) begin
+        // Port layout: [USP_0..USP_{nu-1}, DSP_0..DSP_{nd-1}]
+        usps = new[nu];
+        for (int r = 0; r < nu; r++) begin
+            usps[r] = pcie_tl_switch_port::type_id::create($sformatf("usp_%0d", r), this);
+            usps[r].role    = SWITCH_USP;
+            usps[r].port_id = r;
+            usps[r].root_id = r;
+        end
+        usp = usps[0];   // alias for back-compat (single-root)
+
+        dsp = new[nd];
+        for (int i = 0; i < nd; i++) begin
             dsp[i] = pcie_tl_switch_port::type_id::create($sformatf("dsp_%0d", i), this);
-            dsp[i].role    = SWITCH_DSP;
-            dsp[i].port_id = i + 1;
+            dsp[i].role      = SWITCH_DSP;
+            dsp[i].port_id   = nu + i;
+            dsp[i].owner_usp = sw_cfg.dsp_owner[i];
         end
 
-        all_ports = new[n + 1];
-        all_ports[0] = usp;
-        for (int i = 0; i < n; i++)
-            all_ports[i + 1] = dsp[i];
+        all_ports = new[nu + nd];
+        for (int r = 0; r < nu; r++) all_ports[r]      = usps[r];
+        for (int i = 0; i < nd; i++) all_ports[nu + i] = dsp[i];
 
         fabric = pcie_tl_switch_fabric::type_id::create("fabric");
         fabric.ports      = all_ports;
-        fabric.num_ports  = n + 1;
+        fabric.num_ports  = nu + nd;
+        fabric.num_usp    = nu;
         fabric.p2p_enable = sw_cfg.p2p_enable;
     endfunction
 
     function void connect_phase(uvm_phase phase);
         super.connect_phase(phase);
         if (!sw_cfg.enum_mode) begin
-            usp.apply_config(sw_cfg, 0);
+            for (int r = 0; r < sw_cfg.num_usp; r++)
+                usps[r].apply_config(sw_cfg, r);   // r = root index → per-root usp_*[r] domain
             for (int i = 0; i < sw_cfg.num_ds_ports; i++)
                 dsp[i].apply_config(sw_cfg, i);
         end
@@ -70,21 +84,24 @@ class pcie_tl_switch extends uvm_component;
 
     task run_phase(uvm_phase phase);
         fork
-            usp_forward_loop();
-            for (int i = 0; i < sw_cfg.num_ds_ports; i++) begin
-                automatic int idx = i;
-                fork
-                    dsp_forward_loop(idx);
-                join_none
+            begin
+                for (int r = 0; r < sw_cfg.num_usp; r++) begin
+                    automatic int rr = r;
+                    fork usp_forward_loop(rr); join_none
+                end
+                for (int i = 0; i < sw_cfg.num_ds_ports; i++) begin
+                    automatic int ii = i;
+                    fork dsp_forward_loop(ii); join_none
+                end
             end
         join_none
     endtask
 
-    protected task usp_forward_loop();
+    protected task usp_forward_loop(int root_idx);
         pcie_tl_tlp tlp;
         forever begin
-            usp.rx_fifo.get(tlp);
-            route_and_forward(tlp, 0);
+            usps[root_idx].rx_fifo.get(tlp);
+            route_and_forward(tlp, root_idx);   // ingress port_id = root index
         end
     endtask
 
@@ -92,7 +109,7 @@ class pcie_tl_switch extends uvm_component;
         pcie_tl_tlp tlp;
         forever begin
             dsp[port_idx].rx_fifo.get(tlp);
-            route_and_forward(tlp, port_idx + 1);
+            route_and_forward(tlp, sw_cfg.num_usp + port_idx);
         end
     endtask
 
@@ -106,10 +123,10 @@ class pcie_tl_switch extends uvm_component;
 
         dst = fabric.route(tlp, ingress_port_id);
 
-        // If routed back to ingress, redirect: DSP self-route → USP, USP self-route → drop
+        // If routed back to ingress, redirect: DSP self-route → owning USP, USP self-route → drop
         if (dst == ingress_port_id) begin
-            if (ingress_port_id > 0)
-                dst = SWITCH_ROUTE_USP;  // DSP→self: send upstream
+            if (ingress_port_id >= sw_cfg.num_usp)
+                dst = fabric.usp_port_id(all_ports[ingress_port_id].owner_usp); // DSP→self: upstream
             else
                 dst = SWITCH_ROUTE_DROP; // USP→self: nowhere to go
         end
@@ -124,10 +141,21 @@ class pcie_tl_switch extends uvm_component;
                 `uvm_info("SWITCH", $sformatf("DROPPED from port %0d: %s",
                     ingress_port_id, tlp.convert2string()), UVM_MEDIUM)
             end
+            SWITCH_ROUTE_CROSS_ROOT: begin
+                total_dropped++;
+                fabric.cross_root_violations++;
+                if (sw_cfg.cross_root_check_enable)
+                    `uvm_error("CROSS_ROOT", $sformatf("跨根丢弃 from port %0d: %s",
+                        ingress_port_id, tlp.convert2string()))
+                else
+                    `uvm_info("SWITCH", $sformatf("cross-root dropped from port %0d",
+                        ingress_port_id), UVM_MEDIUM)
+            end
             SWITCH_ROUTE_BCAST: begin
+                int ir = fabric.root_of(ingress_port_id);
                 total_bcast++;
-                for (int i = 1; i <= sw_cfg.num_ds_ports; i++) begin
-                    if (i != ingress_port_id) begin
+                for (int i = sw_cfg.num_usp; i < all_ports.size(); i++) begin
+                    if (i != ingress_port_id && all_ports[i].owner_usp == ir) begin
                         all_ports[i].tx_fifo.put(tlp);
                         all_ports[i].forwarded_count++;
                     end
@@ -138,8 +166,8 @@ class pcie_tl_switch extends uvm_component;
                     all_ports[dst].tx_fifo.put(tlp);
                     all_ports[dst].forwarded_count++;
                     total_routed++;
-                    if (ingress_port_id > 0 && dst > 0)
-                        total_p2p++;
+                    if (ingress_port_id >= sw_cfg.num_usp && dst >= sw_cfg.num_usp)
+                        total_p2p++;  // DSP→DSP (num_usp==1: ingress>0 && dst>0)
                 end else begin
                     total_dropped++;
                     `uvm_warning("SWITCH", $sformatf("Bad route dst=%0d from port %0d",
@@ -155,6 +183,9 @@ class pcie_tl_switch extends uvm_component;
 
         if (!$cast(cfg_tlp, tlp)) return;
 
+        // NOTE: dev_num→port mapping assumes single-root layout (USP at port 0).
+        // For num_usp==1 this is byte-equivalent. Multi-root config-completion
+        // (root-aware dev_num mapping) is a follow-up; current tests do not exercise it.
         begin
             int dev_num = cfg_tlp.completer_id[7:3];
             int target_port = (dev_num < all_ports.size()) ? dev_num : 0;
@@ -205,8 +236,9 @@ class pcie_tl_switch extends uvm_component;
 
     function void report_phase(uvm_phase phase);
         `uvm_info("SWITCH", $sformatf(
-            "\n============ Switch Report ============\n  Ports: 1 USP + %0d DSP\n  Total routed:  %0d\n  Total P2P:     %0d\n  Total bcast:   %0d\n  Total dropped: %0d\n=======================================",
-            sw_cfg.num_ds_ports, total_routed, total_p2p, total_bcast, total_dropped), UVM_LOW)
+            "\n============ Switch Report ============\n  Ports: %0d USP + %0d DSP\n  Total routed:  %0d\n  Total P2P:     %0d\n  Total bcast:   %0d\n  Total dropped: %0d\n  Cross-root violations: %0d\n=======================================",
+            sw_cfg.num_usp, sw_cfg.num_ds_ports, total_routed, total_p2p, total_bcast,
+            total_dropped, fabric.cross_root_violations), UVM_LOW)
     endfunction
 
 endclass

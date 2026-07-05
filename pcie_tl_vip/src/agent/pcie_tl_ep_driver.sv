@@ -26,8 +26,42 @@ class pcie_tl_ep_driver extends pcie_tl_base_driver;
     //--- Config Space Bypass Proxy (set by ep_agent) ---
     pcie_tl_config_proxy  config_proxy;
 
+    //--- Unified memory backend (injected by env when cfg.use_unified_mem=1) ---
+    host_mem_api          mem;             // null → sparse mem_space path (default OFF)
+    bit                   use_unified_mem; // mirror of cfg.use_unified_mem; default 0
+
     function new(string name = "pcie_tl_ep_driver", uvm_component parent = null);
         super.new(name, parent);
+    endfunction
+
+    //=========================================================================
+    // Unified-memory helpers (only called when mem != null)
+    //=========================================================================
+    protected function void um_write(bit [63:0] a, bit [7:0] data[], bit [3:0] fbe, bit [3:0] lbe);
+        int total_dw = (data.size() + 3) / 4;
+        int idx = 0;
+        for (int dw = 0; dw < total_dw; dw++) begin
+            bit [3:0] be = (dw == 0) ? fbe :
+                           (dw == total_dw - 1 && total_dw > 1) ? lbe : 4'hF;
+            for (int b = 0; b < 4; b++) begin
+                if (idx < data.size()) begin
+                    if (be[b]) begin
+                        byte one[];
+                        one = new[1];
+                        one[0] = byte'(data[idx]);
+                        mem.write_mem(a + idx, one);
+                    end
+                    idx++;
+                end
+            end
+        end
+    endfunction
+
+    protected function void um_read(bit [63:0] a, int len, output bit [7:0] data[]);
+        byte rd[];
+        mem.read_mem(a, len, rd);
+        data = new[len];
+        foreach (rd[i]) data[i] = rd[i];
     endfunction
 
     //=========================================================================
@@ -163,10 +197,16 @@ class pcie_tl_ep_driver extends pcie_tl_base_driver;
             cpl.lower_addr = cur_addr[6:0];
             cpl.payload    = new[chunk];
 
-            // Read from internal memory
-            for (int i = 0; i < chunk; i++) begin
-                bit [63:0] a = cur_addr + i;
-                cpl.payload[i] = mem_space.exists(a) ? mem_space[a] : 8'h00;
+            // Read from memory backend
+            if (use_unified_mem && mem != null) begin
+                bit [7:0] um_data[];
+                um_read(cur_addr, chunk, um_data);
+                for (int i = 0; i < chunk; i++) cpl.payload[i] = um_data[i];
+            end else begin
+                for (int i = 0; i < chunk; i++) begin
+                    bit [63:0] a = cur_addr + i;
+                    cpl.payload[i] = mem_space.exists(a) ? mem_space[a] : 8'h00;
+                end
             end
 
             send_tlp(cpl);
@@ -184,9 +224,14 @@ class pcie_tl_ep_driver extends pcie_tl_base_driver;
         pcie_tl_mem_tlp mem_req;
         $cast(mem_req, req);
 
-        // Write to internal memory
-        foreach (req.payload[i]) begin
-            mem_space[mem_req.addr + i] = req.payload[i];
+        if (use_unified_mem && mem != null) begin
+            // Unified memory path: honour byte-enables
+            um_write(mem_req.addr, req.payload, mem_req.first_be, mem_req.last_be);
+        end else begin
+            // Original sparse memory path
+            foreach (req.payload[i]) begin
+                mem_space[mem_req.addr + i] = req.payload[i];
+            end
         end
 
         `uvm_info("EP_DRV", $sformatf("Memory Write: addr=0x%016h size=%0d",

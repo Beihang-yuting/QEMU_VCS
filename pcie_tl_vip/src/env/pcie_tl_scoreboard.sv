@@ -157,7 +157,12 @@ class pcie_tl_scoreboard extends uvm_scoreboard;
                 pcie_tl_tlp req = pending_requests[cpl.tag];
                 pcie_tl_mem_tlp mem_req;
                 tracker.orig_req       = req;
-                tracker.total_bytes    = (req.length == 0) ? 4096 : req.length * 4;
+                // AtomicOp CAS: 请求 payload=compare||swap=2*sz，但 CplD 只回 sz(旧值)；
+                // 其余(MRd/FetchAdd/Swap)CplD 字节数 = length*4。
+                if (req.kind == TLP_ATOMIC_CAS)
+                    tracker.total_bytes = ((req.length == 0) ? 4096 : req.length * 4) / 2;
+                else
+                    tracker.total_bytes = (req.length == 0) ? 4096 : req.length * 4;
                 tracker.received_bytes = 0;
                 tracker.cpl_count      = 0;
                 if ($cast(mem_req, req))

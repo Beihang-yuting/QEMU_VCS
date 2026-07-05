@@ -31,8 +31,13 @@ guest/images/
 # Runtime logs
 logs/
 
-# Third-party sources
-third_party/
+# Third-party sources — ignore all EXCEPT vendored PCIe VIP deps (committed for
+# reproducible build). Big binaries like the alpine tarball stay ignored.
+third_party/*
+!third_party/host_mem/
+!third_party/axis_vip/
+!third_party/xilinx_pcie/
+!third_party/VENDOR_SOURCES.txt
 
 # SHM / socket runtime files
 /tmp/cosim*.sock

@@ -7,6 +7,8 @@ class pcie_tl_switch_port extends uvm_component;
 
     switch_port_role_e  role;
     int                 port_id;
+    int owner_usp = 0;   // DSP 专用: 归属的 USP 索引
+    int root_id   = 0;   // USP 专用: 自身根索引
 
     uvm_tlm_fifo #(pcie_tl_tlp) rx_fifo;
     uvm_tlm_fifo #(pcie_tl_tlp) tx_fifo;
@@ -38,13 +40,16 @@ class pcie_tl_switch_port extends uvm_component;
 
     function void apply_config(pcie_tl_switch_config sw_cfg, int idx);
         if (role == SWITCH_USP) begin
+            // idx = root index; use per-root domain (usp_*[idx]).
+            // num_usp==1: usp_sec_bus[0]==usp_secondary_bus etc (init_defaults), so byte-equivalent.
             route_entry.primary_bus     = sw_cfg.usp_primary_bus;
-            route_entry.secondary_bus   = sw_cfg.usp_secondary_bus;
-            route_entry.subordinate_bus = sw_cfg.usp_subordinate_bus;
+            route_entry.secondary_bus   = sw_cfg.usp_sec_bus[idx];
+            route_entry.subordinate_bus = sw_cfg.usp_sub_bus[idx];
             route_entry.mem_base  = 0;
             route_entry.mem_limit = 0;
         end else begin
-            route_entry.primary_bus     = sw_cfg.usp_secondary_bus;
+            // idx = DSP index; primary bus = owning root's secondary bus.
+            route_entry.primary_bus     = sw_cfg.usp_sec_bus[owner_usp];
             route_entry.secondary_bus   = sw_cfg.ds_secondary_bus[idx];
             route_entry.subordinate_bus = sw_cfg.ds_subordinate_bus[idx];
             route_entry.mem_base        = sw_cfg.ds_mem_base[idx];

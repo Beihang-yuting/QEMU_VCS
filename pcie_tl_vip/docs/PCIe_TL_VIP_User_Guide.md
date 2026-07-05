@@ -821,6 +821,42 @@ EP[i] → DSP[i] → Fabric P2P → DSP[j] → EP[j]  (P2P 直通)
 
 **Switch 统计:** `env.sw.total_routed`, `env.sw.total_p2p`, `env.sw.total_dropped`
 
+#### 8.4.1 多根（多 USP）模式
+
+当 `sw_cfg.num_usp > 1` 时，switch 变为**多根不交叠层级**：N 个上行口（USP/根/RC）各独占一组 DSP/EP，各根独立 bus 带 + 内存地址窗，跨根流量一律 drop + 计数。默认 `num_usp=1` 即单根，向后完全兼容。
+
+```systemverilog
+pcie_tl_switch_config sw_cfg = new("sw_cfg");
+sw_cfg.num_usp      = 2;          // 2 个根 (RC0/RC1)
+sw_cfg.num_ds_ports = 4;          // 4 个 EP
+// dsp_owner 留空 → 均匀连续: EP0/1→root0, EP2/3→root1
+sw_cfg.init_defaults();           // 自动派不交叠 bus 带 + 内存区
+cfg.switch_enable = 1;
+cfg.switch_cfg    = sw_cfg;
+```
+
+**拓扑（auto dsp_owner=[0,0,1,1]）:**
+```
+  RC0      RC1
+   |        |
+ USP0     USP1
+  +--switch--+
+  DSP0 DSP1 | DSP2 DSP3
+  EP0  EP1  | EP2  EP3
+RC0↔{EP0,EP1}   RC1↔{EP2,EP3}
+```
+
+**关键行为:**
+- 端口数组重排为 `[USP×num_usp, DSP×num_ds_ports]`；DSP 索引从 `num_usp` 起。
+- 上行按 ingress DSP 的归属根 (`owner_usp`) 路由回对应 USP。
+- 跨根目标 → `SWITCH_ROUTE_CROSS_ROOT` → drop + `env.sw.fabric.cross_root_violations++`；`cross_root_check_enable=1`(默认) 时额外报 `uvm_error`。
+- per-root 独立：`tag_mgrs[r]`/`fc_mgrs[r]`/`ord_engs[r]`/`cfg_mgrs[r]`/`scbs[r]`（两根可并发用相同 tag 不冲突）。
+
+**多根访问句柄（env 内数组，`[0]` 别名保留单根 API）:**
+- 发激励：`env.v_seqr.rc_seqr_arr[r]`（根 r 的 RC sequencer）
+- 校验：`env.scbs[r]`、`env.sw.dsp[i].forwarded_count`、`env.sw.fabric.cross_root_violations`
+- 自定义归属：`sw_cfg.dsp_owner = '{0,0,0,1};`（uneven：EP0-2→root0, EP3→root1）
+
 ---
 
 ## 9. Sequence 库
@@ -1160,6 +1196,9 @@ unexp.start(env.rc_agent.sequencer);
 | `p2p_enable` | `bit` | 1 | P2P 直通开关 |
 | `port_ph_credit` | `int` | 32 | 每端口 PH 信用 |
 | `port_pd_credit` | `int` | 256 | 每端口 PD 信用 |
+| `num_usp` | `int` | 1 | 上行口/根数量 (>1 启用多根, 见 §8.4.1) |
+| `dsp_owner[]` | `int[]` | 空 | DSP→根归属; 空=按 num_usp 均匀连续自动分 |
+| `cross_root_check_enable` | `bit` | 1 | 跨根尝试报 uvm_error (drop+计数始终发生) |
 
 ### 13.4 SR-IOV 配置
 
@@ -1409,6 +1448,36 @@ endclass
 
 **配置:** RC→各EP、各EP→RC、EP间 P2P，共 20000 次混合事务，覆盖率全开
 
+#### 14.2.23 多根路由测试 (pcie_tl_multi_root_route_test)
+
+**目标:** 2 USP + 4 DSP（auto owner=[0,0,1,1]）下，各 RC 只达本根 EP，地址路由不跨根
+
+**配置:** `num_usp=2`；RC0 写 root0 EP 窗口、RC1 写 root1；1 个故意跨根探针验证检测。判据：`cross_root_violations=1`、各 EP 只收本根写、scb 干净。
+
+#### 14.2.24 跨根隔离测试 (pcie_tl_cross_root_isolation_test)
+
+**目标:** RC0 发往 root1 地址域 → drop + 计数 + EP 从未收到
+
+**配置:** `num_usp=2`；多个跨根写探针。判据：`cross_root_violations` 计数命中、目标 EP 收包=0、`ISO PASSED`。
+
+#### 14.2.25 不均归属测试 (pcie_tl_uneven_ownership_test)
+
+**目标:** `dsp_owner='{0,0,0,1}`（RC0 拥 EP0-2、RC1 拥 EP3）归属被尊重
+
+**配置:** `num_usp=2` + 显式 dsp_owner；不交叠自检不 fatal、跨根尝试按计数断言。
+
+#### 14.2.26 per-root 标签独立测试 (pcie_tl_per_root_tag_test)
+
+**目标:** 两根并发用重叠 tag 无冲突，completion 各回各根
+
+**配置:** `num_usp=2`；RC0/RC1 并发读同窗口（tag 空间重叠）。判据：每根 scb `matched==N`、无 mismatch/unexpected/timeout、`cross_root_violations=0`。
+
+#### 14.2.27 多根压力测试 (pcie_tl_multi_root_stress_test)
+
+**目标:** ~20K **重流量+随机+错误注入混合**，验证多根 fabric 隔离+不挂
+
+**配置:** `num_usp=2`；两根并发 heavy 随机 MWr/MRd + 4 种错误序列（poisoned/malformed/tag_conflict/unexpected_cpl）+ 跨根探针 + EP DMA。判据（隔离+不挂）：零跨根泄漏、检测机制触发（violations≥探针数）、无 hang、clean finish。注入错误致的 UVM_ERROR 为预期噪声、不计失败。
+
 ### 14.3 完整测试结果
 
 | # | 测试名 | UVM_ERROR | UVM_WARNING | 状态 |
@@ -1546,6 +1615,8 @@ cfg_mgr.register_callback(12'h048, cb);  // Device Control 寄存器
 ```
 
 ### 15.5 SV Interface 模式集成
+
+> 完整的 DUT 对接流程（编译/绑 vif/拓扑配方/判过标准/常见坑）见独立文档 **[PCIe_TL_VIP_Integration_Guide.md](./PCIe_TL_VIP_Integration_Guide.md)**。
 
 如需连接到 RTL DUT:
 

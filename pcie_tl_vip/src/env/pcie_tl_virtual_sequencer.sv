@@ -5,9 +5,13 @@
 class pcie_tl_virtual_sequencer extends uvm_sequencer;
     `uvm_component_utils(pcie_tl_virtual_sequencer)
 
-    //--- Sub-sequencer references ---
+    //--- Sub-sequencer references (rc_seqr/ep_seqr are [0] aliases of the arrays) ---
     uvm_sequencer #(pcie_tl_tlp)  rc_seqr;
     uvm_sequencer #(pcie_tl_tlp)  ep_seqr;
+
+    //--- Per-root sub-sequencer arrays (multi-USP) ---
+    uvm_sequencer #(pcie_tl_tlp)  rc_seqr_arr[$];
+    uvm_sequencer #(pcie_tl_tlp)  ep_seqr_arr[$];
 
     //--- Shared component references ---
     pcie_tl_fc_manager    fc_mgr;

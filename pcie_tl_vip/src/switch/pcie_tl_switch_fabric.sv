@@ -12,6 +12,15 @@ class pcie_tl_switch_fabric extends uvm_object;
     //--- Config ---
     bit p2p_enable = 1;
 
+    //--- Multi-root (multi-USP) ---
+    int num_usp = 1;                 // set by switch when building fabric
+    int cross_root_violations = 0;
+    function int root_of(int port_id);
+        if (port_id < num_usp) return port_id;          // USP: root = itself
+        return ports[port_id].owner_usp;                // DSP: its owning root
+    endfunction
+    function int usp_port_id(int root); return root; endfunction
+
     function new(string name = "pcie_tl_switch_fabric");
         super.new(name);
     endfunction
@@ -33,9 +42,10 @@ class pcie_tl_switch_fabric extends uvm_object;
             pcie_tl_cfg_tlp cfg_tlp;
             if ($cast(cfg_tlp, tlp)) begin
                 bit [7:0] target_bus = cfg_tlp.completer_id[15:8];
-                // Check if targeting the switch itself
-                if (target_bus == ports[0].route_entry.secondary_bus)
-                    return SWITCH_ROUTE_LOCAL;
+                // Check if targeting the switch itself (any root's USP bus is local)
+                for (int u = 0; u < num_usp; u++)
+                    if (target_bus == ports[u].route_entry.secondary_bus)
+                        return SWITCH_ROUTE_LOCAL;
                 return route_by_id(target_bus, ingress_port_id);
             end
         end
@@ -62,9 +72,9 @@ class pcie_tl_switch_fabric extends uvm_object;
             return route_message(tlp, ingress_port_id);
         end
 
-        // 5. Default: upstream if from DSP, drop if from USP
-        if (ingress_port_id > 0)
-            return SWITCH_ROUTE_USP;
+        // 5. Default: upstream (to owning USP) if from DSP, drop if from USP
+        if (ingress_port_id >= num_usp)
+            return usp_port_id(root_of(ingress_port_id));
         return SWITCH_ROUTE_DROP;
     endfunction
 
@@ -72,16 +82,17 @@ class pcie_tl_switch_fabric extends uvm_object;
     // ID-based routing: find port whose secondary-subordinate range contains bus
     //=========================================================================
     protected function int route_by_id(bit [7:0] target_bus, int ingress_port_id);
-        for (int i = 1; i < num_ports; i++) begin
+        int ir = root_of(ingress_port_id);
+        for (int i = num_usp; i < num_ports; i++) begin
             if (target_bus >= ports[i].route_entry.secondary_bus &&
                 target_bus <= ports[i].route_entry.subordinate_bus) begin
-                if (ingress_port_id > 0 && i != ingress_port_id && !p2p_enable)
-                    return SWITCH_ROUTE_USP;
+                if (ports[i].owner_usp != ir) return SWITCH_ROUTE_CROSS_ROOT;
+                if (ingress_port_id >= num_usp && i != ingress_port_id && !p2p_enable)
+                    return usp_port_id(ir);
                 return i;
             end
         end
-        if (ingress_port_id > 0)
-            return SWITCH_ROUTE_USP;
+        if (ingress_port_id >= num_usp) return usp_port_id(ir);
         return SWITCH_ROUTE_DROP;
     endfunction
 
@@ -89,16 +100,17 @@ class pcie_tl_switch_fabric extends uvm_object;
     // Address-based routing: find port whose memory window contains addr
     //=========================================================================
     protected function int route_by_address(bit [63:0] addr, int ingress_port_id);
-        for (int i = 1; i < num_ports; i++) begin
+        int ir = root_of(ingress_port_id);
+        for (int i = num_usp; i < num_ports; i++) begin
             if (addr >= {32'h0, ports[i].route_entry.mem_base} &&
                 addr <= {32'h0, ports[i].route_entry.mem_limit}) begin
-                if (ingress_port_id > 0 && i != ingress_port_id && !p2p_enable)
-                    return SWITCH_ROUTE_USP;
+                if (ports[i].owner_usp != ir) return SWITCH_ROUTE_CROSS_ROOT;
+                if (ingress_port_id >= num_usp && i != ingress_port_id && !p2p_enable)
+                    return usp_port_id(ir);
                 return i;
             end
         end
-        if (ingress_port_id > 0)
-            return SWITCH_ROUTE_USP;
+        if (ingress_port_id >= num_usp) return usp_port_id(ir);
         return SWITCH_ROUTE_DROP;
     endfunction
 
@@ -109,7 +121,7 @@ class pcie_tl_switch_fabric extends uvm_object;
         case (tlp.type_f)
             TLP_TYPE_MSG_BCAST:  return SWITCH_ROUTE_BCAST;
             TLP_TYPE_MSG_LOCAL:  return SWITCH_ROUTE_LOCAL;
-            TLP_TYPE_MSG_RC:     return SWITCH_ROUTE_USP;
+            TLP_TYPE_MSG_RC:     return usp_port_id(root_of(ingress_port_id));
             TLP_TYPE_MSG_ADDR: begin
                 pcie_tl_msg_tlp msg;
                 if ($cast(msg, tlp))
@@ -121,11 +133,12 @@ class pcie_tl_switch_fabric extends uvm_object;
                     return route_by_id(msg.target_id[15:8], ingress_port_id);
             end
             default: begin
-                if (ingress_port_id > 0) return SWITCH_ROUTE_USP;
+                if (ingress_port_id >= num_usp)
+                    return usp_port_id(root_of(ingress_port_id));
                 return SWITCH_ROUTE_BCAST;
             end
         endcase
-        return SWITCH_ROUTE_USP;
+        return usp_port_id(root_of(ingress_port_id));
     endfunction
 
 endclass

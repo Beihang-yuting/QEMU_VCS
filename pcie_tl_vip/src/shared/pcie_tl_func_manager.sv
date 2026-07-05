@@ -3,8 +3,9 @@
 //-----------------------------------------------------------------------------
 
 //=============================================================================
-// DPI-C imports for topology export (must be at file/package scope)
+// DPI-C imports for topology export (CoSim only, define PCIE_COSIM_ENABLE)
 //=============================================================================
+`ifdef PCIE_COSIM_ENABLE
 import "DPI-C" function void bridge_vcs_set_pf_topology(
     input int pf_idx, input int bdf, input int num_vfs, input int vf_device_id,
     input int vendor_id, input int device_id, input int msix_vectors, input int vf_msix_vectors,
@@ -13,6 +14,7 @@ import "DPI-C" function void bridge_vcs_set_pf_topology(
     input longint unsigned vf_bar0, input longint unsigned vf_bar1, input longint unsigned vf_bar2,
     input longint unsigned vf_bar3, input longint unsigned vf_bar4, input longint unsigned vf_bar5);
 import "DPI-C" function void bridge_vcs_finalize_topology(input int num_pfs, input int tag_width);
+`endif
 
 //=============================================================================
 // Per-function context: holds BDF, config space, and BAR state
@@ -34,7 +36,9 @@ class pcie_tl_func_context extends uvm_object;
     bit [63:0] bar_base[6];
     bit [63:0] bar_size[6];
     bit        bar_enable[6];
-    bit        bar_sizing[6];   // BAR sizing state per BAR register
+
+    //--- BAR sizing state per BAR register ---
+    bit        bar_sizing[6];
 
     //--- Bus Master Enable (mirrors Command register bit 2) ---
     bit        bus_master_en;
@@ -82,7 +86,7 @@ class pcie_tl_func_manager extends uvm_object;
     bit [7:0]  pf_base_bus    = 8'h01;
     bit [4:0]  pf_base_dev    = 5'h00;
 
-    //--- MSI-X and tag configuration ---
+    //--- MSI-X and tag configuration (CoSim topology export) ---
     int        pf_msix_vectors = 64;
     int        vf_msix_vectors = 8;
     int        tag_width = 1;  // 0=5bit, 1=8bit, 2=10bit
@@ -141,12 +145,10 @@ class pcie_tl_func_manager extends uvm_object;
             // Create SR-IOV extended capability for this PF
             sriov_caps[pf] = pcie_tl_sriov_cap::type_id::create(
                 $sformatf("sriov_cap_%0d", pf));
-            sriov_caps[pf].pf_bdf          = pf_bdf;
-            sriov_caps[pf].total_vfs       = max_vfs_per_pf;
-            sriov_caps[pf].vf_device_id    = vf_dev_id;
-            sriov_caps[pf].first_vf_offset = num_pfs;
-            sriov_caps[pf].vf_stride       = num_pfs;
-            sriov_caps[pf].offset          = 12'h200;
+            sriov_caps[pf].pf_bdf       = pf_bdf;
+            sriov_caps[pf].total_vfs    = max_vfs_per_pf;
+            sriov_caps[pf].vf_device_id = vf_dev_id;
+            sriov_caps[pf].offset       = 12'h200;
             sriov_caps[pf].build_data();
             pf_ctx[pf].cfg_mgr.register_ext_capability(sriov_caps[pf]);
 
@@ -262,6 +264,7 @@ class pcie_tl_func_manager extends uvm_object;
         return count;
     endfunction
 
+    `ifdef PCIE_COSIM_ENABLE
     //=========================================================================
     // Export topology to C bridge via DPI-C (called once after build)
     //=========================================================================
@@ -279,5 +282,6 @@ class pcie_tl_func_manager extends uvm_object;
         end
         bridge_vcs_finalize_topology(num_pfs, tag_width);
     endfunction
+    `endif
 
 endclass

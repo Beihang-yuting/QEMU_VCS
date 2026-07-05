@@ -2,6 +2,8 @@
 // PCIe Transaction Layer VIP - Environment Configuration
 //-----------------------------------------------------------------------------
 
+typedef enum bit { PCIE_TL_MEM_PER_BUFFER = 1'b0, PCIE_TL_MEM_PREMAP = 1'b1 } pcie_tl_mem_access_mode_e;
+
 class pcie_tl_env_config extends uvm_object;
     `uvm_object_utils(pcie_tl_env_config)
 
@@ -99,6 +101,14 @@ class pcie_tl_env_config extends uvm_object;
     bit              ide_enable           = 0;
     bit              mriov_enable         = 0;
     int              max_e2e_prefix       = 4;
+
+    //--- Unified Memory (default OFF — no behavior change) ---
+    bit                          use_unified_mem  = 1'b0;
+    pcie_tl_mem_access_mode_e    mem_access_mode  = PCIE_TL_MEM_PER_BUFFER;
+    bit [63:0]                   premap_base      = 64'h0;
+    int unsigned                 premap_size      = 32'h0100_0000; // 16MB
+    alloc_mode_e                 mem_alloc_mode   = MODE_BUDDY;     // from host_mem_pkg
+    int unsigned                 mem_granule      = 16;
 
     function new(string name = "pcie_tl_env_config");
         super.new(name);

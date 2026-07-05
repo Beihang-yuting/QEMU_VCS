@@ -5,6 +5,7 @@
 package pcie_tl_pkg;
 
     import uvm_pkg::*;
+    import host_mem_pkg::*;
     `include "uvm_macros.svh"
 
     //--- Types ---
