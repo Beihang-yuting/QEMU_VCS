@@ -690,6 +690,7 @@ class pcie_tl_env extends uvm_env;
             scbs[r].completion_check_enable = cfg.completion_check_enable;
             scbs[r].data_integrity_enable   = cfg.data_integrity_enable;
             scbs[r].prefix_check_enable     = cfg.prefix_enable;
+            scbs[r].strict_check            = cfg.scb_strict_check;
         end
 
         // Adapter mode (per-root RC; single EP)

@@ -60,6 +60,7 @@ class pcie_tl_env_config extends uvm_object;
     bit                       ordering_check_enable   = 1;
     bit                       completion_check_enable = 1;
     bit                       data_integrity_enable   = 1;
+    bit                       scb_strict_check        = 1;  // 0: injected-error tests (stress) downgrade SCB FAIL->warn
 
     //--- EP auto-response ---
     bit                       ep_auto_response   = 1;

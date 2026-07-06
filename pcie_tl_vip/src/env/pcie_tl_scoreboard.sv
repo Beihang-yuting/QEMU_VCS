@@ -31,6 +31,10 @@ class pcie_tl_scoreboard extends uvm_scoreboard;
     bit completion_check_enable = 1;
     bit data_integrity_enable   = 1;
     bit prefix_check_enable     = 0;
+    // strict_check=1: mismatch/unexpected -> uvm_error (FAIL). 0: -> uvm_warning
+    // (visibility only) for tests that DELIBERATELY inject error TLPs, e.g. the
+    // multi-root stress test whose PASS criterion is isolation + no-hang.
+    bit strict_check            = 1;
 
     int prefix_format_errors    = 0;
     int prefix_integrity_errors = 0;
@@ -394,9 +398,15 @@ class pcie_tl_scoreboard extends uvm_scoreboard;
             end
         end
 
-        if (mismatched > 0 || unexpected > 0)
-            `uvm_error("SCB", $sformatf("FAIL: %0d mismatches, %0d unexpected completions",
-                                         mismatched, unexpected))
+        if (mismatched > 0 || unexpected > 0) begin
+            if (strict_check)
+                `uvm_error("SCB", $sformatf("FAIL: %0d mismatches, %0d unexpected completions",
+                                             mismatched, unexpected))
+            else
+                `uvm_warning("SCB", $sformatf(
+                    "%0d mismatches, %0d unexpected completions (strict_check=0: injected-error noise, not asserted)",
+                    mismatched, unexpected))
+        end
     endfunction
 
 endclass

@@ -69,6 +69,11 @@ class pcie_tl_multi_root_stress_test extends pcie_tl_base_test;
         cfg.completion_check_enable = 1;
         cfg.data_integrity_enable   = 1;
         cfg.ep_auto_response        = 1;
+        // Error seqs (poisoned/malformed/tag_conflict/unexpected_cpl) DELIBERATELY
+        // pollute the scoreboards; PASS = isolation + no-hang (see check_phase).
+        // Downgrade SCB mismatch/unexpected FAIL -> warning so the injected noise
+        // does not raise UVM_ERROR while real checks (MRSTRESS_FAIL) stay strict.
+        cfg.scb_strict_check        = 0;
     endfunction
 
     //=========================================================================
