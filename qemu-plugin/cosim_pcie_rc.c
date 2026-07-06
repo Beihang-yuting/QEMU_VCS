@@ -149,7 +149,12 @@ static void cosim_dma_cb(const dma_req_t *req, void *user)
                 bridge_complete_dma(ctx, req->tag, 1);
                 return;
             }
-            cpu_physical_memory_write(req->host_addr, buf, len);
+            /* pci_dma_write routes via the device bus-master AS so writes to
+             * the APIC MSI region (0xFEE...) actually deliver an interrupt —
+             * cpu_physical_memory_write hits raw RAM and drops the MSI. This
+             * is how VCS-side MSI-X delivery (DMA-write msg_data->msg_addr)
+             * reaches the guest. Normal RAM DMA is unaffected. */
+            pci_dma_write(PCI_DEVICE(s), req->host_addr, buf, len);
             bridge_complete_dma(ctx, req->tag, 0);
         } else {
             /* Host→Device: read guest RAM, send data back to VCS via DMA_DATA */

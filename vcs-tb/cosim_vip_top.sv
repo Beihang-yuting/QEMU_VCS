@@ -312,15 +312,33 @@ module cosim_vip_top;
             if (vq_configured_q) begin
                 rx_rc = vcs_vq_process_rx();
                 if (rx_rc > 0) begin
+                    logic [15:0]       rxvec;
+                    longint unsigned   msix_addr;
+                    int unsigned       msix_data [16];
+                    int                mrc, msi_rc;
                     $display("[VIP-VQ] RX injected %0d packets (total=%0d)",
                              rx_rc, vcs_vq_get_rx_count());
-                    /* 先设 ISR bit，再发 MSI（顺序关键：Guest 读 ISR 必须非零） */
-                    stub_isr_set <= 1;
-                    @(posedge clk);
-                    stub_isr_set <= 0;
-                    @(posedge clk);
-                    begin
-                        int msi_rc;
+                    /* RX 队列(vq0)的 MSI-X vector；guest 设 MSI-X 时写 queue_msix_vector */
+                    rxvec = ep.vio_q_msix[0];
+                    if (rxvec != 16'hFFFF && rxvec < 16'd4 &&
+                        ep.msix_table[{rxvec[1:0], 2'd3}][0] == 1'b0 &&   /* vector_control 未 mask */
+                        {ep.msix_table[{rxvec[1:0], 2'd1}],
+                         ep.msix_table[{rxvec[1:0], 2'd0}]} != 64'd0) begin
+                        /* MSI-X 投递：DMA-write msg_data -> msg_addr(0xFEE... -> APIC)，
+                         * 边沿/消息触发，无 INTx 电平重触发竞争。 */
+                        msix_addr = {ep.msix_table[{rxvec[1:0], 2'd1}],
+                                     ep.msix_table[{rxvec[1:0], 2'd0}]};
+                        for (int i = 0; i < 16; i++) msix_data[i] = 0;
+                        msix_data[0] = ep.msix_table[{rxvec[1:0], 2'd2}];
+                        mrc = bridge_vcs_dma_write_sync(msix_addr, msix_data, 4);
+                        $display("[VIP-VQ] MSI-X vec=%0d -> addr=0x%016h data=0x%08h rc=%0d",
+                                 rxvec, msix_addr, msix_data[0], mrc);
+                    end else begin
+                        /* INTx fallback: 先设 ISR bit，再拉中断线 */
+                        stub_isr_set <= 1;
+                        @(posedge clk);
+                        stub_isr_set <= 0;
+                        @(posedge clk);
                         msi_rc = bridge_vcs_raise_msi(0);
                         if (msi_rc < 0)
                             $display("[VIP-VQ] WARNING: raise_msi failed rc=%0d", msi_rc);

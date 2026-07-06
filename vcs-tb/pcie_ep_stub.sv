@@ -107,6 +107,12 @@ module pcie_ep_stub (
     /* ISR 寄存器 */
     logic [31:0] vio_isr;
 
+    /* ========== MSI-X Table (BAR0 0x5000) + PBA (0x6000) ==========
+     * 4 entries x 4 DW = 16 DW. Per entry: [0]=msg_addr_lo [1]=msg_addr_hi
+     * [2]=msg_data [3]=vector_control(bit0=mask). Guest programs via MMIO;
+     * cosim_vip_top 读表投递 MSI-X（DMA-write msg_data -> msg_addr）。 */
+    logic [31:0] msix_table [0:15];
+
     /* Virtio-net device config */
     logic [47:0] vio_mac;
     logic [15:0] vio_net_status;
@@ -149,6 +155,9 @@ module pcie_ep_stub (
     wire is_vio_notify = (addr_offset >= 16'h2000) && (addr_offset < 16'h2004);
     wire is_vio_isr    = (addr_offset >= 16'h3000) && (addr_offset < 16'h3004);
     wire is_vio_devcfg = (addr_offset >= 16'h4000) && (addr_offset < 16'h4010);
+    wire is_msix_table = (addr_offset >= 16'h5000) && (addr_offset < 16'h5040);
+    wire is_msix_pba   = (addr_offset >= 16'h6000) && (addr_offset < 16'h6010);
+    wire [3:0] msix_idx = addr_offset[5:2];  /* DW index within table (0..15) */
     wire [3:0] vio_common_dwoff = tlp_addr[5:2]; /* dword offset within common_cfg */
     wire [3:0] vio_devcfg_dwoff = tlp_addr[5:2]; /* dword offset within device_cfg */
 
@@ -265,6 +274,9 @@ module pcie_ep_stub (
             vio_mac  <= {8'hDE, 8'hAD, 8'hBE, 8'hEF, 8'h00, mac_last_byte_param[7:0]};
             vio_net_status   <= 16'h0001;   /* VIRTIO_NET_S_LINK_UP */
             vio_max_vq_pairs <= 16'd1;
+            /* MSI-X table: vector_control(DW3,7,11,15) reset masked(bit0=1) */
+            for (int i = 0; i < 16; i++)
+                msix_table[i] <= ((i & 2'b11) == 2'd3) ? 32'd1 : 32'd0;
             for (int q = 0; q < 2; q++) begin
                 vio_q_size[q]    <= 16'd256;  /* 默认队列大小 */
                 vio_q_msix[q]    <= 16'hFFFF;
@@ -402,6 +414,12 @@ module pcie_ep_stub (
                             notify_valid <= 1'b1;
                             notify_queue <= tlp_wdata[15:0];
                         end
+                        /* --- MSI-X Table MWr (guest 编程 msg_addr/data/ctrl) --- */
+                        else if (is_msix_table) begin
+                            msix_table[msix_idx] <= tlp_wdata;
+                            $display("[EP-MSIX] table[%0d] <= 0x%08h (entry%0d field%0d)",
+                                     msix_idx, tlp_wdata, msix_idx[3:2], msix_idx[1:0]);
+                        end
                     end
 
                     /* ===== MRd ===== */
@@ -435,6 +453,9 @@ module pcie_ep_stub (
                         else if (is_vio_devcfg) begin
                             cpl_rdata <= vio_devcfg_read(vio_devcfg_dwoff);
                         end
+                        /* --- MSI-X Table / PBA MRd --- */
+                        else if (is_msix_table) cpl_rdata <= msix_table[msix_idx];
+                        else if (is_msix_pba)   cpl_rdata <= 32'd0;  /* no pending */
                         else cpl_rdata <= 32'hBAD_ACC55;
                     end
 

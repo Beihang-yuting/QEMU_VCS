@@ -652,6 +652,11 @@ int bridge_vcs_dma_write_sync(unsigned long long host_addr,
                                const unsigned int *data, int len) {
     if (!g_initialized || len <= 0) return -1;
 
+    /* DEBUG: MSI-X delivery visibility (0xFEE region = APIC MSI doorbell) */
+    if (host_addr >= 0xFEE00000ULL && host_addr < 0xFEF00000ULL)
+        fprintf(stderr, "[MSIX-DELIVER] addr=0x%llx data=0x%08x len=%d\n",
+                host_addr, data ? data[0] : 0, len);
+
     static uint32_t next_tag = 3000;
 
     /* ---- TCP transport path ---- */

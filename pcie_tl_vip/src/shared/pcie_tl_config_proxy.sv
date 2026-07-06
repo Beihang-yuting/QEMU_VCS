@@ -111,8 +111,8 @@ class pcie_tl_config_proxy extends uvm_component;
         // ============================================================
         // MSI Capability stub (offset 0x40, DW16-DW19)
         // ============================================================
-        // DW16 (0x40): {msg_ctrl=0x0080(64bit,1vec), next=0x50, cap_id=0x05}
-        config_space[16] = 32'h0080_50_05;
+        // DW16 (0x40): {msg_ctrl=0x0080(64bit,1vec), next=0x98(MSI-X), cap_id=0x05}
+        config_space[16] = 32'h0080_98_05;
         // DW17 (0x44): MSI msg_addr_lo
         config_space[17] = 32'h0000_0000;
         // DW18 (0x48): MSI msg_addr_hi
@@ -148,6 +148,19 @@ class pcie_tl_config_proxy extends uvm_component;
         config_space[35] = 32'h00_00_00_00;   // bar=0
         config_space[36] = 32'h0000_4000;     // offset = 0x4000
         config_space[37] = 32'h0000_0010;     // length = 16
+
+        // ============================================================
+        // MSI-X Capability (offset 0x98, DW38-DW40) — virtio-pci 每队列需
+        // MSI-X 才用消息中断，否则回退 legacy INTx（电平触发重触发竞争）。
+        // 表/PBA 在 BAR0，pcie_ep_stub 建模其 MMIO。
+        // ============================================================
+        // DW38 (0x98): {msg_ctrl=table_size-1=3(4 entries), next=0x50, cap_id=0x11}
+        //   guest 写 bit15(MSIX_ENABLE) 由 handle_cfg_write 字节合并保存。
+        config_space[38] = 32'h0003_50_11;
+        // DW39 (0x9C): MSI-X Table  BIR=0, offset=0x5000
+        config_space[39] = 32'h0000_5000;
+        // DW40 (0xA0): MSI-X PBA    BIR=0, offset=0x6000
+        config_space[40] = 32'h0000_6000;
     endfunction
 
     //=========================================================================
