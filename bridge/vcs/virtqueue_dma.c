@@ -263,9 +263,14 @@ int vcs_vq_process_rx(void) {
     int has_next = 1;
     uint32_t total_written = 0;
 
-    /* Prepare virtio-net header (12 bytes for VERSION_1, all zeros = no offload) */
+    /* Prepare virtio-net header (12 bytes for VERSION_1, all zeros = no offload).
+     * num_buffers (bytes [10:11]) MUST be >=1 with VIRTIO_NET_F_MRG_RXBUF (the
+     * guest negotiates it — RX buffers are 1530B mergeable). num_buffers=0 is a
+     * protocol violation and the guest silently drops the frame (ARP replies
+     * never generated -> 100% ping loss). This packet spans 1 buffer. */
     uint8_t vnet_hdr[12];
     memset(vnet_hdr, 0, sizeof(vnet_hdr));
+    vnet_hdr[10] = 1;  /* num_buffers = 1 (little-endian) */
     int hdr_written = 0;
 
     while (has_next && chain_n < VQ_MAX_CHAIN) {
