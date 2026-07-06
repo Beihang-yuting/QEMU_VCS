@@ -216,58 +216,20 @@ int vcs_vq_process_tx(void) {
 
 /* ========== RX queue processing ========== */
 static int rx_poll_empty_count = 0;
-int vcs_vq_process_rx(void) {
-    int q = 0;
-    if (!vq[q].configured) return 0;
 
-    /* Poll ETH SHM for incoming frame */
-    uint8_t frame_buf[VQ_PKT_BUF];
-    int frame_len = vcs_eth_mac_recv_raw(frame_buf, VQ_PKT_BUF);
-    if (frame_len <= 0) {
-        rx_poll_empty_count++;
-        if ((rx_poll_empty_count % 5000) == 0) {
-            fprintf(stderr, "[VQ-RX] heartbeat: empty_polls=%d total_rx=%d\n",
-                    rx_poll_empty_count, rx_pkt_count);
-        }
-        return 0;
-    }
-    rx_poll_empty_count = 0;
-
-    /* Read avail ring header */
-    uint8_t avail_hdr[4];
-    if (bridge_dma_read_bytes(vq[q].avail_gpa, avail_hdr, 4) < 0) {
-        fprintf(stderr, "[VQ-RX] Failed to read avail header\n");
-        return -1;
-    }
-    uint16_t avail_idx;
-    memcpy(&avail_idx, &avail_hdr[2], 2);
-
-    if (vq[q].last_avail == avail_idx) {
-        fprintf(stderr, "[VQ-RX] No RX buffers available (avail_idx=%d)\n", avail_idx);
-        return 0;
-    }
-
-    /* Get descriptor head from avail ring */
-    uint16_t ring_pos = vq[q].last_avail % vq[q].size;
-    uint64_t entry_gpa = vq[q].avail_gpa + 4 + (uint64_t)ring_pos * 2;
-    uint8_t entry_buf[2];
-    if (bridge_dma_read_bytes(entry_gpa, entry_buf, 2) < 0)
-        return -1;
-    uint16_t head_idx;
-    memcpy(&head_idx, entry_buf, 2);
-
-    /* Traverse descriptor chain — write virtio-net header + packet data */
+/* Inject ONE frame into the RX vring at head_idx. Returns total bytes written
+ * (incl. the 12B virtio-net header), or -1 on DMA error. */
+static int rx_inject_one(int q, uint16_t head_idx, const uint8_t *frame_buf,
+                         int frame_len) {
     uint16_t cur = head_idx;
     int remaining = frame_len;
     int chain_n = 0;
     int has_next = 1;
     uint32_t total_written = 0;
 
-    /* Prepare virtio-net header (12 bytes for VERSION_1, all zeros = no offload).
-     * num_buffers (bytes [10:11]) MUST be >=1 with VIRTIO_NET_F_MRG_RXBUF (the
-     * guest negotiates it — RX buffers are 1530B mergeable). num_buffers=0 is a
-     * protocol violation and the guest silently drops the frame (ARP replies
-     * never generated -> 100% ping loss). This packet spans 1 buffer. */
+    /* virtio-net header (12B VERSION_1, zeros = no offload). num_buffers
+     * (bytes[10:11]) MUST be >=1 with VIRTIO_NET_F_MRG_RXBUF (RX buffers are
+     * 1530B mergeable); 0 is a protocol violation -> guest drops the frame. */
     uint8_t vnet_hdr[12];
     memset(vnet_hdr, 0, sizeof(vnet_hdr));
     vnet_hdr[10] = 1;  /* num_buffers = 1 (little-endian) */
@@ -279,11 +241,7 @@ int vcs_vq_process_rx(void) {
         if (bridge_dma_read_bytes(d_gpa, (uint8_t *)&desc, 16) < 0)
             return -1;
 
-        fprintf(stderr, "[VQ-RX] desc[%d]: addr=0x%llx len=%u flags=0x%x next=%d\n",
-                cur, (unsigned long long)desc.addr, desc.len, desc.flags, desc.next);
-
         if (!(desc.flags & VIRTQ_DESC_F_WRITE)) {
-            /* RX descriptors must be WRITE — skip read-only */
             has_next = (desc.flags & VIRTQ_DESC_F_NEXT) ? 1 : 0;
             cur = desc.next;
             chain_n++;
@@ -291,13 +249,10 @@ int vcs_vq_process_rx(void) {
         }
 
         if (!hdr_written) {
-            /* Write virtio-net header to first writable descriptor */
             uint32_t hdr_len = (desc.len < 12) ? desc.len : 12;
             if (bridge_dma_write_bytes(desc.addr, vnet_hdr, hdr_len) < 0)
                 return -1;
             total_written += hdr_len;
-
-            /* If descriptor has room for data after header */
             uint32_t data_space = desc.len - hdr_len;
             if (data_space > 0 && remaining > 0) {
                 uint32_t to_write = ((uint32_t)remaining < data_space) ?
@@ -310,62 +265,106 @@ int vcs_vq_process_rx(void) {
                 total_written += to_write;
             }
             hdr_written = 1;
-        } else {
-            /* Subsequent descriptors: write packet data */
-            if (remaining > 0) {
-                uint32_t to_write = ((uint32_t)remaining < desc.len) ?
-                                    (uint32_t)remaining : desc.len;
-                if (bridge_dma_write_bytes(desc.addr,
-                                           frame_buf + (frame_len - remaining),
-                                           to_write) < 0)
-                    return -1;
-                remaining -= (int)to_write;
-                total_written += to_write;
-            }
+        } else if (remaining > 0) {
+            uint32_t to_write = ((uint32_t)remaining < desc.len) ?
+                                (uint32_t)remaining : desc.len;
+            if (bridge_dma_write_bytes(desc.addr,
+                                       frame_buf + (frame_len - remaining),
+                                       to_write) < 0)
+                return -1;
+            remaining -= (int)to_write;
+            total_written += to_write;
         }
 
         has_next = (desc.flags & VIRTQ_DESC_F_NEXT) ? 1 : 0;
         cur = desc.next;
         chain_n++;
     }
+    return (int)total_written;
+}
 
-    /* Write used ring entry */
-    uint16_t used_pos = vq[q].last_used % vq[q].size;
-    uint64_t used_entry_gpa = vq[q].used_gpa + 4 + (uint64_t)used_pos * 8;
-    uint8_t used_entry[8];
-    uint32_t id32 = (uint32_t)head_idx;
-    memcpy(&used_entry[0], &id32, 4);
-    memcpy(&used_entry[4], &total_written, 4);
-    if (bridge_dma_write_bytes(used_entry_gpa, used_entry, 8) < 0)
-        return -1;
+/* Drain ALL available ETH-SHM frames into successive RX buffers in ONE call,
+ * then the SV raises a single MSI. This lets the guest NAPI poll drain every
+ * used entry in one pass, avoiding the per-packet interrupt re-arm race under
+ * the slow RTL clock (previously only the 1st RX frame reached the guest). */
+int vcs_vq_process_rx(void) {
+    int q = 0;
+    if (!vq[q].configured) return 0;
 
-    vq[q].last_avail++;
-    vq[q].last_used++;
+    int injected = 0;
 
-    /* Update used ring idx */
-    uint64_t used_idx_gpa = vq[q].used_gpa + 2;
-    uint16_t new_idx = vq[q].last_used;
-    if (bridge_dma_write_bytes(used_idx_gpa, (uint8_t *)&new_idx, 2) < 0)
-        return -1;
+    for (;;) {
+        /* Check an RX buffer is posted BEFORE dequeuing a frame, else the
+         * dequeued frame would be lost when no buffer is available. */
+        uint8_t avail_hdr[4];
+        if (bridge_dma_read_bytes(vq[q].avail_gpa, avail_hdr, 4) < 0) {
+            fprintf(stderr, "[VQ-RX] Failed to read avail header\n");
+            break;
+        }
+        uint16_t avail_idx;
+        memcpy(&avail_idx, &avail_hdr[2], 2);
+        if (vq[q].last_avail == avail_idx)
+            break;  /* no RX buffer posted */
 
-    rx_pkt_count++;
-    fprintf(stderr, "[VQ-RX] Injected %d bytes (total_written=%u), rx_pkt #%d\n",
-            frame_len, total_written, rx_pkt_count);
-    /* Hex dump received frame for debugging */
-    {
-        int i;
-        fprintf(stderr, "[VQ-RX] frame hex:");
-        for (i = 0; i < frame_len && i < 48; i++)
-            fprintf(stderr, " %02x", frame_buf[i]);
-        fprintf(stderr, "\n");
+        /* Poll ETH SHM; break (leaving the buffer) if no frame pending. */
+        uint8_t frame_buf[VQ_PKT_BUF];
+        int frame_len = vcs_eth_mac_recv_raw(frame_buf, VQ_PKT_BUF);
+        if (frame_len <= 0)
+            break;
+
+        /* Descriptor head from avail ring */
+        uint16_t ring_pos = vq[q].last_avail % vq[q].size;
+        uint64_t entry_gpa = vq[q].avail_gpa + 4 + (uint64_t)ring_pos * 2;
+        uint8_t entry_buf[2];
+        if (bridge_dma_read_bytes(entry_gpa, entry_buf, 2) < 0)
+            break;
+        uint16_t head_idx;
+        memcpy(&head_idx, entry_buf, 2);
+
+        int total_written = rx_inject_one(q, head_idx, frame_buf, frame_len);
+        if (total_written < 0)
+            break;
+
+        /* used ring entry */
+        uint16_t used_pos = vq[q].last_used % vq[q].size;
+        uint64_t used_entry_gpa = vq[q].used_gpa + 4 + (uint64_t)used_pos * 8;
+        uint8_t used_entry[8];
+        uint32_t id32 = (uint32_t)head_idx;
+        uint32_t len32 = (uint32_t)total_written;
+        memcpy(&used_entry[0], &id32, 4);
+        memcpy(&used_entry[4], &len32, 4);
+        if (bridge_dma_write_bytes(used_entry_gpa, used_entry, 8) < 0)
+            break;
+
+        vq[q].last_avail++;
+        vq[q].last_used++;
+
+        /* Publish used idx after each frame */
+        uint64_t used_idx_gpa = vq[q].used_gpa + 2;
+        uint16_t new_idx = vq[q].last_used;
+        if (bridge_dma_write_bytes(used_idx_gpa, (uint8_t *)&new_idx, 2) < 0)
+            break;
+
+        rx_pkt_count++;
+        injected++;
+        fprintf(stderr, "[VQ-RX] Injected %d bytes (total_written=%d) rx#%d\n",
+                frame_len, total_written, rx_pkt_count);
     }
 
-    /* NOTE: Do NOT raise MSI here — there is a race condition.
-     * ISR must be set in SV (pcie_ep_stub) BEFORE the interrupt reaches QEMU,
-     * otherwise the guest reads ISR=0 and drops the event.
-     * tb_top.sv handles: isr_set → bridge_vcs_raise_msi(0) after this returns. */
+    if (injected == 0) {
+        rx_poll_empty_count++;
+        if ((rx_poll_empty_count % 5000) == 0)
+            fprintf(stderr, "[VQ-RX] heartbeat: empty_polls=%d total_rx=%d\n",
+                    rx_poll_empty_count, rx_pkt_count);
+    } else {
+        rx_poll_empty_count = 0;
+        fprintf(stderr, "[VQ-RX] drained %d frames this poll (total_rx=%d)\n",
+                injected, rx_pkt_count);
+    }
 
-    return 1;
+    /* NOTE: MSI is raised by the SV (cosim_vip_top/tb_top) once after this
+     * returns injected>0 — a single interrupt for the whole batch. */
+    return injected;
 }
 
 /* ========== Counters ========== */
