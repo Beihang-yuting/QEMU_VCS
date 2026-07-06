@@ -259,6 +259,11 @@ static uint32_t cosim_config_read(PCIDevice *pci_dev, uint32_t address, int len)
             probe_req.addr     = 0x00;
             probe_req.len      = 4;
             probe_req.first_be = 0xF;
+            /* Route to this device's function: target_bdf = its PCIe BDF.
+               Without it the VCS config_proxy (multi-function) cannot match
+               the PF and returns 0xFFFFFFFF -> device never enumerates. */
+            probe_req.target_bdf   = (uint16_t)((bus << 8) | (dev << 3) | func);
+            probe_req.requester_id = probe_req.target_bdf;
 
             cpl_entry_t probe_cpl = {0};
             int probe_ret = bridge_send_tlp_and_wait(ctx, &probe_req, &probe_cpl);
@@ -307,6 +312,8 @@ static uint32_t cosim_config_read(PCIDevice *pci_dev, uint32_t address, int len)
     req.type = TLP_CFGRD;
     req.addr = dword_addr;
     req.len = 4;
+    req.target_bdf   = (uint16_t)((bus << 8) | (dev << 3) | func);
+    req.requester_id = req.target_bdf;
 
     cpl_entry_t cpl = {0};
     int ret = bridge_send_tlp_and_wait(ctx, &req, &cpl);
@@ -364,6 +371,8 @@ static void cosim_config_write(PCIDevice *pci_dev, uint32_t address,
     req.type = TLP_CFGWR;
     req.addr = address;
     req.len = len;
+    req.target_bdf   = (uint16_t)((bus << 8) | (dev << 3) | func);
+    req.requester_id = req.target_bdf;
     for (int i = 0; i < len && i < COSIM_TLP_DATA_SIZE; i++) {
         req.data[i] = (data >> (i * 8)) & 0xFF;
     }
