@@ -118,7 +118,8 @@ int sock_sync_connect(const char *path) {
 }
 
 int sock_sync_send(int fd, const sync_msg_t *msg) {
-    ssize_t n = write(fd, msg, sizeof(*msg));
+    /* MSG_NOSIGNAL: peer 关闭时返回 EPIPE 而非投递 SIGPIPE 杀进程 */
+    ssize_t n = send(fd, msg, sizeof(*msg), MSG_NOSIGNAL);
     if (n != (ssize_t)sizeof(*msg)) {
         perror("sock_sync_send");
         return -1;
