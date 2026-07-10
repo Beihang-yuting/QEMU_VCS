@@ -663,13 +663,12 @@ int bridge_vcs_dma_write_sync(unsigned long long host_addr,
     if (g_transport) {
         uint32_t tag = next_tag++;
 
-        /* Send data first so QEMU has it when processing the request */
-        if (g_transport->send_dma_data(g_transport, tag, DMA_DIR_WRITE,
-                                        host_addr, (const uint8_t *)data, (uint32_t)len) < 0) {
-            fprintf(stderr, "[VCS Bridge] DMA write sync: send_dma_data failed\n");
-            return -1;
-        }
-
+        /* Send DMA_REQ before DMA_DATA. QEMU's irq_poller peeks the aux
+         * channel by type expecting DMA_REQ first; if DMA_DATA arrives first
+         * it clogs the channel and the request is never dispatched to
+         * cosim_dma_cb (so an MSI-X doorbell write to 0xFEE... never reaches
+         * pci_dma_write and no interrupt is delivered). Same ordering as
+         * bridge_dma_write_bytes. */
         dma_req_t req = {
             .tag = tag,
             .direction = DMA_DIR_WRITE,
@@ -681,6 +680,12 @@ int bridge_vcs_dma_write_sync(unsigned long long host_addr,
 
         if (g_transport->send_dma_req(g_transport, &req) < 0) {
             fprintf(stderr, "[VCS Bridge] DMA write sync: send_dma_req failed\n");
+            return -1;
+        }
+
+        if (g_transport->send_dma_data(g_transport, tag, DMA_DIR_WRITE,
+                                        host_addr, (const uint8_t *)data, (uint32_t)len) < 0) {
+            fprintf(stderr, "[VCS Bridge] DMA write sync: send_dma_data failed\n");
             return -1;
         }
 
