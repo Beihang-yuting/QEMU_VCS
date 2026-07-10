@@ -263,6 +263,9 @@ sudo ip link del cosim0 2>/dev/null
 | Guest `virtio: device refuses features: 0` | glue 对 wdata 字节序翻转 | 确认 `vcs-tb/glue_if_to_stub.sv` 的 `hdr_wdata` 是 LSByte-first（`bytes[12]→[7:0]`），不是 PCIe BE |
 | Guest `eth0 not found` | Guest rootfs 未加载 virtio_net | 检查 `scripts/guest_init_tap.sh` 里 `insmod virtio_net.ko` 路径 |
 | `dnsmasq: failed to bind DHCP server socket` | 已有 dnsmasq 占端口 / systemd 上游管 53 端口 | kill 旧实例；本项目脚本已 `--bind-interfaces` 限定 cosim0 |
+| guest `/sys/class/net` 只有 `lo`，`virtio-pci: leaving for legacy driver` | 漏 `+BYPASS_CONFIG=1`，config 穿透到 ep_stub，Status cap-bit 被清 | simv 加 `+BYPASS_CONFIG=1`；详见 [COSIM-ETH-MSIX-DEBUG.md](COSIM-ETH-MSIX-DEBUG.md) §2.1 |
+| `virtio1-input.0` 中断计数恒 0，ping 100% 丢，插件无 `GPA=0xfee01004` 日志 | `bridge_vcs_dma_write_sync` 先发 DATA 后 REQ 堵 aux channel，MSI-X 到不了 QEMU | 改为先 REQ 后 DATA 重编；详见 [COSIM-ETH-MSIX-DEBUG.md](COSIM-ETH-MSIX-DEBUG.md) §2.2 |
+| `ping` 100% 丢 / `iperf3` 传 0 字节或卡死 | VCS 仿真 ~1000× 慢，RTT≈5s，TCP RTO≪RTT 致 spurious 重传风暴 | `ping -W 60`；两 guest 设 `ip route change ... rto_min 8s` + 裸 `nc` 定量传；详见 [COSIM-ETH-MSIX-DEBUG.md](COSIM-ETH-MSIX-DEBUG.md) §3 |
 
 ---
 
@@ -279,7 +282,8 @@ sudo ip link del cosim0 2>/dev/null
 | `vcs-tb/pcie_ep_stub.sv` | virtio-pci EP stub（common_cfg/notify/ISR/device_cfg 寄存器 + `cpl_ack`） |
 | `vcs-tb/glue_if_to_stub.sv` | VIP bus ↔ stub 信号转换 + `cpl_ack` 握手 + `ST_WAIT` 流水线 serialization |
 | `bridge/qemu/bridge_qemu.c` | QEMU 侧 bridge（stale cpl drain 循环） |
-| `docs/COSIM-CROSS-MACHINE-GUIDE.md` | 本文档 |
+| `docs/COSIM-CROSS-MACHINE-GUIDE.md` | 本文档（单 guest + TAP 组网） |
+| `docs/COSIM-ETH-MSIX-DEBUG.md` | 双 guest MSI-X 数据面调试 + 高 RTT 参数调优通流法 |
 
 ---
 
