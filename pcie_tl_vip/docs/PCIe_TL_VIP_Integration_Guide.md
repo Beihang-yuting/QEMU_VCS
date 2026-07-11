@@ -113,6 +113,25 @@ cfg.switch_cfg    = sw_cfg;
 
 > 各根 EP 内存窗 = `cfg.switch_cfg.ds_mem_base[i]`；按此地址出激励即落到对应 EP。多根细节见 User Guide §8.4.1。
 
+### 3.4 非-Switch 多 agent（N RC + M EP 独立链路，num_rc/num_ep）
+
+不建 switch，直接起**任意 N RC + M EP 独立链路**，每个 agent 独占一套 4 通道 adapter + per-pair manager/scoreboard。主用于把多个 BFM 直接对接真实 DUT（每链路一条物理 AXIS，不需建模 switch）。
+
+```systemverilog
+cfg.rc_agent_enable = 1;
+cfg.ep_agent_enable = 0;   // 或 1
+cfg.num_rc          = 2;   // 2 个独立 RC host 链路（对接真实 EP DUT 时 BFM 用 RC role）
+cfg.num_ep          = 0;   // 或 M 个独立 EP 链路
+cfg.switch_enable   = 0;   // switch 关；开则 num_rc/num_ep 被忽略（取 num_usp/num_ds_ports）
+```
+
+- 默认 `num_rc=num_ep=1` == 旧点对点（§3.1），`env.rc_agent`/`ep_agent` 别名保留。
+- `num_rc>1` → per-root manager 隔离照旧（`tag_mgrs[i]`/`fc_mgrs[i]`/…/`scbs[i]` 按 num_rc sizing）。
+- **TLM 模式** + `num_rc==num_ep>1`：env 为每对 `RC[i]↔EP[i]` fork 独立回环，可纯 sim 跑 N 条独立链路、不接 DUT（大流量回归 `pcie_tl_multipair_heavy_test`，`+NUM_PAIRS`）。
+- **SV_IF 模式**：每链路独立物理 AXIS，接真实 DUT；连线约定见 `xilinx_pcie` 集成指南 §2.3。
+
+> 句柄 `env.rc_agents[i]` / `env.ep_agents[i]`（`[0]` 别名单数）。出激励：`env.rc_agents[i].sequencer`。详见 User Guide §8.5。
+
 ---
 
 ## 4. 出激励 / 取句柄

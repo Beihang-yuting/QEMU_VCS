@@ -13,6 +13,13 @@ class pcie_tl_env_config extends uvm_object;
     uvm_active_passive_enum   rc_is_active     = UVM_ACTIVE;
     uvm_active_passive_enum   ep_is_active     = UVM_ACTIVE;
 
+    //--- Non-switch multi-agent: independent RC/EP links, each its own 4-channel
+    //    adapter. Default 1/1 -> identical to legacy 1RC+1EP. In switch mode the
+    //    RC count comes from switch_cfg.num_usp and EP from num_ds_ports instead
+    //    (num_rc/num_ep are ignored under switch_enable). ---
+    int                       num_rc           = 1;
+    int                       num_ep           = 1;
+
     //--- Interface mode ---
     pcie_tl_if_mode_e         if_mode          = TLM_MODE;
 

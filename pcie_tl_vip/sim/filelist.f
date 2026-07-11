@@ -39,6 +39,7 @@
 /home/ryan/pcie_work/pcie_tl_vip/tests/pcie_tl_uneven_ownership_test.sv
 /home/ryan/pcie_work/pcie_tl_vip/tests/pcie_tl_per_root_tag_test.sv
 /home/ryan/pcie_work/pcie_tl_vip/tests/pcie_tl_multi_root_stress_test.sv
+/home/ryan/pcie_work/pcie_tl_vip/tests/pcie_tl_multipair_heavy_test.sv
 
 // ---- testbench top module ----
 /home/ryan/pcie_work/pcie_tl_vip/tests/pcie_tl_tb_top.sv

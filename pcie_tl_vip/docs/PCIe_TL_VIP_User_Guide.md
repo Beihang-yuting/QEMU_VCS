@@ -857,6 +857,32 @@ RC0↔{EP0,EP1}   RC1↔{EP2,EP3}
 - 校验：`env.scbs[r]`、`env.sw.dsp[i].forwarded_count`、`env.sw.fabric.cross_root_violations`
 - 自定义归属：`sw_cfg.dsp_owner = '{0,0,0,1};`（uneven：EP0-2→root0, EP3→root1）
 
+### 8.5 非-Switch 多 agent（num_rc / num_ep）
+
+不建 switch 也能起**任意 N RC + M EP 独立链路**——每个 agent 独占自己的一套 4 通道 adapter，互不共享总线。用于把多个 BFM 直接对接真实 DUT（每链路一条物理 AXIS，不需要建模 switch）。
+
+```systemverilog
+cfg.if_mode         = SV_IF_MODE;   // 物理接口模式（对接真实 DUT）
+cfg.rc_agent_enable = 1;
+cfg.ep_agent_enable = 0;
+cfg.num_rc          = 2;            // 2 个独立 RC host 链路
+cfg.num_ep          = 0;            // 或 M 个独立 EP 链路
+cfg.switch_enable   = 0;
+```
+
+**行为:**
+- `num_rc`/`num_ep` 默认 **1/1**，与旧 1RC+1EP 完全一致（`env.rc_agent`/`ep_agent` 别名保留）。
+- 根数 `nu = switch ? num_usp : num_rc`。**per-root manager 隔离照旧**（`tag_mgrs[r]`/`fc_mgrs[r]`/`ord_engs[r]`/`cfg_mgrs[r]`/`scbs[r]` 按 `num_rc` sizing），多根不共享 tag/FC/cfg。
+- `num_ep > 1`（非 switch）建 `ep_agent_%0d` / `ep_adapter_%0d` 独立链路（别名 → `[0]`）；`num_ep<=1` 与 switch 路径不变。
+- EP-only（`num_rc=0`）仍保留一套共享 manager 给 EP 用。
+- **switch_enable=1 时 num_rc/num_ep 被忽略**（RC 数取 `num_usp`，EP 取 `num_ds_ports`）。
+
+**访问句柄:** `env.rc_agents[i]` / `env.ep_agents[i]`（`env.rc_agent`/`ep_agent` = `[i=0]` 别名）。发激励：`env.rc_agents[i].sequencer`。
+
+**TLM 配对回环（无需 DUT）:** `if_mode = TLM_MODE` 且 `num_rc == num_ep > 1` 时，env 为**每对** `RC[i] ↔ EP[i]` fork 一条独立回环，各用 per-pair manager（`fc_mgrs[i]`/`tag_mgrs[i]`/…）+ 独立 scoreboard（`scbs[i]`）。可在纯 sim 里跑 N 条独立链路、不接 DUT；跨对 tag 重叠不冲突（隔离）。大流量回归见 `pcie_tl_multipair_heavy_test`（`+NUM_PAIRS=1` 直连兼容 / `=2` 双对，每对数千 MWr+MRd）。
+
+> `SV_IF_MODE`（对接真实 DUT）下每链路是独立物理 AXIS，需 DUT（或外部 loopback）提供 `tready` 才能驱流；无 DUT 的 smoke 仅做 build/connect/elaborate + idle。对接 Xilinx PG213 真实 DUT 的连线约定见 `xilinx_pcie` 集成指南 §2.3（BFM RC-role pin 镜像真实器件，4 通道同名直连，零描述符翻译）。
+
 ---
 
 ## 9. Sequence 库
