@@ -9,29 +9,48 @@
 #include <string.h>
 #include <stdio.h>
 
-/* 全局状态（VCS 进程内单实例） */
+/* SHM 模式全局单实例（仅单 RC 使用） */
 static cosim_shm_t g_shm;
 static int g_sock_fd = -1;
 static int g_initialized = 0;
-static cosim_transport_t *g_transport = NULL;
 
-/* P3: Topology state (populated by SV testbench via DPI-C before simulation) */
-static topology_resp_t g_topology;
-static int g_topology_ready = 0;
-
-/* Counter for TLP_READY messages consumed during DMA waits (SHM mode only). */
-static int g_pending_tlp_ready = 0;
-
-/* Pending VF event from QEMU (set by poll_tlp when VF_EVENT sync arrives) */
-static int g_vf_event_pending = 0;
-static vf_event_t g_vf_event;
-
-/* TLP cache: TCP 模式 DMA read 期间消费的 TLP_READY 会立即 recv_tlp 缓存在此，
- * poll_tlp 优先从缓存读取，避免 pending 计数与 data channel 错位。 */
 #define TLP_CACHE_SIZE 1024
-static tlp_entry_t g_tlp_cache[TLP_CACHE_SIZE];
-static int g_tlp_cache_head = 0;
-static int g_tlp_cache_tail = 0;
+/* Multi-RC cosim: 多个 QEMU 主机各当一个 root complex，连到同一个 VCS fabric。
+ * 每个 RC 一份 rc_ctx_t。默认单 RC 只用 g_rc[0]，故下面把历史单实例全局名
+ * #define 成 g_rc[0].xxx —— 现有函数体逐字不改、字节级等价。COSIM_MAX_RCS 给
+ * 到 4 留余量。 */
+#ifndef COSIM_MAX_RCS
+#define COSIM_MAX_RCS 4
+#endif
+typedef struct {
+    cosim_transport_t *transport;      /* 原 g_transport */
+    topology_resp_t    topology;       /* 原 g_topology */
+    int                topology_ready; /* 原 g_topology_ready */
+    int                pending_tlp_ready;
+    int                vf_event_pending;
+    vf_event_t         vf_event;
+    tlp_entry_t        tlp_cache[TLP_CACHE_SIZE];
+    int                tlp_cache_head;
+    int                tlp_cache_tail;
+    int                poll_count;     /* 原 g_poll_count */
+    tlp_entry_t        last_entry;     /* 原 g_last_entry */
+} rc_ctx_t;
+
+static rc_ctx_t g_rc[COSIM_MAX_RCS];   /* 全零初始化: transport=NULL 等 */
+static int      g_num_rc = 1;          /* 默认单 RC */
+
+/* Legacy single-RC aliases → g_rc[0]（阶段0/1: 零行为变化） */
+#define g_transport         g_rc[0].transport
+#define g_topology          g_rc[0].topology
+#define g_topology_ready    g_rc[0].topology_ready
+#define g_pending_tlp_ready g_rc[0].pending_tlp_ready
+#define g_vf_event_pending  g_rc[0].vf_event_pending
+#define g_vf_event          g_rc[0].vf_event
+#define g_tlp_cache         g_rc[0].tlp_cache
+#define g_tlp_cache_head    g_rc[0].tlp_cache_head
+#define g_tlp_cache_tail    g_rc[0].tlp_cache_tail
+#define g_poll_count        g_rc[0].poll_count
+#define g_last_entry        g_rc[0].last_entry
 
 static int tlp_cache_push(const tlp_entry_t *e) {
     int next = (g_tlp_cache_head + 1) % TLP_CACHE_SIZE;
@@ -55,11 +74,8 @@ static int tlp_cache_count(void) {
     return (g_tlp_cache_head - g_tlp_cache_tail + TLP_CACHE_SIZE) % TLP_CACHE_SIZE;
 }
 
-/* Debug heartbeat counter — prints status every N poll iterations */
-static int g_poll_count = 0;
-
-/* Cache of last dequeued TLP entry for bridge_vcs_poll_tlp_ext */
-static tlp_entry_t g_last_entry;
+/* g_poll_count 与 g_last_entry 现为 g_rc[0].poll_count / g_rc[0].last_entry
+ * （见上方 rc_ctx_t 与 #define 别名）。 */
 
 /* DPI-C: 初始化 — 打开 SHM，连接 Socket */
 int bridge_vcs_init(const char *shm_name, const char *sock_path) {
