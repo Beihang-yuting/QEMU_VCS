@@ -99,6 +99,8 @@ class pcie_tl_multipair_heavy_test extends pcie_tl_base_test;
                         for (int n = 0; n < writes_per_pair; n++) begin
                             automatic bit [63:0] off = ($urandom_range(24'h00FF_FF00, 0)) & ~64'h3F;
                             automatic int        len = 1 + $urandom_range(31, 0);
+                            // keep each request inside one 4KB page (PCIe legality; off is 64B-aligned)
+                            if (off[11:0] + len*4 > 4096) len = (4096 - off[11:0]) / 4;
                             issue_wr(pp, base + off, len, $sformatf("p%0d_wr_%0d", pp, n));
                             #1ns;
                         end
@@ -108,6 +110,8 @@ class pcie_tl_multipair_heavy_test extends pcie_tl_base_test;
                         for (int n = 0; n < reads_per_pair; n++) begin
                             automatic bit [63:0] off = ($urandom_range(24'h00FF_FF00, 0)) & ~64'h3F;
                             automatic int        len = 1 + $urandom_range(15, 0);
+                            // keep each request inside one 4KB page (PCIe legality; off is 64B-aligned)
+                            if (off[11:0] + len*4 > 4096) len = (4096 - off[11:0]) / 4;
                             issue_rd(pp, base + off, len, $sformatf("p%0d_rd_%0d", pp, n));
                             #3ns;
                         end

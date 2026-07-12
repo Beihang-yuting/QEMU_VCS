@@ -200,11 +200,16 @@ class pcie_tl_scoreboard extends uvm_scoreboard;
                 cpl.tag, tracker.expected_addr[6:0], cpl.lower_addr))
         end
 
-        // Verify byte_count matches remaining
-        if (cpl.byte_count != (tracker.total_bytes - tracker.received_bytes)) begin
+        // Verify byte_count matches remaining.
+        // PCIe byte_count is a 12-bit field where 0x000 encodes 4096 (the max),
+        // so a completion carrying exactly 4096 remaining bytes reports 0 — decode
+        // it before comparing, else 4096-byte reads raise a false mismatch.
+        if (((cpl.byte_count == 0) ? 4096 : cpl.byte_count) !=
+            (tracker.total_bytes - tracker.received_bytes)) begin
             `uvm_warning("SCB", $sformatf(
                 "Completion byte_count mismatch: tag=0x%03h expected=%0d got=%0d",
-                cpl.tag, tracker.total_bytes - tracker.received_bytes, cpl.byte_count))
+                cpl.tag, tracker.total_bytes - tracker.received_bytes,
+                (cpl.byte_count == 0) ? 4096 : cpl.byte_count))
         end
 
         // Data integrity check for read completions

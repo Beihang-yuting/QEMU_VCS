@@ -7,7 +7,14 @@ class pcie_tl_mem_wr_seq extends uvm_sequence #(pcie_tl_tlp);
     rand tlp_constraint_mode_e mode;
     pcie_tl_prefix  prefixes[$];
     bit             has_prefix;
-    constraint c_default { mode == CONSTRAINT_LEGAL; length inside {[1:128]}; first_be != 0; }
+    constraint c_default { mode == CONSTRAINT_LEGAL; length inside {[1:128]}; first_be != 0;
+                           // Mirror the TLP's own legality constraints so uvm_do_with never forces
+                           // an illegal (addr,length,last_be) combo onto the tlp (was RNDFLD):
+                           //  - a request must not cross a 4KB page boundary (pcie_tl_tlp c_4kb_boundary)
+                           //  - single-DW transfers force last_be=0; multi-DW require last_be!=0
+                           ((addr[11:0]) + (length * 4)) <= 4096;
+                           (length == 1) -> last_be == 0;
+                           (length >  1) -> last_be != 0; }
     function new(string name = "pcie_tl_mem_wr_seq"); super.new(name); endfunction
     task body();
         pcie_tl_mem_tlp tlp;
