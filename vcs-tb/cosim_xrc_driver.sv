@@ -14,10 +14,8 @@
  * Scope: MMIO (BAR read/write) + config-space bypass. DUT-initiated DMA
  * (RQ inbound) + MSI are logged as TODO here — that's the next increment.
  *
- * Isolation: this is a SEPARATE file from vcs-tb/cosim_rc_driver.sv (the
- * single-RC stub-EP driver) so the in-flight single-RC / MSI-X work is
- * untouched. rc_index defaults to 0; the C _rc(0) path is byte-equivalent
- * to the legacy single-RC DPI.
+ * Isolation: this is the multi-RC cosim adapter driver. rc_index defaults
+ * to 0; the C _rc(0) path is byte-equivalent to the legacy single-RC DPI.
  */
 
 `ifndef COSIM_XRC_DRIVER_SV
