@@ -40,8 +40,8 @@ class cosim_xrc_driver extends pcie_tl_rc_driver;
     pcie_tl_config_proxy config_proxy;
 
     // ---- Tag mapping: QEMU 8-bit tag <-> VIP tag ----
-    bit [7:0] vip_tag_to_qemu_tag[int];
-    int       qemu_tag_to_vip_tag[bit [7:0]];
+    bit [9:0] vip_tag_to_qemu_tag[int];        // 10-bit QEMU tag (extended tag)
+    int       qemu_tag_to_vip_tag[bit [9:0]];
 
     // ---- DPI scratch (class members = static storage; VCS Q-2020 safe) ----
     byte unsigned    dpi_type;
@@ -224,11 +224,11 @@ class cosim_xrc_driver extends pcie_tl_rc_driver;
             end
 
             begin
-                bit [7:0] qemu_tag_8 = dpi_tag[7:0];
+                bit [9:0] qemu_tag_10 = dpi_tag[9:0];   // 10-bit QEMU tag
                 send_tlp(vip_tlp);   // adapter.send -> CQ channel -> DUT
                 if (vip_tlp.requires_completion()) begin
-                    vip_tag_to_qemu_tag[int'(vip_tlp.tag)] = qemu_tag_8;
-                    qemu_tag_to_vip_tag[qemu_tag_8]        = int'(vip_tlp.tag);
+                    vip_tag_to_qemu_tag[int'(vip_tlp.tag)] = qemu_tag_10;
+                    qemu_tag_to_vip_tag[qemu_tag_10]       = int'(vip_tlp.tag);
                 end
             end
             total_tlp_count++;
@@ -283,7 +283,7 @@ class cosim_xrc_driver extends pcie_tl_rc_driver;
         end
         qemu_tag = int'(vip_tag_to_qemu_tag[vip_tag_int]);
         vip_tag_to_qemu_tag.delete(vip_tag_int);
-        qemu_tag_to_vip_tag.delete(qemu_tag[7:0]);
+        qemu_tag_to_vip_tag.delete(qemu_tag[9:0]);
 
         // First dword of payload, PCIe big-endian -> little-endian word for QEMU
         if (cpl.payload.size() >= 4)
@@ -296,11 +296,11 @@ class cosim_xrc_driver extends pcie_tl_rc_driver;
         bridge_vcs_set_cpl_data_rc(rc_index, 0, rdata);
         if (bridge_vcs_send_cpl_scalar_rc(rc_index, qemu_tag, 1) != 0)
             `uvm_error(get_name(),
-                $sformatf("RC%0d send_cpl failed qemu_tag=0x%02h", rc_index, qemu_tag))
+                $sformatf("RC%0d send_cpl failed qemu_tag=0x%03h", rc_index, qemu_tag))
         total_cpl_count++;
 
         `uvm_info(get_name(),
-            $sformatf("RC%0d Cpl->QEMU vip_tag=0x%03h qemu_tag=0x%02h data=0x%08h",
+            $sformatf("RC%0d Cpl->QEMU vip_tag=0x%03h qemu_tag=0x%03h data=0x%08h",
                       rc_index, cpl.tag, qemu_tag, rdata), UVM_HIGH)
     endfunction
 
@@ -343,7 +343,7 @@ class cosim_xrc_driver extends pcie_tl_rc_driver;
                 m.first_be = 4'hF;
                 m.last_be  = (len > 4) ? 4'hF : 4'h0;
                 m.length   = (len > 0) ? (len + 3) / 4 : 1;
-                m.tag      = 10'(tag[7:0]);
+                m.tag      = 10'(tag[9:0]);
                 return m;
             end
             default: return null;

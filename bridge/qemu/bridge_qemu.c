@@ -13,7 +13,7 @@ bridge_ctx_t *bridge_init(const char *shm_name, const char *sock_path) {
     ctx->listen_fd = -1;
     ctx->client_fd = -1;
     ctx->next_tag = 0;
-    ctx->tag_mask = 0x00FF;   /* default 8-bit tags; updated after topology handshake */
+    ctx->tag_mask = 0x03FF;   /* 10-bit extended tags (1024 outstanding); updated after topology handshake */
     pthread_mutex_init(&ctx->tlp_mutex, NULL);
 
     if (cosim_shm_create(&ctx->shm, shm_name) < 0) {
@@ -372,7 +372,7 @@ bridge_ctx_t *bridge_init_ex(const transport_cfg_t *cfg) {
     ctx->listen_fd = -1;
     ctx->client_fd = -1;
     ctx->next_tag = 0;
-    ctx->tag_mask = 0x00FF;   /* default 8-bit tags */
+    ctx->tag_mask = 0x03FF;   /* 10-bit extended tags (1024 outstanding) */
     pthread_mutex_init(&ctx->tlp_mutex, NULL);
 
     transport_cfg_t server_cfg = *cfg;
