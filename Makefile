@@ -159,7 +159,6 @@ test: test-unit test-integration
 # ============================================================
 clean:
 	rm -rf $(BUILD_DIR)
-	rm -rf $(VCS_SIM_DIR)/csrc* $(VCS_SIM_DIR)/*.daidir
 
 clean-logs:
 	rm -rf $(LOG_DIR)/*
