@@ -13,9 +13,7 @@ package cosim_xrc_pkg;
     import cosim_bridge_pkg::*;
     `include "uvm_macros.svh"
 
-    `include "cosim_env_config.sv"    // cosim_env_config extends pcie_tl_env_config
     `include "cosim_xrc_driver.sv"    // cosim_xrc_driver  extends pcie_tl_rc_driver
-    `include "cosim_xrc_test.sv"      // cosim_xrc_test    extends uvm_test
 
     // -----------------------------------------------------------------------
     // 集成开关 —— 现有环境里一行接入 cosim,只做加法,不碰原始功能。
