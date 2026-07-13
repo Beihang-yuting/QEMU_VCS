@@ -108,7 +108,7 @@ class cosim_xrc_driver extends pcie_tl_rc_driver;
     // -----------------------------------------------------------------------
     // 自初始化开关。默认 1:driver 自己连 QEMU(读 +REMOTE_HOST/+PORT_BASE),
     // 无需外部 test 调 init —— 这样集成进现有环境只要一行工厂 override。
-    // 若某 test 想自己管 init(如 cosim_xrc_test),先设 bridge_ready=1 即跳过。
+    // 若某 test 想自己管 init,先设 bridge_ready=1 即跳过。
     // -----------------------------------------------------------------------
     bit self_init_bridge_en = 1;
 
