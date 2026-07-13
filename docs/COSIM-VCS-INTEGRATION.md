@@ -3,12 +3,17 @@
 把 cosim 桥集成进你的 VCS/UVM 环境,驱动 xilinx-pcie DUT。C 编库单独见
 [COSIM-C-BUILD.md](COSIM-C-BUILD.md)。
 
+> **最小接入(推荐入口)**:多数集成只需 [COSIM-MINIMAL-INTEGRATION.md](COSIM-MINIMAL-INTEGRATION.md)
+> —— 加 `bridge/vcs/bridge_vcs.sv` + `vcs-tb/cosim_xrc_pkg.sv`,在你自己的 test `build_phase`
+> 里调一行 `cosim_xrc_pkg::cosim_maybe_enable()`,用你自己的 top。本文档讲底层机制(转接层 /
+> DPI / AXIS 映射),供需要深入或自定义时参考。
+
 ---
 
 ## 1. 层次栈
 
 ```
-你的 UVM test / top   (tb_cosim_multirc_top.sv / cosim_xrc_test.sv)
+你的 UVM test / top   (你自己的 test:build_phase 调 cosim_maybe_enable + 你自己的 top)
    │
 【转接层】cosim_xrc_driver.sv     ← 调 DPI + 转 QEMU-TLP ↔ pcie_tl_vip ↔ AXIS→DUT
    │
@@ -31,37 +36,35 @@
 **SV(编进你的 simv):**
 ```
 bridge/vcs/bridge_vcs.sv          # cosim_bridge_pkg (DPI 声明) — 必须先于转接层编
-vcs-tb/cosim_env_config.sv        # cosim_env_config (可选,或用你自己的 env cfg)
-vcs-tb/cosim_xrc_driver.sv        # 转接层
-vcs-tb/cosim_xrc_test.sv          # 每 RC init bridge + 拉起 driver
-vcs-tb/cosim_xrc_pkg.sv           # 打包上面三个(import uvm/pcie_tl/xilinx/cosim_bridge)
-vcs-tb/tb_cosim_multirc_top.sv    # top:2×4 AXIS 总线 + 连 DUT
+vcs-tb/cosim_xrc_pkg.sv           # 转接层打包 + cosim_maybe_enable 开关(内部 include 其余)
 ```
+> `cosim_xrc_pkg.sv` 内部 include 转接层(cosim_xrc_driver)等;你只需在 filelist 加这两个,
+> 在你自己的 test `build_phase` 调 `cosim_xrc_pkg::cosim_maybe_enable()`,用你自己的 top。
+> 完整最小接入见 [COSIM-MINIMAL-INTEGRATION.md](COSIM-MINIMAL-INTEGRATION.md)。
+
 依赖三库(你已有):`pcie_tl_vip`(要有 num_rc/num_ep + adapter 基类的合并版)、
 `xilinx_pcie`(adapter 版,含 xilinx_pcie_adapter_pkg)、`axis_vip`、`host_mem`。
 
-**C 库**:`libcosim_bridge.a`(或 inline 编,见 COSIM-C-BUILD.md)。
-
-编译顺序 + 可直接用的脚本:`scripts/build_cosim_multirc.sh`(filelist 见其 `gen_filelist`)。
+**C 库**:`libcosim_bridge.a`(`make cosim-lib`,或 inline 编,见 COSIM-C-BUILD.md)。
 
 ---
 
 ## 3. 转接层调了哪些 DPI(按 UVM phase)
 
-`cosim_xrc_driver` + `cosim_xrc_test` 实际调用:
+`cosim_xrc_driver` 实际调用(driver 自初始化,无需外部 test 写 init):
 
 | Phase / 时机 | 调用方 | DPI 函数 | 作用 |
 |---|---|---|---|
 | build_phase | driver | (config_db)`rc_index` | 定本 driver 服务哪个 RC(名字 `rc_agent_<N>` 兜底) |
-| run_phase 开头 | test | `bridge_vcs_init_ex_rc(r,"tcp","","",host,port_base,r)` | 每 RC 连一个 QEMU(client) |
-| run_phase(每 RC ready) | test | 设 `driver.bridge_ready=1` | 放行 polling |
+| run_phase 开头 | driver | `bridge_vcs_init_ex_rc(r,"tcp","","",host,port_base,r)` | 每 RC 连一个 QEMU(client),host/port 自读 `+REMOTE_HOST/+PORT_BASE` |
+| run_phase(ready) | driver | 置 `bridge_ready=1` | 放行 polling |
 | request_loop(forever) | driver | `bridge_vcs_poll_tlp_scalar_rc(rc)` | 取 QEMU 来的一个 TLP;>0 空、<0 shutdown |
 | 取到 TLP | driver | `get_poll_type/addr/len/tag_rc(rc)` + `get_poll_data_rc(rc,i)` | 拿字段(纯 scalar,VCS Q-2020 安全) |
 | config 读(bypass) | driver | `set_cpl_data_rc(rc,i,v)` + `send_cpl_scalar_rc(rc,tag,1)` | proxy 直接回 config completion |
 | config 写(bypass) | driver | `set_bar_base_rc(rc,0,addr)` | 同步 BAR base 给 C 侧地址解码 |
 | MMIO 请求 → DUT | driver | `send_tlp(vip_tlp)` → `adapter.send` | 走 pcie_tl pipeline → CQ 通道 → DUT |
 | DUT completion 回 | driver | `set_cpl_data_rc(rc,i,v)` + `send_cpl_scalar_rc(rc,qemu_tag,1)` | 转发 CplD 回 QEMU |
-| run_phase 收尾 | test | `bridge_vcs_cleanup_ex_rc(r)` | 关每 RC transport |
+| run_phase 收尾 | driver | `bridge_vcs_cleanup_ex_rc(r)` | 关每 RC transport |
 
 > 所有 `_rc(int rc)` 变体 = per-RC;`rc=0` 与 legacy 单 RC 字节等价。
 
@@ -86,16 +89,15 @@ TUSER 宽度(DATA_WIDTH=256):RQ=137 / RC=161 / CQ=183 / CC=81。
 
 ---
 
-## 5. 工厂 override(cosim_xrc_test.build_phase 已做)
+## 5. 工厂 override(`cosim_maybe_enable()` 在你 test 的 build_phase 里做)
 
 ```systemverilog
-// 基类 adapter → xilinx AXIS adapter
-pcie_tl_if_adapter::type_id::set_type_override(xilinx_pcie_if_adapter::get_type());
-// 基类 RC driver → cosim 转接层
+// 基类 RC driver → cosim 转接层(cosim_maybe_enable 内部完成)
 pcie_tl_rc_driver::type_id::set_type_override(cosim_xrc_driver::get_type());
-// 2 个 RC,非 switch,无 EP
-cfg.num_rc = 2; cfg.rc_agent_enable = 1; cfg.ep_agent_enable = 0; cfg.switch_enable = 0;
+// 若 env 还在用基类 pcie_tl_if_adapter,cosim_maybe_enable(1) 顺带:
+pcie_tl_if_adapter::type_id::set_type_override(xilinx_pcie_if_adapter::get_type());
 ```
+你在自己的 test build_phase 里建 env(num_rc/rc_agent_enable 等按你 env 原样配)。
 env 据此建 `rc_adapter_0/1`(xilinx) + `rc_agent_0/1`(内含 cosim_xrc_driver),
 `env.connect_phase` 自动把 `rc_adapters[r]` 塞给 `rc_agents[r].driver.adapter` ——
 所以转接层 `send_tlp/adapter.receive` 直连本 RC 的 4 条 AXIS 通道。
@@ -104,7 +106,7 @@ env 据此建 `rc_adapter_0/1`(xilinx) + `rc_agent_0/1`(内含 cosim_xrc_driver)
 
 ## 6. 把 DUT 接上(top)
 
-`tb_cosim_multirc_top.sv` 每 RC 声明 4 条 `axis_if`(rcN_rq/rc/cq/cc),现留空。接法:
+你自己的 top 每 RC 声明 4 条 `axis_if`(rcN_rq/rc/cq/cc)。接法:
 
 ```systemverilog
 // 例:RC0 的 DUT

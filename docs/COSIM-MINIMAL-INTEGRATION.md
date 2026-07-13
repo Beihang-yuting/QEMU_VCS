@@ -26,7 +26,7 @@
 <cosim>/bridge/vcs/bridge_vcs.sv       # cosim_bridge_pkg (DPI 声明)
 <cosim>/vcs-tb/cosim_xrc_pkg.sv        # 含 driver + enable 开关(内部 include 其余)
 ```
-> `cosim_xrc_pkg.sv` 已 `include cosim_env_config/cosim_xrc_driver/cosim_xrc_test`。
+> `cosim_xrc_pkg.sv` 内部 `include cosim_xrc_driver.sv` 并提供 `cosim_maybe_enable()`。
 > +incdir 加 `<cosim>/bridge/vcs` 与 `<cosim>/vcs-tb`。顺序:在 pcie_tl_pkg +
 > xilinx_pcie_adapter_pkg **之后**编。
 
@@ -34,7 +34,7 @@
 
 ```bash
 # 方式 A:静态库
-./scripts/build_cosim_lib.sh
+make cosim-lib                      # → build/lib/libcosim_bridge.a
 # vcs 链接加:
 #   -LDFLAGS "-L<cosim>/build/lib -lcosim_bridge -Wl,--no-as-needed -lrt -lpthread"
 
@@ -70,7 +70,7 @@ endfunction
        +COSIM +REMOTE_HOST=<QEMU机IP> +PORT_BASE=9100 \
        +BYPASS_CONFIG=1
 ```
-QEMU 侧先起(见 [COSIM-ISOLATED-ENVS.md](COSIM-ISOLATED-ENVS.md) 的 `setup_qemu_env.sh`)。
+QEMU 侧先起(见 [COSIM-ISOLATED-ENVS.md](COSIM-ISOLATED-ENVS.md) 的 `make run-qemu`)。
 多 RC:每个 rc_agent_<N> 的 cosim driver 自动用 instance_id=N 连
 `PORT_BASE + N*3`。
 
@@ -95,4 +95,4 @@ QEMU 侧先起(见 [COSIM-ISOLATED-ENVS.md](COSIM-ISOLATED-ENVS.md) 的 `setup_q
 - 收发包 = MMIO(QEMU 读写 DUT BAR)+ config bypass。DUT 主动 DMA(RQ 入向)+
   MSI 目前是占位(下一增量)。
 - device 身份默认 1af4:1041;不同则加 `+CFG_VENDOR_ID=.. +CFG_DEVICE_ID=.. +CFG_BAR0_SIZE=..`
-  (或用 `run_cosim_vcs.sh` 从 cosim-conn.json 自动带)。
+  (或从 `cosim-conn.json` 的 `device.*` 字段解析后自带,见 [COSIM-ISOLATED-ENVS.md](COSIM-ISOLATED-ENVS.md) §2)。
