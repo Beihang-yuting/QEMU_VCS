@@ -14,6 +14,9 @@ Makefile.cmake
 *.so.*
 *.dylib
 
+# Compiled tools (source tools/*.c committed; built binary is not)
+tools/eth_tap_bridge
+
 # VCS simulation artifacts
 vcs_sim/
 simv
