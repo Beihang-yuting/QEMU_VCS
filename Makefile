@@ -5,8 +5,7 @@
 # ============================================================
 SHELL := /bin/bash
 
-.PHONY: all help bridge vcs-vip vcs-legacy vcs-vip-perf tap-bridge \
-        run-qemu run-vcs run-dual run-tap tap-check \
+.PHONY: all help bridge cosim-lib qemu-device run-qemu \
         test-unit test-integration test \
         clean clean-logs clean-run clean-all info
 
@@ -22,14 +21,12 @@ RUN_DIR       := $(PROJECT_DIR)/run
 # 二进制路径（优先环境变量）
 QEMU          ?= $(firstword $(wildcard $(PROJECT_DIR)/third_party/qemu/build/qemu-system-x86_64) \
                               $(wildcard $(HOME)/workspace/qemu-9.2.0/build/qemu-system-x86_64))
-SIMV          ?= $(VCS_SIM_DIR)/simv_vip
 GUEST_TYPE    ?= ubuntu
 # 镜像路径: guest/images/<GUEST_TYPE>/
 KERNEL        ?= $(firstword $(wildcard $(PROJECT_DIR)/guest/images/$(GUEST_TYPE)/bzImage) \
                               $(wildcard $(PROJECT_DIR)/guest/images/$(GUEST_TYPE)/vmlinuz))
 ROOTFS        ?= $(wildcard $(PROJECT_DIR)/guest/images/$(GUEST_TYPE)/rootfs.ext4)
 INITRD        ?= $(wildcard $(PROJECT_DIR)/guest/images/$(GUEST_TYPE)/initramfs.gz)
-TAP_BRIDGE    ?= $(PROJECT_DIR)/tools/eth_tap_bridge
 
 # ============================================================
 # 运行参数（通过 make xxx KEY=VALUE 传入）
@@ -45,30 +42,11 @@ REMOTE_HOST   ?= 127.0.0.1
 # Guest（TAP Host=10.0.0.1，Guest 默认 10.0.0.2）
 GUEST_IP      ?= 10.0.0.2
 PEER_IP       ?= 10.0.0.1
-ROLE          ?= server
-WAIT_SEC      ?= 60
 ifeq ($(GUEST_TYPE),debian)
   GUEST_MEMORY  ?= 512M
 else
   GUEST_MEMORY  ?= 256M
 endif
-# VCS（单实例，和 TAP 共用 /cosim_eth0）
-ETH_SHM       ?= /cosim_eth0
-ETH_ROLE      ?= 0
-ETH_CREATE    ?= 1
-MAC_LAST      ?= 1
-SIM_TIMEOUT   ?= 600000
-VCS_TEST      ?= cosim_test
-# SR-IOV / Multi-Function 参数
-NUM_PFS       ?= 1
-MAX_VFS       ?= 0
-MSIX_VECTORS  ?= 4
-VF_MSIX_VECS  ?= 2
-TAG_WIDTH     ?= 1
-# TAP（Host 侧 10.0.0.1，Guest 侧用 cosim-start 配 10.0.0.2）
-TAP_DEV       ?= cosim0
-TAP_IP        ?= 10.0.0.1
-TAP_ETH_SHM   ?= /cosim_eth0
 
 # ============================================================
 # 默认目标
@@ -84,13 +62,7 @@ bridge:
 	@cmake --build $(BUILD_DIR) -j$$(nproc) 2>&1 | tail -5
 	@echo "[BUILD] Bridge 库编译完成"
 
-# ----- VCS 编译 -----
-VCS_FLAGS  = -full64 -sverilog -timescale=1ns/1ps +v2k -debug_access+all -cc gcc
-VCS_UVM    = -ntb_opts uvm-1.2
-VIP_SRC    = pcie_tl_vip/src
-# host_mem 统一内存模型：上游 pcie_tl_pkg.sv 无条件 import host_mem_pkg，为硬依赖
-HOST_MEM_SRC = third_party/host_mem/src
-
+# host_mem 统一内存模型信息（供 cosim-lib / 外部 VCS flow 参考）
 BRIDGE_C_SRCS = \
 	bridge/vcs/bridge_vcs.c bridge/vcs/sock_sync_vcs.c \
 	bridge/common/shm_layout.c bridge/common/ring_buffer.c \
@@ -99,60 +71,6 @@ BRIDGE_C_SRCS = \
 	bridge/vcs/virtqueue_dma.c \
 	bridge/eth/eth_mac_dpi.c bridge/eth/eth_port.c \
 	bridge/common/transport_shm.c bridge/common/transport_tcp.c
-
-VCS_CFLAGS  = -I $(CURDIR)/bridge/common -I $(CURDIR)/bridge/vcs \
-              -I $(CURDIR)/bridge/qemu -I $(CURDIR)/bridge/eth \
-              -std=c99 -D_POSIX_C_SOURCE=200112L
-VCS_LDFLAGS = -Wl,--no-as-needed -lrt -lpthread
-
-vcs-vip:
-	@echo "[BUILD] 编译 VCS VIP 模式..."
-	@mkdir -p $(VCS_SIM_DIR)
-	vcs $(VCS_FLAGS) $(VCS_UVM) \
-		+define+COSIM_VIP_MODE +define+PCIE_COSIM_ENABLE \
-		-Mdir=$(VCS_SIM_DIR)/csrc \
-		-CFLAGS "$(VCS_CFLAGS)" \
-		-LDFLAGS "$(VCS_LDFLAGS)" \
-		+incdir+bridge/vcs +incdir+$(HOST_MEM_SRC) +incdir+$(VIP_SRC) +incdir+vcs-tb \
-		bridge/vcs/bridge_vcs.sv \
-		$(HOST_MEM_SRC)/host_mem_pkg.sv $(HOST_MEM_SRC)/host_mem_manager.sv \
-		$(VIP_SRC)/pcie_tl_if.sv $(VIP_SRC)/pcie_tl_pkg.sv \
-		vcs-tb/tb_top.sv vcs-tb/pcie_ep_stub.sv \
-		vcs-tb/glue_if_to_stub.sv vcs-tb/cosim_pkg.sv vcs-tb/cosim_vip_top.sv \
-		$(BRIDGE_C_SRCS) \
-		-o $(VCS_SIM_DIR)/simv_vip
-	@echo "[BUILD] simv_vip: $(VCS_SIM_DIR)/simv_vip"
-
-vcs-legacy:
-	@mkdir -p $(VCS_SIM_DIR)
-	vcs $(VCS_FLAGS) $(VCS_UVM) \
-		-Mdir=$(VCS_SIM_DIR)/csrc_legacy \
-		-CFLAGS "$(VCS_CFLAGS)" -LDFLAGS "$(VCS_LDFLAGS)" \
-		+incdir+bridge/vcs \
-		bridge/vcs/bridge_vcs.sv \
-		vcs-tb/tb_top.sv vcs-tb/pcie_ep_stub.sv \
-		$(BRIDGE_C_SRCS) \
-		-o $(VCS_SIM_DIR)/simv_legacy
-
-vcs-vip-perf:
-	@mkdir -p $(VCS_SIM_DIR)
-	vcs $(VCS_FLAGS) $(VCS_UVM) \
-		+define+COSIM_VIP_MODE +define+COSIM_PERF_EN +define+PCIE_COSIM_ENABLE \
-		-Mdir=$(VCS_SIM_DIR)/csrc_perf \
-		-CFLAGS "$(VCS_CFLAGS)" -LDFLAGS "$(VCS_LDFLAGS)" \
-		+incdir+bridge/vcs +incdir+$(HOST_MEM_SRC) +incdir+$(VIP_SRC) +incdir+vcs-tb \
-		bridge/vcs/bridge_vcs.sv \
-		$(HOST_MEM_SRC)/host_mem_pkg.sv $(HOST_MEM_SRC)/host_mem_manager.sv \
-		$(VIP_SRC)/pcie_tl_if.sv $(VIP_SRC)/pcie_tl_pkg.sv \
-		vcs-tb/tb_top.sv vcs-tb/pcie_ep_stub.sv \
-		vcs-tb/glue_if_to_stub.sv vcs-tb/cosim_pkg.sv vcs-tb/cosim_vip_top.sv \
-		$(BRIDGE_C_SRCS) \
-		-o $(VCS_SIM_DIR)/simv_vip_perf
-
-tap-bridge: bridge
-	@echo "[BUILD] 编译 eth_tap_bridge..."
-	$(MAKE) -C tools
-	@echo "[BUILD] eth_tap_bridge: $(TAP_BRIDGE)"
 
 # ============================================================
 # 运行 — QEMU
@@ -170,12 +88,7 @@ endif
 # 运行时库路径（确保源码编译的 glib 等库可被找到）
 _QEMU_LD_PATH = LD_LIBRARY_PATH=/usr/local/lib:/usr/local/lib/x86_64-linux-gnu:$(BRIDGE_LIB_DIR):$${LD_LIBRARY_PATH:-}
 
-# 设备模型选择: NUM_PFS>1 使用 cosim-pcie-pf (多 Function SR-IOV)，否则 cosim-pcie-rc (单设备)
-ifeq ($(shell test $(NUM_PFS) -gt 1 && echo yes),yes)
-  _COSIM_DEV_TYPE = cosim-pcie-pf
-else
-  _COSIM_DEV_TYPE = cosim-pcie-rc
-endif
+_COSIM_DEV_TYPE = cosim-pcie-rc
 
 ifeq ($(TRANSPORT),tcp)
   _QEMU_DEV = $(_COSIM_DEV_TYPE),transport=tcp,port_base=$(PORT_BASE),instance_id=$(INSTANCE_ID)$(_COSIM_DEBUG)
@@ -279,136 +192,6 @@ endif
 	fi
 
 # ============================================================
-# 运行 — VCS
-# ============================================================
-ifeq ($(TRANSPORT),tcp)
-  _VCS_TRANS = +transport=tcp +REMOTE_HOST=$(REMOTE_HOST) +PORT_BASE=$(PORT_BASE) +INSTANCE_ID=$(INSTANCE_ID)
-else
-  _VCS_TRANS = +SHM_NAME=$(SHM_NAME) +SOCK_PATH=$(SOCK_PATH)
-endif
-
-_VCS_ARGS = $(_VCS_TRANS) \
-	+BYPASS_CONFIG=1 \
-	+ETH_SHM=$(ETH_SHM) +ETH_ROLE=$(ETH_ROLE) +ETH_CREATE=$(ETH_CREATE) \
-	+MAC_LAST=$(MAC_LAST) +SIM_TIMEOUT_MS=$(SIM_TIMEOUT) \
-	+UVM_TESTNAME=$(VCS_TEST) +NO_WAVE \
-	+NUM_PFS=$(NUM_PFS) +MAX_VFS=$(MAX_VFS) +MSIX_VECTORS=$(MSIX_VECTORS) \
-	+VF_MSIX_VECTORS=$(VF_MSIX_VECS) +TAG_WIDTH=$(TAG_WIDTH)
-
-run-vcs:
-	@mkdir -p $(LOG_DIR)
-	@echo "============================================"
-	@echo " VCS ($(TRANSPORT) 模式)"
-ifeq ($(TRANSPORT),tcp)
-	@echo "  连接: $(REMOTE_HOST):$(PORT_BASE)  Instance: $(INSTANCE_ID)"
-else
-	@echo "  SHM: $(SHM_NAME)  Sock: $(SOCK_PATH)"
-endif
-	@echo "  MAC: de:ad:be:ef:00:0$(MAC_LAST)  ETH Role: $(ETH_ROLE)"
-	@echo "  日志: $(LOG_DIR)/vcs.log"
-	@echo "============================================"
-	export LM_LICENSE_FILE=$${LM_LICENSE_FILE:-/opt/synopsys/license/license.dat} && \
-	cd $(VCS_SIM_DIR) && ./simv_vip $(_VCS_ARGS) 2>&1 | tee $(LOG_DIR)/vcs.log
-
-# ============================================================
-# 运行 — 双实例对打
-# ============================================================
-run-dual:
-	@if [ ! -f '$(QEMU)' ]; then \
-		echo "[错误] QEMU 未找到: $(QEMU)"; exit 1; \
-	fi
-	@if [ ! -f '$(KERNEL)' ]; then \
-		echo "[错误] Kernel 未找到: $(KERNEL)"; exit 1; \
-	fi
-	@mkdir -p $(RUN_DIR)
-	@LOGDIR=$(LOG_DIR)/dual_$$(date +%Y%m%d_%H%M%S); \
-	mkdir -p $$LOGDIR; \
-	PIDS=""; \
-	trap 'echo ""; echo "清理进程..."; kill $$PIDS 2>/dev/null; wait 2>/dev/null' INT TERM; \
-	echo "============================================"; \
-	echo " 双实例对打 ($(TRANSPORT))  日志: $$LOGDIR/"; \
-	echo "============================================"; \
-	echo "[1/4] QEMU1 (10.0.0.1, server)..."; \
-	if [ "$(TRANSPORT)" = "tcp" ]; then \
-		DEV1="cosim-pcie-rc,transport=tcp,port_base=$(PORT_BASE),instance_id=0"; \
-		DEV2="cosim-pcie-rc,transport=tcp,port_base=$(PORT_BASE),instance_id=1"; \
-		VT1="+transport=tcp +REMOTE_HOST=$(REMOTE_HOST) +PORT_BASE=$(PORT_BASE) +INSTANCE_ID=0"; \
-		VT2="+transport=tcp +REMOTE_HOST=$(REMOTE_HOST) +PORT_BASE=$(PORT_BASE) +INSTANCE_ID=1"; \
-	else \
-		DEV1="cosim-pcie-rc,shm_name=/cosim_d0,sock_path=$(RUN_DIR)/cosim_d0.sock"; \
-		DEV2="cosim-pcie-rc,shm_name=/cosim_d1,sock_path=$(RUN_DIR)/cosim_d1.sock"; \
-		VT1="+SHM_NAME=/cosim_d0 +SOCK_PATH=$(RUN_DIR)/cosim_d0.sock"; \
-		VT2="+SHM_NAME=/cosim_d1 +SOCK_PATH=$(RUN_DIR)/cosim_d1.sock"; \
-	fi; \
-	$(QEMU) -M q35 -m $(GUEST_MEMORY) -smp 1 -kernel $(KERNEL) $(_GUEST_ARGS) \
-		-append 'console=ttyS0 root=/dev/vda rw $(_LOGLEVEL) guest_ip=10.0.0.1 peer_ip=10.0.0.2' \
-		-device "$$DEV1" -nographic -no-reboot \
-		-d unimp -D $$LOGDIR/qemu1_debug.log > $$LOGDIR/qemu1.log 2>&1 & \
-	PIDS="$$PIDS $$!"; sleep 2; \
-	echo "[2/4] QEMU2 (10.0.0.2, client)..."; \
-	$(QEMU) -M q35 -m $(GUEST_MEMORY) -smp 1 -kernel $(KERNEL) $(_GUEST_ARGS) \
-		-append 'console=ttyS0 root=/dev/vda rw $(_LOGLEVEL) guest_ip=10.0.0.2 peer_ip=10.0.0.1' \
-		-device "$$DEV2" -nographic -no-reboot \
-		-d unimp -D $$LOGDIR/qemu2_debug.log > $$LOGDIR/qemu2.log 2>&1 & \
-	PIDS="$$PIDS $$!"; sleep 2; \
-	echo "[3/4] VCS1 (RoleA, MAC=01)..."; \
-	cd $(VCS_SIM_DIR) && ./simv_vip $$VT1 +BYPASS_CONFIG=1 \
-		+ETH_SHM=$(ETH_SHM) +ETH_ROLE=0 +ETH_CREATE=1 +MAC_LAST=1 \
-		+SIM_TIMEOUT_MS=$(SIM_TIMEOUT) +UVM_TESTNAME=cosim_test +NO_WAVE \
-		> $$LOGDIR/vcs1.log 2>&1 & \
-	PIDS="$$PIDS $$!"; sleep 3; \
-	echo "[4/4] VCS2 (RoleB, MAC=02)..."; \
-	cd $(VCS_SIM_DIR) && ./simv_vip $$VT2 +BYPASS_CONFIG=1 \
-		+ETH_SHM=$(ETH_SHM) +ETH_ROLE=1 +ETH_CREATE=0 +MAC_LAST=2 \
-		+SIM_TIMEOUT_MS=$(SIM_TIMEOUT) +UVM_TESTNAME=cosim_test +NO_WAVE \
-		> $$LOGDIR/vcs2.log 2>&1 & \
-	PIDS="$$PIDS $$!"; \
-	echo "已启动 4 个进程，等待完成 (Ctrl+C 终止)..."; \
-	wait; \
-	echo ""; \
-	echo "========== 结果 =========="; \
-	echo "--- QEMU1 ---"; \
-	grep -E "eth0|ping|iperf|PASS|FAIL|Mbits|error" $$LOGDIR/qemu1.log 2>/dev/null | grep -v "hash\|kfence\|Dentry" | tail -8; \
-	echo "--- QEMU2 ---"; \
-	grep -E "eth0|ping|iperf|PASS|FAIL|Mbits|error" $$LOGDIR/qemu2.log 2>/dev/null | grep -v "hash\|kfence\|Dentry" | tail -8; \
-	echo "--- VCS1 ---"; \
-	grep -E "TX notify|RX inject" $$LOGDIR/vcs1.log 2>/dev/null | tail -5; \
-	echo "--- VCS2 ---"; \
-	grep -E "TX notify|RX inject" $$LOGDIR/vcs2.log 2>/dev/null | tail -5; \
-	echo "日志: $$LOGDIR/"
-
-# ============================================================
-# 运行 — TAP 桥接
-# ============================================================
-tap-check:
-	@if [ ! -f "$(TAP_BRIDGE)" ]; then \
-		echo "[错误] eth_tap_bridge 未编译"; \
-		echo "  请先运行: make tap-bridge"; \
-		exit 1; \
-	fi
-	@if /sbin/getcap "$(TAP_BRIDGE)" 2>/dev/null | grep -q cap_net_admin; then \
-		echo "[OK] CAP_NET_ADMIN 已设置"; \
-	else \
-		echo ""; \
-		echo "[错误] eth_tap_bridge 缺少 CAP_NET_ADMIN 权限"; \
-		echo ""; \
-		echo "  TAP 模式需要创建虚拟网卡，请让管理员执行:"; \
-		echo "  sudo setcap cap_net_admin+ep $(TAP_BRIDGE)"; \
-		echo ""; \
-		echo "  执行后重新运行: make run-tap"; \
-		exit 1; \
-	fi
-
-run-tap: tap-check
-	@mkdir -p $(LOG_DIR)
-	@echo "============================================"
-	@echo " TAP 桥接"
-	@echo "  TAP: $(TAP_DEV) ($(TAP_IP))  ETH SHM: $(TAP_ETH_SHM)"
-	@echo "  日志: $(LOG_DIR)/tap_bridge.log"
-	@echo "============================================"
-	$(TAP_BRIDGE) -s $(TAP_ETH_SHM) -t $(TAP_DEV) 2>&1 | tee $(LOG_DIR)/tap_bridge.log
-
-# ============================================================
 # 测试
 # ============================================================
 test-unit: bridge
@@ -441,11 +224,8 @@ clean-all: clean clean-logs clean-run
 info:
 	@echo "=== CoSim 环境 ==="
 	@echo "  QEMU:   $(QEMU)  $$(test -f '$(QEMU)' && echo [OK] || echo [缺失])"
-	@echo "  SIMV:   $(SIMV)  $$(test -f '$(SIMV)' && echo [OK] || echo [缺失])"
 	@echo "  Kernel: $(KERNEL)  $$(test -f '$(KERNEL)' && echo [OK] || echo [缺失])"
 	@echo "  Rootfs: $(if $(ROOTFS),$(ROOTFS)  $$(test -f '$(ROOTFS)' && echo [OK] || echo [缺失]),(未找到))"
-	@echo "  VERBOSE: $(VERBOSE)"
-	@echo "  TAP:    $(TAP_BRIDGE)  $$(test -f '$(TAP_BRIDGE)' && echo [OK] || echo [缺失])"
 	@echo "  日志:   $(LOG_DIR)/"
 	@echo "  运行:   $(RUN_DIR)/"
 
@@ -458,29 +238,11 @@ help:
 	@echo "======================"
 	@echo ""
 	@echo "编译:"
-	@echo "  make bridge          Bridge 库"
-	@echo "  make vcs-vip         VCS VIP 模式（需 VCS 工具链）"
-	@echo "  make vcs-legacy      VCS Legacy 模式"
-	@echo "  make tap-bridge      eth_tap_bridge"
+	@echo "  make bridge          Bridge 库(.so, cmake)"
 	@echo ""
-	@echo "单实例运行（2 个终端，先 QEMU 再 VCS）:"
-	@echo ""
-	@echo "  SHM 本地模式:"
-	@echo "    终端1: make run-qemu"
-	@echo "    终端2: make run-vcs"
-	@echo ""
-	@echo "  TCP 模式（可跨机）:"
-	@echo "    终端1: make run-qemu TRANSPORT=tcp"
-	@echo "    终端2: make run-vcs  TRANSPORT=tcp REMOTE_HOST=<IP>"
-	@echo ""
-	@echo "双实例对打（自动 4 进程，Guest↔Guest 网络验证）:"
-	@echo "  make run-dual                    SHM 模式"
-	@echo "  make run-dual TRANSPORT=tcp      TCP 模式"
-	@echo ""
-	@echo "TAP 桥接（Guest↔主机网络，需 CAP_NET_ADMIN）:"
-	@echo "  make tap-check                   检查权限"
-	@echo "  make run-tap                     启动 bridge"
-	@echo "  首次: sudo setcap cap_net_admin+ep tools/eth_tap_bridge"
+	@echo "运行 QEMU:"
+	@echo "    make run-qemu                  SHM 本地模式"
+	@echo "    make run-qemu TRANSPORT=tcp    TCP 模式（可跨机）"
 	@echo ""
 	@echo "测试:"
 	@echo "  make test-unit        单元测试"
@@ -497,35 +259,8 @@ help:
 	@echo "  TRANSPORT=shm|tcp      传输模式（默认 shm）"
 	@echo "  PORT_BASE=9100         TCP 端口基数"
 	@echo "  INSTANCE_ID=0          实例 ID（端口=BASE+ID*3）"
-	@echo "  REMOTE_HOST=127.0.0.1  VCS 连接目标"
 	@echo "  GUEST_IP / PEER_IP     Guest IP 地址"
-	@echo "  MAC_LAST=1             MAC 末字节"
-	@echo "  ETH_SHM                ETH 共享内存名"
-	@echo "  SIM_TIMEOUT=600000     VCS 超时(ms)"
 	@echo "  VERBOSE=0|1            日志级别（默认 0 安静，1 详细+debug）"
 	@echo "  GUEST_TYPE=ubuntu|debian  Guest 系统（默认 ubuntu）"
-	@echo "  QEMU= SIMV= KERNEL= ROOTFS=  路径覆盖"
-	@echo ""
-	@echo "IP 地址分配（10.0.0.0/24 网段）:"
-	@echo "  TAP Host 侧:  10.0.0.1  （make run-tap 自动配置）"
-	@echo "  Guest 侧:     10.0.0.2  （cosim-start 默认值）"
-	@echo "  双实例模式:    10.0.0.1 / 10.0.0.2（自动分配）"
-	@echo "  自定义:        cosim-start <IP> 指定任意 IP"
-	@echo ""
-	@echo "Guest 登录后（root/123）:"
-	@echo "  cosim-start                  一键配网（默认 10.0.0.2）"
-	@echo "  cosim-start 10.0.0.3         指定 IP"
-	@echo "  ping -c 1 10.0.0.1           发 1 个包（cosim 下每包需数分钟）"
-	@echo "  ping -c 5 10.0.0.1           发 5 个包"
-	@echo "  iperf3 -s                    启动 iperf 服务端"
-	@echo "  iperf3 -c 10.0.0.1           吞吐量测试"
-	@echo "  lspci -vv                    PCI 设备列表"
-	@echo "  cosim-stop                   停止仿真（通知 VCS 退出）"
-	@echo "  Ctrl+A X                     强制退出 QEMU"
-	@echo ""
-	@echo "示例:"
-	@echo "  make run-dual                            # 本机 SHM"
-	@echo "  make run-dual TRANSPORT=tcp              # 本机 TCP"
-	@echo "  make run-qemu TRANSPORT=tcp PORT_BASE=9100"
-	@echo "  make run-vcs  TRANSPORT=tcp REMOTE_HOST=10.11.10.53"
+	@echo "  QEMU= KERNEL= ROOTFS=  路径覆盖"
 	@echo ""
