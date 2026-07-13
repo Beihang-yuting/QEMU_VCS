@@ -4,7 +4,6 @@
 # 用法：
 #   ./setup.sh                          # 交互式菜单
 #   ./setup.sh --mode local --guest minimal --qemu-src download
-#   ./setup.sh --mode vcs-only          # 仅编译 VCS 侧
 #   ./setup.sh --help
 # ============================================================
 set -euo pipefail
@@ -60,7 +59,6 @@ CoSim Platform 安装脚本
 部署模式 (--mode):
   local       本地全栈仿真 — QEMU + VCS 在同一台机器（SHM 通信）
   qemu-only   仅 QEMU 侧 — 编译 QEMU + Bridge，VCS 在远程机器（TCP 通信）
-  vcs-only    仅 VCS 侧  — 编译 VCS + Bridge，QEMU 在远程机器（TCP 通信）
 
 Guest 环境 (--guest, 仅 local/qemu-only 模式):
   ubuntu      Ubuntu LTS — 6.8 内核，VFIO/RDMA/NVMe-oF 完整模块（推荐）
@@ -84,7 +82,6 @@ QEMU 源码 (--qemu-src, 仅 local/qemu-only 模式):
   ./setup.sh --mode local --guest ubuntu              # 本地全栈 + Ubuntu（推荐）
   ./setup.sh --mode local --guest debian              # 本地全栈 + Debian 完整工具链
   ./setup.sh --mode qemu-only --guest ubuntu          # QEMU 侧远程部署
-  ./setup.sh --mode vcs-only                          # VCS 侧远程部署
 
   # 离线部署流程:
   # 外网: ./setup.sh --prepare-offline                # 生成 cosim-offline-<date>.zip
@@ -355,99 +352,92 @@ interactive_menu() {
     echo "                   编译 QEMU + Bridge，VCS 在另一台机器"
     echo "                   通过 TCP 与远程 VCS 通信"
     echo ""
-    echo "  3) vcs-only   — 仅 VCS 侧（远程模式）"
-    echo "                   编译 VCS + Bridge，QEMU 在另一台机器"
-    echo "                   通过 TCP 与远程 QEMU 通信"
-    echo ""
 
     while true; do
-        read -rp "请选择 [1/2/3]: " choice
+        read -rp "请选择 [1/2]: " choice
         case "$choice" in
             1) SETUP_MODE="local"; break ;;
             2) SETUP_MODE="qemu-only"; break ;;
-            3) SETUP_MODE="vcs-only"; break ;;
-            *) echo "  无效选择，请输入 1、2 或 3" ;;
+            *) echo "  无效选择，请输入 1 或 2" ;;
         esac
     done
     ok "部署模式: ${SETUP_MODE}"
     echo ""
 
     # ---- 选择 Guest 环境（仅 QEMU 相关模式）----
-    if [ "$SETUP_MODE" != "vcs-only" ]; then
-        echo -e "${BOLD}[2] 选择 Guest 环境${NC}"
-        echo ""
-        echo "  1) Ubuntu LTS   — 6.8 内核，VFIO/RDMA/NVMe-oF 完整模块（推荐）"
-        echo "     镜像 ~480MB，启动 ~10 秒"
-        echo ""
-        echo "  2) Debian 精简版 — 6.1 内核，完整工具链，apt 包管理"
-        echo "     镜像 ~500MB，启动 ~15 秒"
-        echo ""
-        echo "  3) 跳过 — 手动准备 rootfs 到 guest/images/"
+    echo -e "${BOLD}[2] 选择 Guest 环境${NC}"
+    echo ""
+    echo "  1) Ubuntu LTS   — 6.8 内核，VFIO/RDMA/NVMe-oF 完整模块（推荐）"
+    echo "     镜像 ~480MB，启动 ~10 秒"
+    echo ""
+    echo "  2) Debian 精简版 — 6.1 内核，完整工具链，apt 包管理"
+    echo "     镜像 ~500MB，启动 ~15 秒"
+    echo ""
+    echo "  3) 跳过 — 手动准备 rootfs 到 guest/images/"
 
-        while true; do
-            read -rp "请选择 [1/2/3]: " choice
-            case "$choice" in
-                1) GUEST_TYPE="ubuntu"; break ;;
-                2) GUEST_TYPE="debian"; break ;;
-                3) GUEST_TYPE="skip"; break ;;
-                *) echo "  无效选择，请输入 1、2 或 3" ;;
-            esac
-        done
-        ok "Guest 环境: ${GUEST_TYPE}"
-        echo ""
+    while true; do
+        read -rp "请选择 [1/2/3]: " choice
+        case "$choice" in
+            1) GUEST_TYPE="ubuntu"; break ;;
+            2) GUEST_TYPE="debian"; break ;;
+            3) GUEST_TYPE="skip"; break ;;
+            *) echo "  无效选择，请输入 1、2 或 3" ;;
+        esac
+    done
+    ok "Guest 环境: ${GUEST_TYPE}"
+    echo ""
 
-        # ---- 选择 PF 驱动模式 ----
-        if [ -z "$DRIVER_MODE" ]; then
-            echo -e "${BOLD}[2.5] 选择 PF 驱动模式${NC}"
-            echo ""
-            echo "  1) stub   — 内置 cosim_nic 驱动（默认，快速验证 SR-IOV）"
-            echo "  2) custom — 使用自定义驱动（.ko 文件）"
-            echo "  3) none   — 不加载驱动（手动操作）"
-            echo ""
-            read -rp "请选择 [1]: " driver_choice
-            case "${driver_choice:-1}" in
-                1) DRIVER_MODE="stub" ;;
-                2) DRIVER_MODE="custom"
-                   read -rp "请输入 .ko 文件路径: " CUSTOM_KO
-                   if [ ! -f "$CUSTOM_KO" ]; then
-                       fail "文件不存在: $CUSTOM_KO"
-                       exit 1
-                   fi ;;
-                3) DRIVER_MODE="none" ;;
-                *) DRIVER_MODE="stub" ;;
-            esac
-        fi
-        DRIVER_MODE="${DRIVER_MODE:-stub}"
-        ok "驱动模式: ${DRIVER_MODE}"
+    # ---- 选择 PF 驱动模式 ----
+    if [ -z "$DRIVER_MODE" ]; then
+        echo -e "${BOLD}[2.5] 选择 PF 驱动模式${NC}"
         echo ""
-
-        # ---- 选择 QEMU 源码来源 ----
-        echo -e "${BOLD}[3] 选择 QEMU 源码来源${NC}"
+        echo "  1) stub   — 内置 cosim_nic 驱动（默认，快速验证 SR-IOV）"
+        echo "  2) custom — 使用自定义驱动（.ko 文件）"
+        echo "  3) none   — 不加载驱动（手动操作）"
         echo ""
-        echo "  1) download  — 从 GitHub 下载 QEMU v9.2.0（需要网络）"
-        echo "  2) local     — 指定本地已有的 QEMU 源码路径"
-        echo "  3) skip      — 跳过 QEMU 编译（仅编译 Bridge 库）"
-        echo ""
-
-        while true; do
-            read -rp "请选择 [1/2/3]: " choice
-            case "$choice" in
-                1) QEMU_SRC_OPT="download"; break ;;
-                2)
-                    read -rp "  请输入 QEMU 源码路径: " qemu_path
-                    if [ -d "$qemu_path" ] && [ -f "$qemu_path/configure" ]; then
-                        QEMU_SRC_OPT="path:${qemu_path}"
-                        break
-                    else
-                        echo "  路径无效或不包含 QEMU 源码（未找到 configure 文件）"
-                    fi
-                    ;;
-                3) QEMU_SRC_OPT="skip"; break ;;
-                *) echo "  无效选择，请输入 1、2 或 3" ;;
-            esac
-        done
-        ok "QEMU 源码: ${QEMU_SRC_OPT}"
+        read -rp "请选择 [1]: " driver_choice
+        case "${driver_choice:-1}" in
+            1) DRIVER_MODE="stub" ;;
+            2) DRIVER_MODE="custom"
+               read -rp "请输入 .ko 文件路径: " CUSTOM_KO
+               if [ ! -f "$CUSTOM_KO" ]; then
+                   fail "文件不存在: $CUSTOM_KO"
+                   exit 1
+               fi ;;
+            3) DRIVER_MODE="none" ;;
+            *) DRIVER_MODE="stub" ;;
+        esac
     fi
+    DRIVER_MODE="${DRIVER_MODE:-stub}"
+    ok "驱动模式: ${DRIVER_MODE}"
+    echo ""
+
+    # ---- 选择 QEMU 源码来源 ----
+    echo -e "${BOLD}[3] 选择 QEMU 源码来源${NC}"
+    echo ""
+    echo "  1) download  — 从 GitHub 下载 QEMU v9.2.0（需要网络）"
+    echo "  2) local     — 指定本地已有的 QEMU 源码路径"
+    echo "  3) skip      — 跳过 QEMU 编译（仅编译 Bridge 库）"
+    echo ""
+
+    while true; do
+        read -rp "请选择 [1/2/3]: " choice
+        case "$choice" in
+            1) QEMU_SRC_OPT="download"; break ;;
+            2)
+                read -rp "  请输入 QEMU 源码路径: " qemu_path
+                if [ -d "$qemu_path" ] && [ -f "$qemu_path/configure" ]; then
+                    QEMU_SRC_OPT="path:${qemu_path}"
+                    break
+                else
+                    echo "  路径无效或不包含 QEMU 源码（未找到 configure 文件）"
+                fi
+                ;;
+            3) QEMU_SRC_OPT="skip"; break ;;
+            *) echo "  无效选择，请输入 1、2 或 3" ;;
+        esac
+    done
+    ok "QEMU 源码: ${QEMU_SRC_OPT}"
 }
 
 # 命令行指定 --import 时，先导入再继续
@@ -466,50 +456,42 @@ fi
 
 # ---- 参数验证 ----
 case "$SETUP_MODE" in
-    local|qemu-only|vcs-only) ;;
+    local|qemu-only) ;;
     *)
         fail "无效的部署模式: ${SETUP_MODE}"
-        fail "可选: local, qemu-only, vcs-only"
+        fail "可选: local, qemu-only"
         exit 1
         ;;
 esac
 
 # QEMU 相关模式需要 guest 类型
-if [ "$SETUP_MODE" != "vcs-only" ]; then
-    GUEST_TYPE="${GUEST_TYPE:-ubuntu}"
-    QEMU_SRC_OPT="${QEMU_SRC_OPT:-download}"
+GUEST_TYPE="${GUEST_TYPE:-ubuntu}"
+QEMU_SRC_OPT="${QEMU_SRC_OPT:-download}"
 
-    case "$GUEST_TYPE" in
-        ubuntu|debian|skip) ;;
-        *)
-            fail "无效的 Guest 类型: ${GUEST_TYPE}"
-            fail "可选: ubuntu, debian, skip"
-            exit 1
-            ;;
-    esac
-fi
+case "$GUEST_TYPE" in
+    ubuntu|debian|skip) ;;
+    *)
+        fail "无效的 Guest 类型: ${GUEST_TYPE}"
+        fail "可选: ubuntu, debian, skip"
+        exit 1
+        ;;
+esac
 
 # 确定各模块是否需要编译
 NEED_BRIDGE=true
 NEED_QEMU=false
-NEED_VCS=false
 NEED_GUEST=false
 NEED_TAP_BRIDGE=false
 
 case "$SETUP_MODE" in
     local)
         NEED_QEMU=true
-        NEED_VCS=true
         NEED_GUEST=true
         NEED_TAP_BRIDGE=true
         ;;
     qemu-only)
         NEED_QEMU=true
         NEED_GUEST=true
-        ;;
-    vcs-only)
-        NEED_VCS=true
-        NEED_TAP_BRIDGE=true
         ;;
 esac
 
@@ -525,11 +507,9 @@ fi
 echo ""
 echo -e "${BOLD}-------- 安装配置 --------${NC}"
 echo -e "  部署模式:   ${CYAN}${SETUP_MODE}${NC}"
-if [ "$SETUP_MODE" != "vcs-only" ]; then
-    echo -e "  Guest 环境: ${CYAN}${GUEST_TYPE}${NC}"
-    echo -e "  QEMU 源码:  ${CYAN}${QEMU_SRC_OPT}${NC}"
-fi
-echo -e "  编译组件:   Bridge$([ "$NEED_QEMU" = true ] && echo " + QEMU")$([ "$NEED_VCS" = true ] && echo " + VCS")$([ "$NEED_GUEST" = true ] && echo " + Guest")$([ "$NEED_TAP_BRIDGE" = true ] && echo " + TAP Bridge")"
+echo -e "  Guest 环境: ${CYAN}${GUEST_TYPE}${NC}"
+echo -e "  QEMU 源码:  ${CYAN}${QEMU_SRC_OPT}${NC}"
+echo -e "  编译组件:   Bridge$([ "$NEED_QEMU" = true ] && echo " + QEMU")$([ "$NEED_GUEST" = true ] && echo " + Guest")$([ "$NEED_TAP_BRIDGE" = true ] && echo " + TAP Bridge")"
 echo ""
 
 # ============================================================
@@ -537,7 +517,6 @@ echo ""
 # ============================================================
 TOTAL_STEPS=5  # 配置 + 依赖 + Bridge + 测试 + 摘要
 [ "$NEED_QEMU" = true ] && TOTAL_STEPS=$((TOTAL_STEPS + 1))
-[ "$NEED_VCS" = true ] && TOTAL_STEPS=$((TOTAL_STEPS + 1))
 [ "$NEED_TAP_BRIDGE" = true ] && TOTAL_STEPS=$((TOTAL_STEPS + 1))
 [ "$NEED_GUEST" = true ] && TOTAL_STEPS=$((TOTAL_STEPS + 1))
 
@@ -1307,19 +1286,6 @@ if [ "$NEED_QEMU" = true ]; then
 fi
 
 # ============================================================
-# [步骤] VCS 编译提示（不在 setup 中编译，由用户单独执行 make vcs-vip）
-# ============================================================
-if [ "$NEED_VCS" = true ]; then
-    next_step "VCS 编译说明"
-    info "VCS 编译不在 setup 中执行（需要 Synopsys VCS 工具链）"
-    info "请在有 VCS 环境的机器上手动编译:"
-    info "  source ~/set-env.sh    # 加载 VCS 环境变量"
-    info "  make vcs-vip           # 编译 VIP 模式"
-    info "  产出: vcs_sim/simv_vip"
-    SKIP_COUNT=$((SKIP_COUNT + 1))
-fi
-
-# ============================================================
 # [步骤] 编译 eth_tap_bridge
 # ============================================================
 if [ "$NEED_TAP_BRIDGE" = true ]; then
@@ -1569,9 +1535,7 @@ next_step "安装摘要"
 echo ""
 echo -e "${BOLD}-------- 安装配置 --------${NC}"
 echo -e "  部署模式:   ${SETUP_MODE}"
-if [ "$SETUP_MODE" != "vcs-only" ]; then
-    echo -e "  Guest 环境: ${GUEST_TYPE}"
-fi
+echo -e "  Guest 环境: ${GUEST_TYPE}"
 echo ""
 
 echo -e "${BOLD}-------- 构建产物 --------${NC}"
@@ -1592,9 +1556,6 @@ check_artifact "libcosim_bridge.so" "${BRIDGE_LIB_DIR}/libcosim_bridge.so"
 if [ "$NEED_QEMU" = true ]; then
     check_artifact "qemu-system-x86_64" "${QEMU_DIR}/build/qemu-system-x86_64"
 fi
-if [ "$NEED_VCS" = true ]; then
-    check_artifact "simv_vip (VCS)" "${PROJECT_DIR}/vcs_sim/simv_vip"
-fi
 if [ "$NEED_TAP_BRIDGE" = true ]; then
     check_artifact "eth_tap_bridge" "${PROJECT_DIR}/tools/eth_tap_bridge"
 fi
@@ -1608,50 +1569,27 @@ echo ""
 echo -e "${BOLD}-------- 使用方法 --------${NC}"
 case "$SETUP_MODE" in
     local)
-        echo "  单实例手动启动（2 个终端，先 QEMU 再 VCS）:"
-        echo "    终端1: make run-qemu"
-        echo "    终端2: make run-vcs"
+        echo "  启动 QEMU（连接本机 VCS）:"
+        echo "    make run-qemu"
         echo ""
         echo "  TCP 跨机模式:"
-        echo "    终端1: make run-qemu TRANSPORT=tcp"
-        echo "    终端2: make run-vcs  TRANSPORT=tcp REMOTE_HOST=127.0.0.1"
-        echo ""
-        echo "  双实例对打:"
-        echo "    make run-dual                     # SHM 模式"
-        echo "    make run-dual TRANSPORT=tcp        # TCP 模式"
+        echo "    make run-qemu TRANSPORT=tcp"
         echo ""
         echo "  TAP 桥接（Guest↔主机网络）:"
-        echo "    make tap-check                    # 检查权限"
-        echo "    make run-tap                      # 启动 TAP bridge"
+        echo "    make bridge                       # 编译 Bridge 库"
         echo ""
         echo "  SR-IOV 多 Function 模式（4 PF × 16 VF）:"
-        echo "    终端1: make run-qemu NUM_PFS=4 MAX_VFS=16"
-        echo "    终端2: make run-vcs  NUM_PFS=4 MAX_VFS=16"
+        echo "    make run-qemu NUM_PFS=4 MAX_VFS=16"
         echo "    Guest: insmod /lib/modules/cosim_nic.ko"
         echo "           echo 4 > /sys/bus/pci/devices/0000:00:03.0/sriov_numvfs"
         ;;
     qemu-only)
-        echo "  启动 QEMU（TCP server，等待 VCS 连接）:"
+        echo "  启动 QEMU（TCP server，等待远程 VCS 连接）:"
         echo "    make run-qemu TRANSPORT=tcp"
         echo ""
         echo "  提示:"
         echo "    - QEMU 启动后阻塞等待 VCS 连接"
         echo "    - 确认防火墙放行 TCP 9100-9102"
-        echo ""
-        echo "  远程 VCS 机器需执行:"
-        echo "    make vcs-vip                      # 编译 VCS"
-        echo "    make run-vcs TRANSPORT=tcp REMOTE_HOST=<本机IP>"
-        ;;
-    vcs-only)
-        echo "  步骤 1 — 编译 VCS:"
-        echo "    source ~/set-env.sh               # 加载 VCS 环境"
-        echo "    make vcs-vip"
-        echo ""
-        echo "  步骤 2 — 运行 VCS（连接远程 QEMU）:"
-        echo "    make run-vcs TRANSPORT=tcp REMOTE_HOST=<QEMU机器IP>"
-        echo ""
-        echo "  远程 QEMU 机器需先启动:"
-        echo "    make run-qemu TRANSPORT=tcp"
         ;;
 esac
 echo ""
@@ -1680,7 +1618,6 @@ echo -e "${BOLD}-------- 其他命令 --------${NC}"
 echo "  make help               # 完整命令列表"
 echo "  make info               # 环境检查"
 echo "  make bridge             # 重新编译 Bridge 库"
-echo "  make vcs-vip            # 重新编译 VCS"
 echo "  make test               # 单元+集成测试"
 echo "  详细文档: docs/SETUP-GUIDE.md"
 echo ""
