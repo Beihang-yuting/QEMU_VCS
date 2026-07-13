@@ -62,6 +62,27 @@ bridge:
 	@cmake --build $(BUILD_DIR) -j$$(nproc) 2>&1 | tail -5
 	@echo "[BUILD] Bridge 库编译完成"
 
+# ----- kit 静态库 libcosim_bridge.a(供外部 VCS flow 链接)-----
+LIB_DIR    = $(BUILD_DIR)/lib
+LIB_CC    ?= gcc
+LIB_CFLAGS = -std=gnu11 -D_DEFAULT_SOURCE -O2 -fPIC -Wall
+LIB_INCS   = -I $(CURDIR)/bridge/common -I $(CURDIR)/bridge/vcs -I $(CURDIR)/bridge/qemu -I $(CURDIR)/bridge/eth
+LIB_SRCS   = bridge/vcs/bridge_vcs.c bridge/vcs/sock_sync_vcs.c \
+             bridge/common/shm_layout.c bridge/common/ring_buffer.c \
+             bridge/common/dma_manager.c bridge/common/trace_log.c \
+             bridge/common/transport_shm.c bridge/common/transport_tcp.c \
+             bridge/common/eth_shm.c
+
+cosim-lib:
+	@mkdir -p $(LIB_DIR)
+	@for f in $(LIB_SRCS); do \
+		echo "  CC  $$f"; \
+		$(LIB_CC) $(LIB_CFLAGS) $(LIB_INCS) -c $$f -o $(LIB_DIR)/$$(basename $${f%.c}).o || exit 1; \
+	done
+	@ar rcs $(LIB_DIR)/libcosim_bridge.a $(LIB_DIR)/*.o
+	@echo "[BUILD] $(LIB_DIR)/libcosim_bridge.a"
+	@ar t $(LIB_DIR)/libcosim_bridge.a | sed 's/^/  - /'
+
 # host_mem 统一内存模型信息（供 cosim-lib / 外部 VCS flow 参考）
 BRIDGE_C_SRCS = \
 	bridge/vcs/bridge_vcs.c bridge/vcs/sock_sync_vcs.c \
