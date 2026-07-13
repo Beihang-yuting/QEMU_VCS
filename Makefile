@@ -83,6 +83,18 @@ cosim-lib:
 	@echo "[BUILD] $(LIB_DIR)/libcosim_bridge.a"
 	@ar t $(LIB_DIR)/libcosim_bridge.a | sed 's/^/  - /'
 
+# ----- QEMU 设备模型重编(改 qemu-plugin/cosim_pcie_*.c 后)-----
+QEMU_SRC_DIR = $(PROJECT_DIR)/third_party/qemu
+QEMU_BUILD   = $(QEMU_SRC_DIR)/build
+
+qemu-device:
+	@[ -f "$(QEMU_BUILD)/build.ninja" ] || { echo "[错误] 无 qemu build: $(QEMU_BUILD)（先 ./setup.sh 建 QEMU）"; exit 1; }
+	@touch $(QEMU_SRC_DIR)/hw/net/cosim_pcie_rc.c \
+	       $(QEMU_SRC_DIR)/hw/net/cosim_pcie_pf.c \
+	       $(QEMU_SRC_DIR)/hw/net/cosim_pcie_vf.c 2>/dev/null || true
+	ninja -C $(QEMU_BUILD) qemu-system-x86_64
+	@echo "[BUILD] $(QEMU_BUILD)/qemu-system-x86_64"
+
 # host_mem 统一内存模型信息（供 cosim-lib / 外部 VCS flow 参考）
 BRIDGE_C_SRCS = \
 	bridge/vcs/bridge_vcs.c bridge/vcs/sock_sync_vcs.c \
