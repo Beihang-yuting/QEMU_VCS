@@ -91,6 +91,7 @@ do_run() {
   ( cd "$OUT" && ./simv_cosim_mrc \
       +UVM_TESTNAME=$VCS_TEST +UVM_VERBOSITY=UVM_MEDIUM \
       +NUM_RC=$nrc +REMOTE_HOST=$host +PORT_BASE=$pbase \
+      +BYPASS_CONFIG=${BYPASS_CONFIG:-1} \
       ${EXTRA_PLUSARGS:-} \
       -l "$OUT/run.log" )
 }
