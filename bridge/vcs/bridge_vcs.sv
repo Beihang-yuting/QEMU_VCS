@@ -182,4 +182,38 @@ package cosim_bridge_pkg;
     );
 `endif
 
+    /* ================= Multi-RC per-RC DPI (阶段2) =================
+     * 每个 cosim_xrc_driver 传自己的 rc 索引；rc=0 与 legacy 单 RC 字节等价。
+     * C 侧 g_rc[rc]：独立 transport / TLP 缓存 / scalar 缓存 / BAR。 */
+    import "DPI-C" function int bridge_vcs_init_ex_rc(
+        input int rc,
+        input string transport_type,
+        input string shm_name,
+        input string sock_path,
+        input string remote_host,
+        input int    port_base,
+        input int    instance_id
+    );
+    import "DPI-C" function void bridge_vcs_cleanup_ex_rc(input int rc);
+
+    import "DPI-C" function int bridge_vcs_poll_tlp_scalar_rc(input int rc);
+    import "DPI-C" function int bridge_vcs_get_poll_type_rc(input int rc);
+    import "DPI-C" function longint bridge_vcs_get_poll_addr_rc(input int rc);
+    import "DPI-C" function int bridge_vcs_get_poll_len_rc(input int rc);
+    import "DPI-C" function int bridge_vcs_get_poll_tag_rc(input int rc);
+    import "DPI-C" function int unsigned bridge_vcs_get_poll_data_rc(input int rc, input int index);
+    import "DPI-C" function byte unsigned bridge_vcs_get_poll_first_be_rc(input int rc);
+    import "DPI-C" function byte unsigned bridge_vcs_get_poll_last_be_rc(input int rc);
+    import "DPI-C" function int bridge_vcs_get_tlp_target_bdf_rc(input int rc);
+    import "DPI-C" function int bridge_vcs_get_tlp_requester_id_rc(input int rc);
+    import "DPI-C" function int bridge_vcs_poll_vf_event_rc(
+        input int rc, output int event_type, output int pf_index, output int num_vfs);
+    import "DPI-C" function void bridge_vcs_set_cpl_data_rc(
+        input int rc, input int index, input int unsigned value);
+    import "DPI-C" function int bridge_vcs_send_cpl_scalar_rc(
+        input int rc, input int tag, input int len);
+    import "DPI-C" function void bridge_vcs_set_bar_base_rc(
+        input int rc, input int idx, input longint unsigned base);
+    import "DPI-C" function longint unsigned bridge_vcs_get_bar_base_rc(input int rc, input int idx);
+
 endpackage

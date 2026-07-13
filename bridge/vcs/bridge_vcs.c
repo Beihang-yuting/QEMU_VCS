@@ -34,6 +34,7 @@ typedef struct {
     int                tlp_cache_tail;
     int                poll_count;     /* 原 g_poll_count */
     tlp_entry_t        last_entry;     /* 原 g_last_entry */
+    int                empty_streak;   /* Phase-4 自适应超时状态（per-RC） */
 } rc_ctx_t;
 
 static rc_ctx_t g_rc[COSIM_MAX_RCS];   /* 全零初始化: transport=NULL 等 */
@@ -52,26 +53,29 @@ static int      g_num_rc = 1;          /* 默认单 RC */
 #define g_poll_count        g_rc[0].poll_count
 #define g_last_entry        g_rc[0].last_entry
 
-static int tlp_cache_push(const tlp_entry_t *e) {
-    int next = (g_tlp_cache_head + 1) % TLP_CACHE_SIZE;
-    if (next == g_tlp_cache_tail) {
+/* Multi-RC: cache helpers operate on an explicit rc_ctx_t*. Legacy single-RC
+ * callers pass &g_rc[0], preserving byte-level behavior. */
+static int tlp_cache_push_ctx(rc_ctx_t *ctx, const tlp_entry_t *e) {
+    int next = (ctx->tlp_cache_head + 1) % TLP_CACHE_SIZE;
+    if (next == ctx->tlp_cache_tail) {
         fprintf(stderr, "[VCS Bridge] TLP cache full! dropping TLP\n");
         return -1;
     }
-    g_tlp_cache[g_tlp_cache_head] = *e;
-    g_tlp_cache_head = next;
+    ctx->tlp_cache[ctx->tlp_cache_head] = *e;
+    ctx->tlp_cache_head = next;
     return 0;
 }
 
-static int tlp_cache_pop(tlp_entry_t *e) {
-    if (g_tlp_cache_head == g_tlp_cache_tail) return -1;
-    *e = g_tlp_cache[g_tlp_cache_tail];
-    g_tlp_cache_tail = (g_tlp_cache_tail + 1) % TLP_CACHE_SIZE;
+static int tlp_cache_pop_ctx(rc_ctx_t *ctx, tlp_entry_t *e) {
+    if (ctx->tlp_cache_head == ctx->tlp_cache_tail) return -1;
+    *e = ctx->tlp_cache[ctx->tlp_cache_tail];
+    ctx->tlp_cache_tail = (ctx->tlp_cache_tail + 1) % TLP_CACHE_SIZE;
     return 0;
 }
 
-static int tlp_cache_count(void) {
-    return (g_tlp_cache_head - g_tlp_cache_tail + TLP_CACHE_SIZE) % TLP_CACHE_SIZE;
+static int tlp_cache_count_ctx(rc_ctx_t *ctx) __attribute__((unused));
+static int tlp_cache_count_ctx(rc_ctx_t *ctx) {
+    return (ctx->tlp_cache_head - ctx->tlp_cache_tail + TLP_CACHE_SIZE) % TLP_CACHE_SIZE;
 }
 
 /* g_poll_count 与 g_last_entry 现为 g_rc[0].poll_count / g_rc[0].last_entry
@@ -152,23 +156,25 @@ void bridge_vcs_finalize_topology(int num_pfs, int tag_width) {
             num_pfs, tag_width);
 }
 
-/* Internal: Handle a QUERY_TOPOLOGY request from QEMU */
-static int bridge_vcs_handle_topology_query(void) {
-    if (!g_topology_ready) {
+/* Internal: Handle a QUERY_TOPOLOGY request from QEMU (per-RC ctx).
+ * SHM branch uses the single-RC globals g_shm/g_sock_fd (SHM mode is
+ * single-RC by construction — multi-RC always runs over a transport). */
+static int handle_topology_query_ctx(rc_ctx_t *ctx) {
+    if (!ctx->topology_ready) {
         fprintf(stderr, "[VCS Bridge] handle_topology_query: topology not ready\n");
         return -1;
     }
 
-    if (g_transport) {
+    if (ctx->transport) {
         /* TCP mode: send sync ack first, then topology payload.
          * Both go on ctrl_fd; QEMU recv_sync reads the sync header first,
          * then recv_topology reads the topology header+payload. */
         sync_msg_t resp = { .type = SYNC_MSG_TOPOLOGY_RESP, .payload = 0 };
-        if (g_transport->send_sync(g_transport, &resp) < 0) {
+        if (ctx->transport->send_sync(ctx->transport, &resp) < 0) {
             fprintf(stderr, "[VCS Bridge] handle_topology_query: send_sync failed\n");
             return -1;
         }
-        if (g_transport->send_topology(g_transport, &g_topology) < 0) {
+        if (ctx->transport->send_topology(ctx->transport, &ctx->topology) < 0) {
             fprintf(stderr, "[VCS Bridge] handle_topology_query: send_topology failed\n");
             return -1;
         }
@@ -177,7 +183,7 @@ static int bridge_vcs_handle_topology_query(void) {
 
     /* SHM mode: write topology to ctrl region, then send sync ack */
     uint8_t *dst = (uint8_t *)g_shm.ctrl + sizeof(cosim_ctrl_t);
-    memcpy(dst, &g_topology, sizeof(g_topology));
+    memcpy(dst, &ctx->topology, sizeof(ctx->topology));
     sync_msg_t resp = { .type = SYNC_MSG_TOPOLOGY_RESP, .payload = 0 };
     return sock_sync_send(g_sock_fd, &resp);
 }
@@ -229,9 +235,10 @@ int bridge_vcs_poll_vf_event(int *event_type, int *pf_index, int *num_vfs) {
 /* DPI-C: 轮询请求队列，获取一个 TLP
  * 返回: 0=成功取到, 1=队列空（无新事务）, -1=错误
  */
-int bridge_vcs_poll_tlp(unsigned char *tlp_type, unsigned long long *addr,
+static int poll_tlp_ctx(rc_ctx_t *ctx,
+                         unsigned char *tlp_type, unsigned long long *addr,
                          unsigned int *data, int *len, int *tag) {
-    g_poll_count++;
+    ctx->poll_count++;
 
     /* ---- TCP transport path ----
      *
@@ -241,35 +248,35 @@ int bridge_vcs_poll_tlp(unsigned char *tlp_type, unsigned long long *addr,
      *   Phase 3: 缓存非空则返回一个
      *   Phase 4: 带超时等待（适配跨机 TCP 延迟，避免丢失在途消息）
      */
-    if (g_transport) {
+    if (ctx->transport) {
         tlp_entry_t entry;
         sync_msg_t msg;
         int ret;
 
         /* Phase 1: TLP 缓存优先 */
-        if (tlp_cache_pop(&entry) == 0)
+        if (tlp_cache_pop_ctx(ctx, &entry) == 0)
             goto return_entry;
 
         /* Phase 2: 非阻塞批量 drain — 一次读完 ctrl_fd 中所有 TLP_READY */
         for (;;) {
-            ret = g_transport->recv_sync_timed(g_transport, &msg, 0);
+            ret = ctx->transport->recv_sync_timed(ctx->transport, &msg, 0);
             if (ret < 0) return -1;
             if (ret == 1) break;  /* ctrl_fd 为空，drain 完成 */
             if (msg.type == SYNC_MSG_SHUTDOWN) return -1;
             if (msg.type == SYNC_MSG_QUERY_TOPOLOGY) {
-                bridge_vcs_handle_topology_query();
+                handle_topology_query_ctx(ctx);
                 continue;
             }
             if (msg.type == SYNC_MSG_TLP_READY) {
-                if (g_transport->recv_tlp(g_transport, &entry) == 0)
-                    tlp_cache_push(&entry);
+                if (ctx->transport->recv_tlp(ctx->transport, &entry) == 0)
+                    tlp_cache_push_ctx(ctx, &entry);
                 continue;
             }
             if (msg.type == SYNC_MSG_VF_EVENT) {
-                g_vf_event.event_type = (uint8_t)(msg.payload & 0xFF);
-                g_vf_event.pf_index   = (uint8_t)((msg.payload >> 8) & 0xFF);
-                g_vf_event.num_vfs    = (uint16_t)((msg.payload >> 16) & 0xFFFF);
-                g_vf_event_pending = 1;
+                ctx->vf_event.event_type = (uint8_t)(msg.payload & 0xFF);
+                ctx->vf_event.pf_index   = (uint8_t)((msg.payload >> 8) & 0xFF);
+                ctx->vf_event.num_vfs    = (uint16_t)((msg.payload >> 16) & 0xFFFF);
+                ctx->vf_event_pending = 1;
                 continue;
             }
             /* 非 TLP_READY 消息在 poll 中不应出现，记录并跳过 */
@@ -277,46 +284,45 @@ int bridge_vcs_poll_tlp(unsigned char *tlp_type, unsigned long long *addr,
         }
 
         /* Phase 3: drain 后缓存可能有 TLP */
-        if (tlp_cache_pop(&entry) == 0)
+        if (tlp_cache_pop_ctx(ctx, &entry) == 0)
             goto return_entry;
 
         /* Phase 4: 自适应超时等待 — 跨机 TCP 传输延迟可达数毫秒。
          * 刚收到过 TLP 时用短超时（1ms）快速响应后续包；
          * 连续空 poll 后递增到较长超时（50ms）减少 CPU 空转；
-         * 收到 TLP 后重置为短超时。 */
+         * 收到 TLP 后重置为短超时。empty_streak 存 per-RC ctx，避免两个 RC 互相干扰。 */
         {
-            static int empty_streak = 0;
-            int timeout_ms = (empty_streak < 5) ? 1 :
-                             (empty_streak < 20) ? 5 : 50;
-            ret = g_transport->recv_sync_timed(g_transport, &msg, timeout_ms);
+            int timeout_ms = (ctx->empty_streak < 5) ? 1 :
+                             (ctx->empty_streak < 20) ? 5 : 50;
+            ret = ctx->transport->recv_sync_timed(ctx->transport, &msg, timeout_ms);
             if (ret < 0) return -1;
             if (ret == 1) {
-                empty_streak++;
+                ctx->empty_streak++;
                 return 1;  /* 超时，无新 TLP */
             }
-            empty_streak = 0;  /* 收到数据，重置 */
+            ctx->empty_streak = 0;  /* 收到数据，重置 */
         }
         if (msg.type == SYNC_MSG_SHUTDOWN) return -1;
         if (msg.type == SYNC_MSG_QUERY_TOPOLOGY) {
-            bridge_vcs_handle_topology_query();
+            handle_topology_query_ctx(ctx);
             return 1;  /* no TLP this iteration, let SV loop re-enter */
         }
         if (msg.type == SYNC_MSG_VF_EVENT) {
-            g_vf_event.event_type = (uint8_t)(msg.payload & 0xFF);
-            g_vf_event.pf_index   = (uint8_t)((msg.payload >> 8) & 0xFF);
-            g_vf_event.num_vfs    = (uint16_t)((msg.payload >> 16) & 0xFFFF);
-            g_vf_event_pending = 1;
+            ctx->vf_event.event_type = (uint8_t)(msg.payload & 0xFF);
+            ctx->vf_event.pf_index   = (uint8_t)((msg.payload >> 8) & 0xFF);
+            ctx->vf_event.num_vfs    = (uint16_t)((msg.payload >> 16) & 0xFFFF);
+            ctx->vf_event_pending = 1;
             return 1;
         }
         if (msg.type == SYNC_MSG_TLP_READY) {
-            if (g_transport->recv_tlp(g_transport, &entry) < 0) return 1;
+            if (ctx->transport->recv_tlp(ctx->transport, &entry) < 0) return 1;
             goto return_entry;
         }
         fprintf(stderr, "[VCS poll] unexpected msg.type=%d after wait, discarding\n", msg.type);
         return 1;
 
     return_entry:
-        g_last_entry = entry;
+        ctx->last_entry = entry;
         *tlp_type = entry.type;
         *addr = entry.addr;
         *len = entry.len;
@@ -327,16 +333,16 @@ int bridge_vcs_poll_tlp(unsigned char *tlp_type, unsigned long long *addr,
         return 0;
     }
 
-    /* ---- SHM path (original) ---- */
+    /* ---- SHM path (original, single-RC only) ---- */
 
     /* If TLP_READY messages were consumed during DMA waits, dequeue
      * directly from the SHM ring without waiting for socket notification. */
-    if (g_pending_tlp_ready > 0) {
+    if (ctx->pending_tlp_ready > 0) {
         tlp_entry_t entry;
         int dret = ring_buf_dequeue(&g_shm.req_ring, &entry);
         if (dret == 0) {
-            g_pending_tlp_ready--;
-            g_last_entry = entry;
+            ctx->pending_tlp_ready--;
+            ctx->last_entry = entry;
             *tlp_type = entry.type;
             *addr = entry.addr;
             *len = entry.len;
@@ -347,7 +353,7 @@ int bridge_vcs_poll_tlp(unsigned char *tlp_type, unsigned long long *addr,
             return 0;
         }
         /* Ring empty despite pending count — reset counter */
-        g_pending_tlp_ready = 0;
+        ctx->pending_tlp_ready = 0;
     }
 
     /* Check Socket with 0ms timeout (non-blocking) — VCS Q-2020 segfaults
@@ -358,15 +364,15 @@ int bridge_vcs_poll_tlp(unsigned char *tlp_type, unsigned long long *addr,
     if (ret < 0) return -1;
     if (ret == 1) return 1;  /* timeout — no TLP, allow RX poll */
     if (msg.type == SYNC_MSG_QUERY_TOPOLOGY) {
-        bridge_vcs_handle_topology_query();
+        handle_topology_query_ctx(ctx);
         return 1;  /* handled, no TLP this iteration */
     }
     if (msg.type == SYNC_MSG_SHUTDOWN) return -1;
     if (msg.type == SYNC_MSG_VF_EVENT) {
-        g_vf_event.event_type = (uint8_t)(msg.payload & 0xFF);
-        g_vf_event.pf_index   = (uint8_t)((msg.payload >> 8) & 0xFF);
-        g_vf_event.num_vfs    = (uint16_t)((msg.payload >> 16) & 0xFFFF);
-        g_vf_event_pending = 1;
+        ctx->vf_event.event_type = (uint8_t)(msg.payload & 0xFF);
+        ctx->vf_event.pf_index   = (uint8_t)((msg.payload >> 8) & 0xFF);
+        ctx->vf_event.num_vfs    = (uint16_t)((msg.payload >> 16) & 0xFFFF);
+        ctx->vf_event_pending = 1;
         return 1; /* no TLP, but VF event is pending for SV to pick up */
     }
     if (msg.type != SYNC_MSG_TLP_READY) {
@@ -378,7 +384,7 @@ int bridge_vcs_poll_tlp(unsigned char *tlp_type, unsigned long long *addr,
     ret = ring_buf_dequeue(&g_shm.req_ring, &entry);
     if (ret < 0) return 1;
 
-    g_last_entry = entry;
+    ctx->last_entry = entry;
     *tlp_type = entry.type;
     *addr = entry.addr;
     *len = entry.len;
@@ -390,6 +396,13 @@ int bridge_vcs_poll_tlp(unsigned char *tlp_type, unsigned long long *addr,
     }
 
     return 0;
+}
+
+/* DPI-C: 轮询请求队列，获取一个 TLP（legacy 单 RC = g_rc[0]）
+ * 返回: 0=成功取到, 1=队列空（无新事务）, -1=错误 */
+int bridge_vcs_poll_tlp(unsigned char *tlp_type, unsigned long long *addr,
+                         unsigned int *data, int *len, int *tag) {
+    return poll_tlp_ctx(&g_rc[0], tlp_type, addr, data, len, tag);
 }
 
 /* DPI-C: Extended poll (VIP mode) — same as poll_tlp but also returns
@@ -414,8 +427,7 @@ int bridge_vcs_poll_tlp_ext(unsigned char *tlp_type, unsigned long long *addr,
     return 0;
 }
 
-/* DPI-C: 发送 Completion */
-int bridge_vcs_send_completion(int tag, const unsigned int *data, int len) {
+static int send_completion_ctx(rc_ctx_t *ctx, int tag, const unsigned int *data, int len) {
     cpl_entry_t cpl;
     memset(&cpl, 0, sizeof(cpl));
     cpl.type = TLP_CPL;
@@ -432,16 +444,16 @@ int bridge_vcs_send_completion(int tag, const unsigned int *data, int len) {
     }
 
     /* ---- TCP transport path ---- */
-    if (g_transport) {
-        if (g_transport->send_cpl(g_transport, &cpl) < 0) {
+    if (ctx->transport) {
+        if (ctx->transport->send_cpl(ctx->transport, &cpl) < 0) {
             fprintf(stderr, "[VCS Bridge] send_cpl failed\n");
             return -1;
         }
         sync_msg_t msg = { .type = SYNC_MSG_CPL_READY, .payload = 0 };
-        return g_transport->send_sync(g_transport, &msg);
+        return ctx->transport->send_sync(ctx->transport, &msg);
     }
 
-    /* ---- SHM path (original) ---- */
+    /* ---- SHM path (original, single-RC only) ---- */
     int ret = ring_buf_enqueue(&g_shm.cpl_ring, &cpl);
     if (ret < 0) {
         fprintf(stderr, "[VCS Bridge] Completion queue full\n");
@@ -451,6 +463,11 @@ int bridge_vcs_send_completion(int tag, const unsigned int *data, int len) {
     /* 通知 QEMU */
     sync_msg_t msg = { .type = SYNC_MSG_CPL_READY, .payload = 0 };
     return sock_sync_send(g_sock_fd, &msg);
+}
+
+/* DPI-C: 发送 Completion（legacy 单 RC = g_rc[0]） */
+int bridge_vcs_send_completion(int tag, const unsigned int *data, int len) {
+    return send_completion_ctx(&g_rc[0], tag, data, len);
 }
 
 /* DPI-C: VCS initiates DMA request */
@@ -561,7 +578,7 @@ int bridge_vcs_dma_read_sync(unsigned long long host_addr,
                 /* 立即 recv_tlp 并缓存，避免 data channel 消息错位 */
                 tlp_entry_t cached_tlp;
                 if (g_transport->recv_tlp(g_transport, &cached_tlp) == 0) {
-                    tlp_cache_push(&cached_tlp);
+                    tlp_cache_push_ctx(&g_rc[0], &cached_tlp);
                 } else {
                     fprintf(stderr, "[VCS Bridge] dma_wait: recv_tlp for cache failed\n");
                 }
@@ -718,7 +735,7 @@ int bridge_vcs_dma_write_sync(unsigned long long host_addr,
                 /* 立即 recv_tlp 并缓存，避免 data channel 消息错位 */
                 tlp_entry_t cached_tlp;
                 if (g_transport->recv_tlp(g_transport, &cached_tlp) == 0) {
-                    tlp_cache_push(&cached_tlp);
+                    tlp_cache_push_ctx(&g_rc[0], &cached_tlp);
                 } else {
                     fprintf(stderr, "[VCS Bridge] dma_wait: recv_tlp for cache failed\n");
                 }
@@ -884,7 +901,7 @@ int bridge_dma_read_bytes(uint64_t host_addr, uint8_t *buf, uint32_t len) {
                 /* 立即 recv_tlp 并缓存，避免 data channel 消息错位 */
                 tlp_entry_t cached_tlp;
                 if (g_transport->recv_tlp(g_transport, &cached_tlp) == 0) {
-                    tlp_cache_push(&cached_tlp);
+                    tlp_cache_push_ctx(&g_rc[0], &cached_tlp);
                 } else {
                     fprintf(stderr, "[VCS Bridge] dma_wait: recv_tlp for cache failed\n");
                 }
@@ -1031,7 +1048,7 @@ int bridge_dma_write_bytes(uint64_t host_addr, const uint8_t *buf, uint32_t len)
                 /* 立即 recv_tlp 并缓存，避免 data channel 消息错位 */
                 tlp_entry_t cached_tlp;
                 if (g_transport->recv_tlp(g_transport, &cached_tlp) == 0) {
-                    tlp_cache_push(&cached_tlp);
+                    tlp_cache_push_ctx(&g_rc[0], &cached_tlp);
                 } else {
                     fprintf(stderr, "[VCS Bridge] dma_wait: recv_tlp for cache failed\n");
                 }
@@ -1112,49 +1129,78 @@ int bridge_dma_write_bytes(uint64_t host_addr, const uint8_t *buf, uint32_t len)
 /* ========== Array-free DPI wrappers for VCS package-scope calls ========== */
 
 /* Static buffers for poll/send — avoids DPI-C array parameter issues
- * when called from package scope in VCS Q-2020. */
-static unsigned int g_poll_data_buf[16];
-static unsigned int g_send_cpl_buf[16];
+ * when called from package scope in VCS Q-2020.  Per-RC: indexed [COSIM_MAX_RCS].
+ * Legacy single-RC entry points use slot [0]; multi-RC _rc(int rc) use slot rc. */
+static unsigned int g_poll_data_buf[COSIM_MAX_RCS][16];
+static unsigned int g_send_cpl_buf[COSIM_MAX_RCS][16];
 
-/* Fully scalar DPI: poll TLP, store ALL results in static vars.
+/* Fully scalar DPI: poll TLP, store ALL results in per-RC static vars.
  * Return: 0=TLP available, 1=empty, -1=error/shutdown */
-static unsigned char  g_poll_tlp_type;
-static unsigned long long g_poll_addr;
-static int            g_poll_len;
-static int            g_poll_tag;
+static unsigned char      g_poll_tlp_type[COSIM_MAX_RCS];
+static unsigned long long g_poll_addr[COSIM_MAX_RCS];
+static int                g_poll_len[COSIM_MAX_RCS];
+static int                g_poll_tag[COSIM_MAX_RCS];
 
-int bridge_vcs_poll_tlp_scalar(void) {
-    return bridge_vcs_poll_tlp(&g_poll_tlp_type, &g_poll_addr,
-                                g_poll_data_buf, &g_poll_len, &g_poll_tag);
+static int rc_ok(int rc) { return (rc >= 0 && rc < COSIM_MAX_RCS); }
+
+/* ---- Per-RC scalar DPI (multi-RC: cosim_rc_driver passes its rc index) ---- */
+int bridge_vcs_poll_tlp_scalar_rc(int rc) {
+    if (!rc_ok(rc)) return -1;
+    return poll_tlp_ctx(&g_rc[rc], &g_poll_tlp_type[rc], &g_poll_addr[rc],
+                        g_poll_data_buf[rc], &g_poll_len[rc], &g_poll_tag[rc]);
+}
+int bridge_vcs_get_poll_type_rc(int rc)      { return rc_ok(rc) ? (int)g_poll_tlp_type[rc] : 0; }
+long long bridge_vcs_get_poll_addr_rc(int rc){ return rc_ok(rc) ? (long long)g_poll_addr[rc] : 0; }
+int bridge_vcs_get_poll_len_rc(int rc)       { return rc_ok(rc) ? g_poll_len[rc] : 0; }
+int bridge_vcs_get_poll_tag_rc(int rc)       { return rc_ok(rc) ? g_poll_tag[rc] : 0; }
+unsigned int bridge_vcs_get_poll_data_rc(int rc, int index) {
+    if (!rc_ok(rc) || index < 0 || index >= 16) return 0;
+    return g_poll_data_buf[rc][index];
+}
+unsigned char bridge_vcs_get_poll_first_be_rc(int rc) { return rc_ok(rc) ? g_rc[rc].last_entry.first_be : 0; }
+unsigned char bridge_vcs_get_poll_last_be_rc(int rc)  { return rc_ok(rc) ? g_rc[rc].last_entry.last_be  : 0; }
+int bridge_vcs_get_tlp_target_bdf_rc(int rc)   { return rc_ok(rc) ? (int)g_rc[rc].last_entry.target_bdf   : 0; }
+int bridge_vcs_get_tlp_requester_id_rc(int rc) { return rc_ok(rc) ? (int)g_rc[rc].last_entry.requester_id : 0; }
+int bridge_vcs_poll_vf_event_rc(int rc, int *event_type, int *pf_index, int *num_vfs) {
+    if (!rc_ok(rc) || !g_rc[rc].vf_event_pending) return 0;
+    *event_type = g_rc[rc].vf_event.event_type;
+    *pf_index   = g_rc[rc].vf_event.pf_index;
+    *num_vfs    = g_rc[rc].vf_event.num_vfs;
+    g_rc[rc].vf_event_pending = 0;
+    return 1;
+}
+void bridge_vcs_set_cpl_data_rc(int rc, int index, unsigned int value) {
+    if (rc_ok(rc) && index >= 0 && index < 16)
+        g_send_cpl_buf[rc][index] = value;
+}
+int bridge_vcs_send_cpl_scalar_rc(int rc, int tag, int len) {
+    if (!rc_ok(rc)) return -1;
+    return send_completion_ctx(&g_rc[rc], tag, g_send_cpl_buf[rc], len);
 }
 
-/* Getters — no output parameters, just return values */
-int bridge_vcs_get_poll_type(void)  { return (int)g_poll_tlp_type; }
-long long bridge_vcs_get_poll_addr(void) { return (long long)g_poll_addr; }
-int bridge_vcs_get_poll_len(void)   { return g_poll_len; }
-int bridge_vcs_get_poll_tag(void)   { return g_poll_tag; }
+/* ---- Legacy single-RC scalar DPI (= slot 0, byte-equivalent to before) ---- */
+int bridge_vcs_poll_tlp_scalar(void)     { return bridge_vcs_poll_tlp_scalar_rc(0); }
+int bridge_vcs_get_poll_type(void)       { return bridge_vcs_get_poll_type_rc(0); }
+long long bridge_vcs_get_poll_addr(void) { return bridge_vcs_get_poll_addr_rc(0); }
+int bridge_vcs_get_poll_len(void)        { return bridge_vcs_get_poll_len_rc(0); }
+int bridge_vcs_get_poll_tag(void)        { return bridge_vcs_get_poll_tag_rc(0); }
+unsigned int bridge_vcs_get_poll_data(int index) { return bridge_vcs_get_poll_data_rc(0, index); }
+unsigned char bridge_vcs_get_poll_first_be(void) { return bridge_vcs_get_poll_first_be_rc(0); }
+unsigned char bridge_vcs_get_poll_last_be(void)  { return bridge_vcs_get_poll_last_be_rc(0); }
 
-/* Get one word from the last polled TLP data */
-unsigned int bridge_vcs_get_poll_data(int index) {
-    if (index < 0 || index >= 16) return 0;
-    return g_poll_data_buf[index];
+/* BAR base address synchronization (bypass mode: config_proxy → EP stub).
+ * Per-RC so two RCs' BAR programming don't clobber each other. */
+static uint64_t g_bar_base[COSIM_MAX_RCS][6] = {{0}};
+
+void bridge_vcs_set_bar_base_rc(int rc, int idx, unsigned long long base) {
+    if (rc_ok(rc) && idx >= 0 && idx < 6) g_bar_base[rc][idx] = base;
 }
-
-/* FirstBE / LastBE getters from last polled TLP */
-unsigned char bridge_vcs_get_poll_first_be(void) { return g_last_entry.first_be; }
-unsigned char bridge_vcs_get_poll_last_be(void)  { return g_last_entry.last_be; }
-
-/* BAR base address synchronization (bypass mode: config_proxy → EP stub) */
-static uint64_t g_bar_base[6] = {0};
-
-void bridge_vcs_set_bar_base(int idx, unsigned long long base) {
-    if (idx >= 0 && idx < 6) g_bar_base[idx] = base;
-}
-
-unsigned long long bridge_vcs_get_bar_base(int idx) {
-    if (idx >= 0 && idx < 6) return g_bar_base[idx];
+unsigned long long bridge_vcs_get_bar_base_rc(int rc, int idx) {
+    if (rc_ok(rc) && idx >= 0 && idx < 6) return g_bar_base[rc][idx];
     return 0;
 }
+void bridge_vcs_set_bar_base(int idx, unsigned long long base) { bridge_vcs_set_bar_base_rc(0, idx, base); }
+unsigned long long bridge_vcs_get_bar_base(int idx) { return bridge_vcs_get_bar_base_rc(0, idx); }
 
 /* Per-BDF BAR base storage for multi-function mode.
  * Indexed by [bdf_hash][bar_idx].  Simple hash: bdf & 0x1FF (max 512 functions). */
@@ -1165,21 +1211,20 @@ void bridge_vcs_set_bar_base_bdf(int bdf, int bar_idx, unsigned long long bar_ad
     int h = bdf & (BDF_BAR_HASH_SIZE - 1);
     if (bar_idx >= 0 && bar_idx < 6) {
         g_bdf_bar_base[h][bar_idx] = bar_addr;
-        /* Also update legacy g_bar_base for BAR0 of BDF with func==0 */
+        /* Also update legacy g_bar_base for BAR0 of BDF with func==0 (RC0 slot) */
         if ((bdf & 0x7) == 0)
-            g_bar_base[bar_idx] = bar_addr;
+            g_bar_base[0][bar_idx] = bar_addr;
     }
 }
 
-/* Set one word in the completion data buffer */
+/* Set one word in the completion data buffer (legacy = slot 0) */
 void bridge_vcs_set_cpl_data(int index, unsigned int value) {
-    if (index >= 0 && index < 16)
-        g_send_cpl_buf[index] = value;
+    bridge_vcs_set_cpl_data_rc(0, index, value);
 }
 
-/* Send completion using pre-set buffer — pure scalar DPI */
+/* Send completion using pre-set buffer — pure scalar DPI (legacy = slot 0) */
 int bridge_vcs_send_cpl_scalar(int tag, int len) {
-    return bridge_vcs_send_completion(tag, g_send_cpl_buf, len);
+    return bridge_vcs_send_cpl_scalar_rc(0, tag, len);
 }
 
 /* DPI-C: 关闭连接 */
@@ -1193,14 +1238,23 @@ void bridge_vcs_cleanup(void) {
 
 /* ========== Transport-aware API (新增) ========== */
 
-int bridge_vcs_init_ex(const char *transport_type,
-                        const char *shm_name, const char *sock_path,
-                        const char *remote_host, int port_base, int instance_id) {
-    if (g_initialized) return 0;
+/* Per-RC transport init. Each RC gets its own g_rc[rc].transport, so two RCs
+ * (distinct port_base/instance_id) coexist in one simv. SHM mode is single-RC
+ * (rc must be 0) — it uses the shared g_shm/g_sock_fd globals. */
+int bridge_vcs_init_ex_rc(int rc, const char *transport_type,
+                           const char *shm_name, const char *sock_path,
+                           const char *remote_host, int port_base, int instance_id) {
+    if (!rc_ok(rc)) return -1;
 
     if (!transport_type || strcmp(transport_type, "shm") == 0) {
-        return bridge_vcs_init(shm_name, sock_path);
+        if (rc != 0) {
+            fprintf(stderr, "[VCS Bridge] SHM transport is single-RC only (rc=%d rejected)\n", rc);
+            return -1;
+        }
+        return bridge_vcs_init(shm_name, sock_path);   /* legacy SHM path */
     }
+
+    if (g_rc[rc].transport) return 0;   /* already initialized this RC */
 
     transport_cfg_t cfg = {
         .transport   = transport_type,
@@ -1212,25 +1266,37 @@ int bridge_vcs_init_ex(const char *transport_type,
         .is_server   = 0,
     };
 
-    g_transport = transport_create(&cfg);
-    if (!g_transport) {
-        fprintf(stderr, "[VCS Bridge] Failed to create %s transport\n", transport_type);
+    g_rc[rc].transport = transport_create(&cfg);
+    if (!g_rc[rc].transport) {
+        fprintf(stderr, "[VCS Bridge] RC%d: failed to create %s transport\n", rc, transport_type);
         return -1;
     }
 
-    g_transport->set_ready(g_transport);
-    g_initialized = 1;
-    fprintf(stderr, "[VCS Bridge] Initialized: transport=%s remote=%s port=%d inst=%d\n",
-            transport_type, remote_host ? remote_host : "(null)", port_base, instance_id);
+    g_rc[rc].transport->set_ready(g_rc[rc].transport);
+    if (rc + 1 > g_num_rc) g_num_rc = rc + 1;
+    fprintf(stderr, "[VCS Bridge] RC%d initialized: transport=%s remote=%s port=%d inst=%d\n",
+            rc, transport_type, remote_host ? remote_host : "(null)", port_base, instance_id);
     return 0;
 }
 
-void bridge_vcs_cleanup_ex(void) {
-    if (g_transport) {
-        g_transport->close(g_transport);
-        g_transport = NULL;
-        g_initialized = 0;
-    } else {
+int bridge_vcs_init_ex(const char *transport_type,
+                        const char *shm_name, const char *sock_path,
+                        const char *remote_host, int port_base, int instance_id) {
+    if (g_initialized || g_rc[0].transport) return 0;
+    return bridge_vcs_init_ex_rc(0, transport_type, shm_name, sock_path,
+                                 remote_host, port_base, instance_id);
+}
+
+void bridge_vcs_cleanup_ex_rc(int rc) {
+    if (!rc_ok(rc)) return;
+    if (g_rc[rc].transport) {
+        g_rc[rc].transport->close(g_rc[rc].transport);
+        g_rc[rc].transport = NULL;
+    } else if (rc == 0) {
         bridge_vcs_cleanup();
     }
+}
+
+void bridge_vcs_cleanup_ex(void) {
+    bridge_vcs_cleanup_ex_rc(0);
 }
