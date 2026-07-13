@@ -108,17 +108,46 @@ class cosim_xrc_driver extends pcie_tl_rc_driver;
     endfunction
 
     // -----------------------------------------------------------------------
-    // run_phase: two loops. NO super.run_phase (that is sequencer-driven).
+    // 自初始化开关。默认 1:driver 自己连 QEMU(读 +REMOTE_HOST/+PORT_BASE),
+    // 无需外部 test 调 init —— 这样集成进现有环境只要一行工厂 override。
+    // 若某 test 想自己管 init(如 cosim_xrc_test),先设 bridge_ready=1 即跳过。
+    // -----------------------------------------------------------------------
+    bit self_init_bridge_en = 1;
+
+    // -----------------------------------------------------------------------
+    // run_phase: 自 init bridge(可选) + 两个 loop。NO super.run_phase。
     // -----------------------------------------------------------------------
     virtual task run_phase(uvm_phase phase);
         phase.raise_objection(this, "cosim_xrc_driver running");
         `uvm_info(get_name(), $sformatf("run_phase started (RC%0d, DPI polling)", rc_index),
                   UVM_MEDIUM)
+
+        if (self_init_bridge_en && !bridge_ready)
+            self_init_bridge();
+
         fork
             request_loop(phase);
             rx_loop(phase);
         join
+
+        bridge_vcs_cleanup_ex_rc(rc_index);
         phase.drop_objection(this, "cosim_xrc_driver done");
+    endtask
+
+    // 连本 RC 对应的 QEMU(client)。host/port 从 plusarg,instance_id=rc_index。
+    protected task self_init_bridge();
+        string remote_host;
+        int    port_base;
+        if (!$value$plusargs("REMOTE_HOST=%s", remote_host)) remote_host = "10.11.10.53";
+        if (!$value$plusargs("PORT_BASE=%d", port_base))     port_base   = 9100;
+        if (bridge_vcs_init_ex_rc(rc_index, "tcp", "", "", remote_host, port_base, rc_index) != 0)
+            `uvm_fatal(get_name(), $sformatf(
+                "RC%0d bridge_vcs_init_ex_rc(tcp %s:%0d inst=%0d) failed",
+                rc_index, remote_host, port_base, rc_index))
+        `uvm_info(get_name(), $sformatf(
+            "RC%0d bridge up: tcp %s:%0d inst=%0d", rc_index, remote_host, port_base, rc_index),
+            UVM_LOW)
+        bridge_ready = 1;
     endtask
 
     // -----------------------------------------------------------------------
