@@ -14,7 +14,7 @@ SHELL := /bin/bash
 # ============================================================
 PROJECT_DIR   := $(CURDIR)
 BUILD_DIR     := $(PROJECT_DIR)/build
-VCS_SIM_DIR   := $(PROJECT_DIR)/vcs_sim
+BRIDGE_LIB_DIR := $(BUILD_DIR)/bridge
 LOG_DIR       := $(PROJECT_DIR)/logs
 RUN_DIR       := $(PROJECT_DIR)/run
 
