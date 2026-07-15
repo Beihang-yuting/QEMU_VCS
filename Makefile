@@ -5,7 +5,7 @@
 # ============================================================
 SHELL := /bin/bash
 
-.PHONY: all help bridge cosim-lib qemu-device run-qemu \
+.PHONY: all help bridge cosim-lib cosim-lib-eth qemu-device run-qemu \
         test-unit test-integration test \
         clean clean-logs clean-run clean-all info
 
@@ -59,26 +59,20 @@ bridge:
 	@cmake --build $(BUILD_DIR) -j$$(nproc) 2>&1 | tail -5
 	@echo "[BUILD] Bridge 库编译完成"
 
-# ----- kit 静态库 libcosim_bridge.a(供外部 VCS flow 链接)-----
-LIB_DIR    = $(BUILD_DIR)/lib
-LIB_CC    ?= gcc
-LIB_CFLAGS = -std=gnu11 -D_DEFAULT_SOURCE -O2 -fPIC -Wall
-LIB_INCS   = -I $(CURDIR)/bridge/common -I $(CURDIR)/bridge/vcs -I $(CURDIR)/bridge/qemu -I $(CURDIR)/bridge/eth
-LIB_SRCS   = bridge/vcs/bridge_vcs.c bridge/vcs/sock_sync_vcs.c \
-             bridge/common/shm_layout.c bridge/common/ring_buffer.c \
-             bridge/common/dma_manager.c bridge/common/trace_log.c \
-             bridge/common/transport_shm.c bridge/common/transport_tcp.c \
-             bridge/common/eth_shm.c
+# ----- cosim 外部集成库(给你自己的 UVM/VCS flow 链接)-----
+# 产 $(COSIM_LIB_DIR)/libcosim_bridge.{a,so};改了 bridge/*.c 后 `make cosim-lib` 即重编。
+# ABI: 想与 VCS gcc 对齐 —— make cosim-lib COSIM_CC=$$VCS_HOME/gnu/linux/gcc-*/bin/gcc
+# 用法: -sv_lib $(COSIM_LIB_DIR)/libcosim_bridge (推荐,详见 docs/COSIM-C-BUILD.md)
+COSIM_LIB_DIR ?= $(BUILD_DIR)/lib
+COSIM_CC      ?= gcc
 
 cosim-lib:
-	@mkdir -p $(LIB_DIR)
-	@for f in $(LIB_SRCS); do \
-		echo "  CC  $$f"; \
-		$(LIB_CC) $(LIB_CFLAGS) $(LIB_INCS) -c $$f -o $(LIB_DIR)/$$(basename $${f%.c}).o || exit 1; \
-	done
-	@ar rcs $(LIB_DIR)/libcosim_bridge.a $(LIB_DIR)/*.o
-	@echo "[BUILD] $(LIB_DIR)/libcosim_bridge.a"
-	@ar t $(LIB_DIR)/libcosim_bridge.a | sed 's/^/  - /'
+	@echo "[BUILD] 编译 cosim 集成库 (.a + .so, PCIe MMIO) -> $(COSIM_LIB_DIR)"
+	@CC=$(COSIM_CC) OUT=$(COSIM_LIB_DIR) ./scripts/build_cosim_lib.sh
+
+cosim-lib-eth:
+	@echo "[BUILD] 编译 cosim 集成库 (.a + .so, 含完整 ETH DPI) -> $(COSIM_LIB_DIR)"
+	@CC=$(COSIM_CC) OUT=$(COSIM_LIB_DIR) ./scripts/build_cosim_lib.sh --with-eth
 
 # ----- QEMU 设备模型重编(改 qemu-plugin/cosim_pcie_*.c 后)-----
 QEMU_SRC_DIR = $(PROJECT_DIR)/third_party/qemu
@@ -190,7 +184,8 @@ help:
 	@echo ""
 	@echo "编译:"
 	@echo "  make bridge          Bridge 库(.so, cmake)"
-	@echo "  make cosim-lib       kit 静态库 libcosim_bridge.a(供外部 VCS flow 链接)"
+	@echo "  make cosim-lib       外部集成库 .a+.so(供外部 VCS flow 链接;-sv_lib 推荐)"
+	@echo "  make cosim-lib-eth   同上,含完整 ETH DPI;ABI 对齐加 COSIM_CC=<vcs-gcc>"
 	@echo "  make qemu-device     重编 QEMU 设备模型(改 cosim_pcie_*.c 后, ninja)"
 	@echo ""
 	@echo "运行 QEMU(tcp, 供外部 VCS 连过来):"
