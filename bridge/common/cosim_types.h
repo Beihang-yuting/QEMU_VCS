@@ -67,6 +67,7 @@ typedef enum {
     SYNC_MSG_QUERY_TOPOLOGY = 0x10,
     SYNC_MSG_TOPOLOGY_RESP  = 0x11,
     SYNC_MSG_VF_EVENT       = 0x12,
+    SYNC_MSG_REALIZED       = 0x13,
 } sync_msg_type_t;
 
 typedef struct {

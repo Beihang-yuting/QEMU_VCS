@@ -616,6 +616,14 @@ static void cosim_pcie_rc_realize(PCIDevice *pci_dev, Error **errp)
     }
     qemu_log("cosim: PCIe RC device realized (%s mode)\n",
              (s->transport && strcmp(s->transport, "tcp") == 0) ? "TCP" : "SHM");
+
+    /* Signal VCS that device realize completed (BQL about to be released). A VCS
+     * inbound-DMA before realize returns would deadlock pci_dma_write on the BQL
+     * held during blocked config discovery; the VCS side waits for this. */
+    if (ctx && ctx->transport) {
+        sync_msg_t rmsg = { .type = SYNC_MSG_REALIZED, .payload = 0 };
+        ctx->transport->send_sync(ctx->transport, &rmsg);
+    }
 }
 
 static void cosim_pcie_rc_exit(PCIDevice *pci_dev)

@@ -198,6 +198,7 @@ package cosim_bridge_pkg;
 
     import "DPI-C" function int bridge_vcs_poll_tlp_scalar_rc(input int rc);
     import "DPI-C" function int bridge_vcs_get_poll_type_rc(input int rc);
+    import "DPI-C" function int bridge_vcs_is_realized_rc(input int rc);
     import "DPI-C" function longint bridge_vcs_get_poll_addr_rc(input int rc);
     import "DPI-C" function int bridge_vcs_get_poll_len_rc(input int rc);
     import "DPI-C" function int bridge_vcs_get_poll_tag_rc(input int rc);
@@ -215,5 +216,11 @@ package cosim_bridge_pkg;
     import "DPI-C" function void bridge_vcs_set_bar_base_rc(
         input int rc, input int idx, input longint unsigned base);
     import "DPI-C" function longint unsigned bridge_vcs_get_bar_base_rc(input int rc, input int idx);
+
+    /* DUT 入向扩展 TLP：per-RC 发起 DMA（DUT 作为 requester，host 服务） */
+    import "DPI-C" function int bridge_vcs_dma_read_rc(input int rc, input longint unsigned host_addr,
+                                                       output int unsigned data[16], input int len);
+    import "DPI-C" function int bridge_vcs_dma_write_rc(input int rc, input longint unsigned host_addr,
+                                                        input int unsigned data[16], input int len);
 
 endpackage
