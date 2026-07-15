@@ -40,6 +40,119 @@ version_ge() {
     printf '%s\n%s' "$2" "$1" | sort -V -C
 }
 
+# Ubuntu LTS 内核版本（离线下载提示与提取共用）
+UBUNTU_KVER="6.8.0-107-generic"
+
+# 解压任意常见格式压缩包到目标目录（支持 zip / tar.* / tgz 等）
+# 返回: 0=成功  1=失败  2=非已知压缩格式
+_extract_archive() {
+    local src="$1" dest="$2"
+    mkdir -p "$dest"
+    case "$src" in
+        *.zip)             unzip -qo "$src" -d "$dest" ;;
+        *.tar.gz|*.tgz)    tar -xzf "$src" -C "$dest" ;;
+        *.tar.xz|*.txz)    tar -xJf "$src" -C "$dest" ;;
+        *.tar.bz2|*.tbz2)  tar -xjf "$src" -C "$dest" ;;
+        *.tar.zst|*.tzst)  tar --zstd -xf "$src" -C "$dest" ;;
+        *.tar)             tar -xf "$src" -C "$dest" ;;
+        *)                 return 2 ;;
+    esac
+}
+
+# 内网无外网时，打印获取 Ubuntu 内核/镜像的分步外网命令
+print_ubuntu_offline_help() {
+    echo ""
+    echo "  ────────────────────────────────────────"
+    echo "  # === 内网无外网：在有外网的机器上三选一获取，再传进内网 ==="
+    echo ""
+    echo "  [方式 A] 下载 3 个内核 .deb（推荐，最小）:"
+    echo "    从以下页面下 amd64 包（浏览器或 wget）:"
+    echo "      https://packages.ubuntu.com/search?keywords=linux-image-unsigned-${UBUNTU_KVER}"
+    echo "    需要这 3 个:"
+    echo "      linux-image-unsigned-${UBUNTU_KVER}_*.deb"
+    echo "      linux-modules-${UBUNTU_KVER}_*.deb"
+    echo "      linux-modules-extra-${UBUNTU_KVER}_*.deb"
+    echo "    打包（任意格式）:"
+    echo "      zip ubuntu-kernel.zip linux-*.deb"
+    echo "      # 或  tar czf ubuntu-kernel.tar.gz linux-*.deb"
+    echo ""
+    echo "  [方式 B] 直接产出内核（外网机器已克隆本仓库）:"
+    echo "    ./scripts/setup-ubuntu-kernel.sh ${UBUNTU_KVER}"
+    echo "    打包 guest/images/ubuntu/{vmlinuz,modules.tar.gz}"
+    echo ""
+    echo "  [方式 C] 产出完整 Ubuntu rootfs（免内网再建 debian base）:"
+    echo "    ./setup.sh --mode local --guest ubuntu"
+    echo "    打包 guest/images/ubuntu/{vmlinuz,rootfs.ext4}"
+    echo ""
+    echo "  # === 传进内网后，两种用法（压缩包/目录均可）==="
+    echo "    交互:  重跑 ./setup.sh，提示时粘贴路径"
+    echo "    参数:  ./setup.sh --mode local --guest ubuntu --ubuntu-image /path/to/ubuntu-kernel.zip"
+    echo "  ────────────────────────────────────────"
+    echo ""
+}
+
+# 从用户提供的路径收取 Ubuntu 镜像产物并摆到正确位置
+# 入参: 压缩包(zip/tar.*) / 目录 / 单文件均可
+# 识别三类产物: linux-*.deb  |  vmlinuz+modules.tar.gz  |  rootfs.ext4
+# 返回: 0=收到至少一类产物  1=失败/未找到
+intake_offline_ubuntu_image() {
+    local src="$1"
+    local ub_dir="${PROJECT_DIR}/guest/images/ubuntu"
+    local kdeb_dir="${PROJECT_DIR}/build/ubuntu-kernel"
+    local stage found=0
+
+    if [ ! -e "$src" ]; then
+        fail "路径不存在: $src"
+        return 1
+    fi
+
+    # 准备暂存目录：目录直接用；压缩包解压；单文件拷入暂存
+    if [ -d "$src" ]; then
+        stage="$src"
+    else
+        stage="$(mktemp -d)"
+        case "$src" in
+            *.zip|*.tar.gz|*.tgz|*.tar.xz|*.txz|*.tar.bz2|*.tbz2|*.tar.zst|*.tzst|*.tar)
+                info "解压 $src ..."
+                if ! _extract_archive "$src" "$stage"; then
+                    fail "解压失败（格式不支持或文件损坏）: $src"
+                    rm -rf "$stage"; return 1
+                fi ;;
+            *)
+                cp "$src" "$stage/" ;;   # 单文件(如单个 .deb / rootfs.ext4)
+        esac
+    fi
+
+    mkdir -p "$ub_dir" "$kdeb_dir"
+
+    # 1) 内核 .deb（linux-image / linux-modules / linux-modules-extra 等）
+    if find "$stage" -type f -name 'linux-*.deb' 2>/dev/null | grep -q .; then
+        find "$stage" -type f -name 'linux-*.deb' -exec cp {} "$kdeb_dir/" \;
+        ok "已收取内核 .deb → $kdeb_dir"
+        found=1
+    fi
+
+    # 2) 预构建内核 vmlinuz + modules.tar.gz
+    local vmz mods
+    vmz=$(find "$stage" -type f -name 'vmlinuz*' 2>/dev/null | head -1 || true)
+    mods=$(find "$stage" -type f -name 'modules.tar.gz' 2>/dev/null | head -1 || true)
+    [ -n "$vmz" ]  && { cp "$vmz"  "$ub_dir/vmlinuz";        ok "已收取 vmlinuz";        found=1; }
+    [ -n "$mods" ] && { cp "$mods" "$ub_dir/modules.tar.gz"; ok "已收取 modules.tar.gz"; found=1; }
+
+    # 3) 现成 rootfs.ext4
+    local rfs
+    rfs=$(find "$stage" -type f -name 'rootfs.ext4' 2>/dev/null | head -1 || true)
+    [ -n "$rfs" ] && { cp "$rfs" "$ub_dir/rootfs.ext4"; ok "已收取 rootfs.ext4"; found=1; }
+
+    [ "$stage" != "$src" ] && rm -rf "$stage"
+
+    if [ "$found" = 0 ]; then
+        fail "未在 $src 中找到可用产物（linux-*.deb / vmlinuz+modules.tar.gz / rootfs.ext4）"
+        return 1
+    fi
+    return 0
+}
+
 # ---- PATH 增强 ----
 for extra_path in "$HOME/miniconda3/bin" "$HOME/.local/bin" "/usr/local/bin"; do
     if [ -d "$extra_path" ] && [[ ":$PATH:" != *":$extra_path:"* ]]; then
@@ -73,6 +186,11 @@ QEMU 源码 (--qemu-src, 仅 local/qemu-only 模式):
 离线部署:
   --prepare-offline         在外网打包离线安装包（zip）
   --import <zip>            导入离线包后继续安装
+  --ubuntu-image <path>    内网提供已下载的 Ubuntu 内核/镜像（压缩包 zip/tar.* 或目录，
+                            自动识别 linux-*.deb / vmlinuz+modules.tar.gz / rootfs.ext4）
+  --kver <version>         指定 Ubuntu 内核版本（默认 6.8.0-107-generic），
+                            改成你内网对应版本，例: --kver 6.8.0-45-generic
+                            （在目标 Ubuntu 上用 uname -r 查）
 
 其他选项:
   --help      显示此帮助信息
@@ -100,6 +218,7 @@ QEMU_SRC_OPT=""
 DRIVER_MODE=""
 CUSTOM_KO=""
 OFFLINE_ZIP=""
+UBUNTU_IMAGE_PATH=""
 
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -115,6 +234,10 @@ while [ $# -gt 0 ]; do
             CUSTOM_KO="$2"; shift 2 ;;
         --import)
             OFFLINE_ZIP="$2"; shift 2 ;;
+        --ubuntu-image)
+            UBUNTU_IMAGE_PATH="$2"; shift 2 ;;
+        --kver)
+            UBUNTU_KVER="$2"; shift 2 ;;
         --prepare-offline)
             exec bash "${PROJECT_DIR}/scripts/prepare-offline.sh" "${@:2}"
             ;;
@@ -1366,7 +1489,7 @@ if [ "$NEED_GUEST" = true ]; then
                 echo "  sudo ./scripts/build_rootfs_debian.sh guest/images/debian"
                 echo ""
                 echo "  # 3. 提取 Ubuntu LTS 内核"
-                echo "  ./scripts/setup-ubuntu-kernel.sh 6.8.0-107-generic"
+                echo "  ./scripts/setup-ubuntu-kernel.sh ${UBUNTU_KVER}"
                 echo ""
                 echo "  # 4. 注入 Ubuntu 模块到 rootfs"
                 echo "  ./scripts/inject-modules.sh ubuntu"
@@ -1419,14 +1542,31 @@ if [ "$NEED_GUEST" = true ]; then
             elif [ "$HAS_INTERNET" = true ]; then
                 header "提取 Ubuntu LTS 内核"
                 mkdir -p "${_UBUNTU_DIR}" 2>/dev/null || true
-                "${PROJECT_DIR}/scripts/setup-ubuntu-kernel.sh" "6.8.0-107-generic" || {
+                "${PROJECT_DIR}/scripts/setup-ubuntu-kernel.sh" "${UBUNTU_KVER}" || {
                     warn "Ubuntu 内核提取失败（详见上方提示）"
                 }
             else
-                warn "内网环境无法自动提取 Ubuntu 内核"
-                info "请在外网机器上执行后拷贝到本机:"
-                info "  ./scripts/setup-ubuntu-kernel.sh 6.8.0-107-generic"
-                info "  scp guest/images/ubuntu/{vmlinuz,modules.tar.gz} <用户>@<本机IP>:${_UBUNTU_DIR}/"
+                warn "内网环境无法自动下载 Ubuntu 内核"
+                print_ubuntu_offline_help
+
+                # 收取用户提供的离线镜像：--ubuntu-image 参数 或 交互输入路径
+                _UBUNTU_IMG="$UBUNTU_IMAGE_PATH"
+                if [ -z "$_UBUNTU_IMG" ] && [ -t 0 ]; then
+                    read -r -p "已下载？粘贴压缩包/目录路径（回车跳过）: " _UBUNTU_IMG || true
+                fi
+                if [ -n "$_UBUNTU_IMG" ]; then
+                    if intake_offline_ubuntu_image "$_UBUNTU_IMG"; then
+                        # 若收到的是 .deb，用离线模式从本地 .deb 提取 vmlinuz+modules.tar.gz
+                        if [ ! -f "${_UBUNTU_DIR}/vmlinuz" ] && \
+                           ls "${PROJECT_DIR}/build/ubuntu-kernel/"linux-*.deb &>/dev/null; then
+                            header "从离线 .deb 提取 Ubuntu 内核"
+                            "${PROJECT_DIR}/scripts/setup-ubuntu-kernel.sh" "${UBUNTU_KVER}" || \
+                                warn "从离线 .deb 提取失败"
+                        fi
+                    fi
+                else
+                    info "跳过离线镜像收取。下好后可用: --ubuntu-image <path> 或重跑 ./setup.sh"
+                fi
             fi
 
             # 注入模块生成 ubuntu rootfs
