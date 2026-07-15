@@ -209,7 +209,7 @@ class cosim_xrc_driver extends pcie_tl_rc_driver;
     // -----------------------------------------------------------------------
     // rx_loop: drain decoded TLPs arriving from the DUT via this RC's adapter.
     //   - CplD/Cpl (completions on CC channel) -> forward to QEMU.
-    //   - MRd/MWr  (DUT-initiated DMA on RQ channel) -> TODO next increment.
+    //   - MRd/MWr  (DUT-initiated DMA on RQ channel) -> service via host DMA.
     // -----------------------------------------------------------------------
     protected task rx_loop(uvm_phase phase);
         pcie_tl_tlp     rx_tlp;
@@ -226,11 +226,14 @@ class cosim_xrc_driver extends pcie_tl_rc_driver;
             if ($cast(cpl, rx_tlp)) begin
                 forward_completion_to_qemu(cpl);
             end else begin
-                // DUT-initiated request (DMA MRd/MWr). MMIO-first scope: log only.
+                // DUT-initiated request (DMA MRd/MWr) — dispatch to host DMA.
                 inbound_req_count++;
-                `uvm_info(get_name(),
-                    $sformatf("RC%0d inbound DUT request %s (DMA path TODO, dropping)",
-                              rc_index, rx_tlp.kind.name()), UVM_MEDIUM)
+                case (rx_tlp.kind)
+                    TLP_MEM_WR: service_inbound_mem_write(rx_tlp);
+                    TLP_MEM_RD, TLP_MEM_RD_LK: service_inbound_mem_read(rx_tlp);
+                    default: `uvm_info(get_name(), $sformatf(
+                        "RC%0d 未支持入向 %s, 丢弃", rc_index, rx_tlp.kind.name()), UVM_MEDIUM)
+                endcase
             end
         end
     endtask
@@ -273,6 +276,89 @@ class cosim_xrc_driver extends pcie_tl_rc_driver;
         `uvm_info(get_name(),
             $sformatf("RC%0d Cpl->QEMU vip_tag=0x%03h qemu_tag=0x%03h data=0x%08h",
                       rc_index, cpl.tag, qemu_tag, rdata), UVM_HIGH)
+    endfunction
+
+    // -----------------------------------------------------------------------
+    // service_inbound_mem_write: DUT-initiated MWr (posted, no completion).
+    // Pack the VIP byte payload into DPI words and push to this RC's host.
+    // -----------------------------------------------------------------------
+    protected task service_inbound_mem_write(pcie_tl_tlp req);
+        pcie_tl_mem_tlp  w;
+        int unsigned     wdata[16];
+        if (!$cast(w, req)) begin
+            `uvm_error(get_name(), $sformatf("RC%0d inbound MWr $cast failed", rc_index))
+            return;
+        end
+        pack_bytes_to_words(w.payload, wdata);
+        if (bridge_vcs_dma_write_rc(rc_index, w.addr, wdata, w.payload.size()) != 0)
+            `uvm_error(get_name(), $sformatf("RC%0d inbound MWr DMA failed addr=0x%016h size=%0d",
+                                             rc_index, w.addr, w.payload.size()))
+        total_tlp_count++;
+    endtask
+
+    // -----------------------------------------------------------------------
+    // service_inbound_mem_read: DUT-initiated MRd (non-posted). Read this RC's
+    // host memory, build a CplD, and send it back to the DUT.
+    //   NOTE: length==0 means 1024 DW; handled as a plain read for now (the
+    //   64B DPI cap will reject an oversize read and take the error path).
+    // -----------------------------------------------------------------------
+    protected task service_inbound_mem_read(pcie_tl_tlp req);
+        pcie_tl_mem_tlp  r;
+        pcie_tl_cpl_tlp  cpl;
+        int unsigned     rdata[16];
+        int              nbytes;
+        if (!$cast(r, req)) begin
+            `uvm_error(get_name(), $sformatf("RC%0d inbound MRd $cast failed", rc_index))
+            return;
+        end
+        nbytes = r.length * 4;
+        if (bridge_vcs_dma_read_rc(rc_index, r.addr, rdata, nbytes) != 0) begin
+            `uvm_error(get_name(), $sformatf("RC%0d inbound MRd DMA failed addr=0x%016h nbytes=%0d",
+                                             rc_index, r.addr, nbytes))
+            return;
+        end
+        cpl = build_cpld_tlp(r, rdata, nbytes);
+        send_tlp(cpl);
+        total_cpl_count++;
+    endtask
+
+    // -----------------------------------------------------------------------
+    // build_cpld_tlp: build a CplD for a DUT-initiated MRd. Ported from
+    // pcie_tl_rc_driver::send_mem_completion field assignments; requester_id/
+    // tag echoed from the request, completer_id = this RC, payload from the
+    // DPI words (little-endian within each word).
+    // -----------------------------------------------------------------------
+    protected function pcie_tl_cpl_tlp build_cpld_tlp(pcie_tl_mem_tlp r, int unsigned d[16], int nbytes);
+        pcie_tl_cpl_tlp cpl = pcie_tl_cpl_tlp::type_id::create("cpld");
+        int len_dw = (nbytes + 3) / 4;
+        cpl.kind         = TLP_CPLD;
+        cpl.fmt          = FMT_3DW_WITH_DATA;
+        cpl.type_f       = TLP_TYPE_CPL;
+        cpl.tc           = r.tc;
+        cpl.td           = 0;
+        cpl.ep_bit       = 0;
+        cpl.attr         = r.attr;
+        cpl.length       = (len_dw == 1024) ? 0 : len_dw[9:0];
+        cpl.requester_id = r.requester_id;
+        cpl.tag          = r.tag;
+        cpl.completer_id = 16'(rc_index);
+        cpl.cpl_status   = CPL_STATUS_SC;
+        cpl.bcm          = 0;
+        cpl.byte_count   = nbytes[11:0];
+        cpl.lower_addr   = r.addr[6:0];
+        cpl.payload      = new[nbytes];
+        for (int i = 0; i < nbytes; i++)
+            cpl.payload[i] = d[i/4][(i%4)*8 +: 8];
+        return cpl;
+    endfunction
+
+    // VIP byte payload -> int[16] words (LE within each word). Inverse of
+    // unpack_words_to_bytes; words beyond 16 (>64B) are dropped by the caller
+    // via the DPI 64B cap.
+    protected function void pack_bytes_to_words(bit [7:0] payload[], output int unsigned d[16]);
+        for (int i = 0; i < 16; i++) d[i] = 0;
+        foreach (payload[i])
+            if (i/4 < 16) d[i/4][(i%4)*8 +: 8] = payload[i];
     endfunction
 
     // -----------------------------------------------------------------------
