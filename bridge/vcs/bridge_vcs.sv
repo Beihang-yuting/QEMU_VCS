@@ -216,4 +216,10 @@ package cosim_bridge_pkg;
         input int rc, input int idx, input longint unsigned base);
     import "DPI-C" function longint unsigned bridge_vcs_get_bar_base_rc(input int rc, input int idx);
 
+    /* DUT 入向扩展 TLP：per-RC 发起 DMA（DUT 作为 requester，host 服务） */
+    import "DPI-C" function int bridge_vcs_dma_read_rc(input int rc, input longint unsigned host_addr,
+                                                       output int unsigned data[16], input int len);
+    import "DPI-C" function int bridge_vcs_dma_write_rc(input int rc, input longint unsigned host_addr,
+                                                        input int unsigned data[16], input int len);
+
 endpackage

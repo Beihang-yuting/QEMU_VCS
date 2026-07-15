@@ -816,6 +816,131 @@ int bridge_vcs_dma_write_sync(unsigned long long host_addr,
     return -1;
 }
 
+/* fwd decl: rc_ok 定义在下方(~1265),这些新 _rc 入向函数在其前调用 */
+static int rc_ok(int rc);
+
+/* DPI-C: Per-RC synchronous DMA read — DUT (requester) reads Guest memory
+ * through RC slot `rc`. Mirrors the TCP branch of bridge_vcs_dma_read_sync,
+ * scoped to g_rc[rc].transport. Blocks until SYNC_MSG_DMA_CPL.
+ * len 上限 64B（DPI data[16]）——超限拒绝，防 tmp_buf 溢出。 */
+int bridge_vcs_dma_read_rc(int rc, unsigned long long host_addr,
+                           unsigned int *data, int len) {
+    if (!rc_ok(rc) || len <= 0 || len > 64) return -1;
+    cosim_transport_t *tr = g_rc[rc].transport;
+    if (!tr) return -1;
+
+    static uint32_t next_tag = 4000;
+    uint32_t tag = next_tag++;
+    dma_req_t req = {
+        .tag = tag,
+        .direction = DMA_DIR_READ,
+        .host_addr = host_addr,
+        .len = (uint32_t)len,
+        .dma_offset = 0,
+        .timestamp = 0,
+    };
+
+    if (tr->send_dma_req(tr, &req) < 0) {
+        fprintf(stderr, "[VCS Bridge] DMA read rc%d: send_dma_req failed\n", rc);
+        return -1;
+    }
+
+    for (int i = 0; i < 1000; i++) {
+        sync_msg_t msg;
+        if (tr->recv_sync(tr, &msg) < 0) {
+            fprintf(stderr, "[VCS Bridge] DMA read rc%d: recv_sync error\n", rc);
+            return -1;
+        }
+        if (msg.type == SYNC_MSG_SHUTDOWN) return -1;
+        if (msg.type == SYNC_MSG_TLP_READY) {
+            tlp_entry_t cached_tlp;
+            if (tr->recv_tlp(tr, &cached_tlp) == 0)
+                tlp_cache_push_ctx(&g_rc[rc], &cached_tlp);
+            continue;
+        }
+        if (msg.type == SYNC_MSG_DMA_CPL) {
+            dma_cpl_t cpl;
+            if (tr->recv_dma_cpl(tr, &cpl) < 0) return -1;
+            if (cpl.tag != tag || cpl.status != 0) {
+                fprintf(stderr, "[VCS Bridge] DMA read rc%d: cpl tag=%u status=%u (expected tag=%u)\n",
+                        rc, cpl.tag, cpl.status, tag);
+                return -1;
+            }
+            uint32_t rx_tag, rx_dir, rx_len = (uint32_t)len;
+            uint64_t rx_addr;
+            uint8_t tmp_buf[64];
+            if (tr->recv_dma_data(tr, &rx_tag, &rx_dir, &rx_addr, tmp_buf, &rx_len) < 0) {
+                fprintf(stderr, "[VCS Bridge] DMA read rc%d: recv_dma_data failed\n", rc);
+                return -1;
+            }
+            int words = (len + 3) / 4;
+            for (int w = 0; w < words && w < 16; w++)
+                memcpy(&data[w], tmp_buf + w * 4, 4);
+            return 0;
+        }
+    }
+    fprintf(stderr, "[VCS Bridge] DMA read rc%d: timeout\n", rc);
+    return -1;
+}
+
+/* DPI-C: Per-RC synchronous DMA write — DUT (requester) writes Guest memory
+ * through RC slot `rc`. Mirrors the TCP branch of bridge_vcs_dma_write_sync,
+ * scoped to g_rc[rc].transport. send_dma_req MUST precede send_dma_data (see
+ * bridge_vcs_dma_write_sync comment). Blocks until SYNC_MSG_DMA_CPL. */
+int bridge_vcs_dma_write_rc(int rc, unsigned long long host_addr,
+                            const unsigned int *data, int len) {
+    if (!rc_ok(rc) || len <= 0 || len > 64) return -1;  /* 64B = DPI data[16] 上限 */
+    cosim_transport_t *tr = g_rc[rc].transport;
+    if (!tr) return -1;
+
+    static uint32_t next_tag = 4500;
+    uint32_t tag = next_tag++;
+    dma_req_t req = {
+        .tag = tag,
+        .direction = DMA_DIR_WRITE,
+        .host_addr = host_addr,
+        .len = (uint32_t)len,
+        .dma_offset = 0,
+        .timestamp = 0,
+    };
+
+    if (tr->send_dma_req(tr, &req) < 0) {
+        fprintf(stderr, "[VCS Bridge] DMA write rc%d: send_dma_req failed\n", rc);
+        return -1;
+    }
+    if (tr->send_dma_data(tr, tag, DMA_DIR_WRITE, host_addr,
+                          (const uint8_t *)data, (uint32_t)len) < 0) {
+        fprintf(stderr, "[VCS Bridge] DMA write rc%d: send_dma_data failed\n", rc);
+        return -1;
+    }
+
+    for (int i = 0; i < 1000; i++) {
+        sync_msg_t msg;
+        if (tr->recv_sync(tr, &msg) < 0) {
+            fprintf(stderr, "[VCS Bridge] DMA write rc%d: recv_sync error\n", rc);
+            return -1;
+        }
+        if (msg.type == SYNC_MSG_SHUTDOWN) return -1;
+        if (msg.type == SYNC_MSG_TLP_READY) {
+            tlp_entry_t cached_tlp;
+            if (tr->recv_tlp(tr, &cached_tlp) == 0)
+                tlp_cache_push_ctx(&g_rc[rc], &cached_tlp);
+            continue;
+        }
+        if (msg.type == SYNC_MSG_DMA_CPL) {
+            dma_cpl_t cpl;
+            if (tr->recv_dma_cpl(tr, &cpl) < 0) return -1;
+            if (cpl.tag == tag && cpl.status == 0)
+                return 0;
+            fprintf(stderr, "[VCS Bridge] DMA write rc%d: cpl tag=%u status=%u (expected tag=%u)\n",
+                    rc, cpl.tag, cpl.status, tag);
+            return -1;
+        }
+    }
+    fprintf(stderr, "[VCS Bridge] DMA write rc%d: timeout\n", rc);
+    return -1;
+}
+
 /* DPI-C: VCS raises MSI interrupt */
 int bridge_vcs_raise_msi(int vector) {
     msi_event_t ev = { .requester_id = 0, .vector = (uint16_t)vector, .timestamp = 0 };
