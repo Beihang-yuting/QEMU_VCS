@@ -209,7 +209,12 @@ static int tcp_connect_host(const char *host, int port) {
             close(fd);
             return -1;
         }
+        /* ECONNREFUSED: server 还没监听。重连前必须换新 socket —— 失败的 fd
+         * 状态已污染, POSIX 下对同一 fd 重复 connect() 不可靠。 */
+        close(fd);
         usleep(500000);
+        fd = socket(AF_INET, SOCK_STREAM, 0);
+        if (fd < 0) { perror("[tcp] socket"); return -1; }
     }
     fprintf(stderr, "[tcp] connect timeout: %s:%d\n", host, port);
     close(fd);
@@ -611,8 +616,15 @@ static int tcp_do_handshake_server(transport_tcp_priv_t *p) {
 
     /* 接收 client 回复 */
     tcp_msg_hdr_t hdr;
-    if (tcp_recv_hdr(p->ctrl_fd, &hdr) < 0) return -1;
-    if (hdr.msg_type != TCP_MSG_HANDSHAKE) return -1;
+    if (tcp_recv_hdr(p->ctrl_fd, &hdr) < 0) {
+        fprintf(stderr, "[tcp] SRV handshake: recv ack hdr failed (client closed ctrl?)\n");
+        return -1;
+    }
+    if (hdr.msg_type != TCP_MSG_HANDSHAKE) {
+        fprintf(stderr, "[tcp] SRV handshake: ack not HANDSHAKE: type=0x%x len=%u\n",
+                hdr.msg_type, hdr.payload_len);
+        return -1;
+    }
 
     tcp_handshake_t ack;
     memset(&ack, 0, sizeof(ack));
@@ -637,8 +649,9 @@ static int tcp_do_handshake_server(transport_tcp_priv_t *p) {
     /* 使用客户端回复的版本 (已经是 min) */
     p->negotiated_version = ack.version;
 
-    /* 如果协商到 v1，关闭 aux 连接 */
-    if (p->negotiated_version < TCP_HANDSHAKE_V2 && p->aux_fd >= 0) {
+    /* 协商到 v1, 或客户端 advertised 的 conn_count<3 (aux 竞态丢失) → 关 aux。
+     * 用握手交换的 conn_count 对账, 保证两侧对 aux 的取舍一致。 */
+    if ((p->negotiated_version < TCP_HANDSHAKE_V2 || ack.conn_count < 3) && p->aux_fd >= 0) {
         fprintf(stderr, "[tcp] Negotiated v%u, closing aux connection\n", p->negotiated_version);
         close(p->aux_fd);
         p->aux_fd = -1;
@@ -656,8 +669,15 @@ static int tcp_do_handshake_server(transport_tcp_priv_t *p) {
 
 static int tcp_do_handshake_client(transport_tcp_priv_t *p) {
     tcp_msg_hdr_t hdr;
-    if (tcp_recv_hdr(p->ctrl_fd, &hdr) < 0) return -1;
-    if (hdr.msg_type != TCP_MSG_HANDSHAKE) return -1;
+    if (tcp_recv_hdr(p->ctrl_fd, &hdr) < 0) {
+        fprintf(stderr, "[tcp] CLI handshake: recv server hdr failed (server closed ctrl?)\n");
+        return -1;
+    }
+    if (hdr.msg_type != TCP_MSG_HANDSHAKE) {
+        fprintf(stderr, "[tcp] CLI handshake: server msg not HANDSHAKE: type=0x%x len=%u\n",
+                hdr.msg_type, hdr.payload_len);
+        return -1;
+    }
 
     tcp_handshake_t hs;
     memset(&hs, 0, sizeof(hs));
@@ -691,12 +711,14 @@ static int tcp_do_handshake_client(transport_tcp_priv_t *p) {
     memset(&ack, 0, sizeof(ack));
     ack.magic = TCP_HANDSHAKE_MAGIC;
     ack.version = agreed;
-    ack.conn_count = (p->aux_fd >= 0 && agreed >= TCP_HANDSHAKE_V2) ? 3 : 2;
+    /* 只有 server 也 advertised 3-conn(hs.conn_count>=3)时才保留 aux, 对账 aux 竞态 */
+    ack.conn_count = (p->aux_fd >= 0 && agreed >= TCP_HANDSHAKE_V2
+                      && hs.conn_count >= 3) ? 3 : 2;
 
     if (tcp_send_msg(p->ctrl_fd, TCP_MSG_HANDSHAKE, &ack, sizeof(ack)) < 0) return -1;
 
-    /* 如果协商到 v1，关闭 aux */
-    if (agreed < TCP_HANDSHAKE_V2 && p->aux_fd >= 0) {
+    /* 协商到 v1, 或 server 的 conn_count<3 (server 侧 aux 竞态丢失) → 关 aux */
+    if ((agreed < TCP_HANDSHAKE_V2 || hs.conn_count < 3) && p->aux_fd >= 0) {
         fprintf(stderr, "[tcp] Negotiated v%u, closing aux connection\n", agreed);
         close(p->aux_fd);
         p->aux_fd = -1;
