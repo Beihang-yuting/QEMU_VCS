@@ -283,39 +283,41 @@ class pcie_tl_unified_mem_test extends pcie_tl_base_test;
             bit [63:0] c;
             byte init_data[];
             byte rd_c[];
-            pcie_tl_atomic_seq at_seq;
+            pcie_tl_atomic_fixed_seq at_seq;
             int sz = 4;  // 32-bit atomic
-            bit [31:0] old_val;
+            bit [31:0] old_val = 32'h0000_0010;
+            bit [31:0] operand = 32'h0000_0005;
+            bit [31:0] exp_val = old_val + operand;  // deterministic: 0x0000_0015
             bit [31:0] new_val;
 
             c = env.host_mem.alloc(8, 8);  // align to 8 for atomic
 
-            // Seed: value = 0x00000010
+            // Seed old value (little-endian)
             init_data = new[sz];
-            init_data[0] = 8'h10;
-            init_data[1] = 8'h00;
-            init_data[2] = 8'h00;
-            init_data[3] = 8'h00;
+            for (int i = 0; i < sz; i++) init_data[i] = old_val[8*i +: 8];
             env.host_mem.write_mem(c, init_data);
 
-            at_seq = pcie_tl_atomic_seq::type_id::create("ep_fetchadd");
+            // Pin the operand so the FetchAdd result is deterministic and checkable
+            // (bare pcie_tl_atomic_seq leaves the operand payload unconstrained).
+            at_seq = pcie_tl_atomic_fixed_seq::type_id::create("ep_fetchadd");
             at_seq.addr     = c;
             at_seq.is_64bit = (c[63:32] != 0);
             at_seq.op_kind  = TLP_ATOMIC_FETCHADD;
             at_seq.op_size  = ATOMIC_SIZE_32;
+            at_seq.payload_bytes = new[sz];
+            for (int i = 0; i < sz; i++) at_seq.payload_bytes[i] = operand[8*i +: 8];
             at_seq.start(env.ep_agent.sequencer);
             #2us;
 
             // rc_driver has written new = old + operand back to host_mem
             env.host_mem.read_mem(c, sz, rd_c);
-            old_val = 32'h0000_0010;
             new_val = {rd_c[3], rd_c[2], rd_c[1], rd_c[0]};
             `uvm_info("UM_TEST", $sformatf(
-                "Phase 3: host_mem[0x%0h] after FetchAdd: old=0x%08h new=0x%08h",
-                c, old_val, new_val), UVM_LOW)
-            // new_val must differ from old (operand may be 0 if randomization gives 0,
-            // but at minimum the write-back executed without fatal — check no error)
-            `uvm_info("UM_TEST", "Phase 3: FetchAdd completed without error -- OK", UVM_LOW)
+                "Phase 3: host_mem[0x%0h] FetchAdd: old=0x%08h operand=0x%08h new=0x%08h (exp 0x%08h)",
+                c, old_val, operand, new_val, exp_val), UVM_LOW)
+            if (new_val !== exp_val)
+                `uvm_error("UM_TEST", $sformatf(
+                    "Phase 3 FetchAdd WRONG: new=0x%08h expected 0x%08h", new_val, exp_val))
             env.host_mem.free(c);
         end
 

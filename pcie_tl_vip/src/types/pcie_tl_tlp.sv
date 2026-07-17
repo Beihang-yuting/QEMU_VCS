@@ -558,6 +558,16 @@ class pcie_tl_atomic_tlp extends pcie_tl_tlp;
     function new(string name = "pcie_tl_atomic_tlp");
         super.new(name);
     endfunction
+
+    // do_copy：拷贝 atomic_tlp 子类特有字段（否则 clone/copy 丢 addr/is_64bit/op_size）
+    virtual function void do_copy(uvm_object rhs);
+        pcie_tl_atomic_tlp rhs_;
+        super.do_copy(rhs);
+        if (!$cast(rhs_, rhs)) return;
+        this.addr     = rhs_.addr;
+        this.is_64bit = rhs_.is_64bit;
+        this.op_size  = rhs_.op_size;
+    endfunction : do_copy
 endclass
 
 //=============================================================================

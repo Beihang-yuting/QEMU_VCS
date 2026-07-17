@@ -239,7 +239,11 @@ class pcie_tl_codec extends uvm_object;
         else if (tlp.kind inside {TLP_ATOMIC_FETCHADD, TLP_ATOMIC_SWAP, TLP_ATOMIC_CAS}) begin
             pcie_tl_atomic_tlp atm;
             $cast(atm, tlp);
-            dw1 = {tlp.requester_id, tlp.tag[7:0], 8'h0F};
+            // Byte enables: first_be=0xF always; last_be=0xF for multi-DW
+            // requests (64-bit FetchAdd/Swap, all CAS), 0x0 for a single DW.
+            // DW1[7:0] = {last_be[3:0], first_be[3:0]}.
+            dw1 = {tlp.requester_id, tlp.tag[7:0],
+                   (tlp.length == 1) ? 8'h0F : 8'hFF};
             hdr[1] = dw1;
             if (num_dw == 4) begin
                 hdr[2] = atm.addr[63:32];
