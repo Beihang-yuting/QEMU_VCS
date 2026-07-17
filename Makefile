@@ -39,6 +39,10 @@ else
 endif
 # 多 QEMU 实例 + 连接描述符
 NUM_RC         ?= 1
+# 控制台模式: login       = 单 RC0 交互控制台(前台, 可登录, 输出同时进日志)
+#             login-multi = NUM_RC 个后台 QEMU, 每 RC 一个控制台 socket(可登录)+独立日志
+#             file        = 无人值守, NUM_RC 个后台 QEMU, 串口只写日志文件
+CONSOLE        ?= login
 ADVERTISE_HOST ?= $(shell hostname -I 2>/dev/null | awk '{print $$1}')
 CONN_JSON      ?= $(RUN_DIR)/cosim-conn.json
 DEV_VENDOR     ?= 0x1af4
@@ -107,6 +111,62 @@ run-qemu:
 	@[ -n '$(KERNEL)' ] && [ -f '$(KERNEL)' ] || { echo "[错误] Kernel 未找到 (GUEST_TYPE=$(GUEST_TYPE))"; exit 1; }
 	@[ -n '$(ROOTFS)' ] && [ -f '$(ROOTFS)' ] || echo "[警告] 未找到 rootfs (GUEST_TYPE=$(GUEST_TYPE))"
 	@mkdir -p $(LOG_DIR) $(RUN_DIR)
+ifeq ($(CONSOLE),login)
+	@echo "[cosim] 登录模式(交互控制台,可登录; 控制台输出同时写日志): RC0 port $(PORT_BASE)"
+	@{ echo "{"; \
+	  echo "  \"transport\": \"tcp\","; \
+	  echo "  \"host\": \"$(ADVERTISE_HOST)\","; \
+	  echo "  \"port_base\": $(PORT_BASE),"; \
+	  echo "  \"num_rc\": 1,"; \
+	  echo "  \"port_formula\": \"port = port_base + instance_id*3\","; \
+	  echo "  \"rcs\": [ {\"rc\": 0, \"instance_id\": 0, \"port\": $(PORT_BASE)} ],"; \
+	  echo "  \"device\": { \"vendor\": \"$(DEV_VENDOR)\", \"device\": \"$(DEV_DEVICE)\", \"bar0_size\": \"$(DEV_BAR0_SIZE)\" }"; \
+	  echo "}"; } > $(CONN_JSON)
+	@echo "[cosim] 描述符: $(CONN_JSON)"; cat $(CONN_JSON)
+	@echo "[cosim] 本终端即 guest 控制台(可登录); Ctrl-A C 切 QEMU monitor, Ctrl-A X 退出; VCS 读描述符连过来。"
+	@$(_QEMU_LD_PATH) $(QEMU) -M q35 -m $(GUEST_MEMORY) -smp 1 -snapshot \
+		-kernel $(KERNEL) -drive file=$(ROOTFS),format=raw,if=none,id=rootdisk0 \
+		-device virtio-blk-pci,drive=rootdisk0,addr=0x10 \
+		-append "console=ttyS0 root=/dev/vda rw guest_ip=10.0.0.10" \
+		-device "cosim-pcie-rc,transport=tcp,port_base=$(PORT_BASE),instance_id=0" \
+		-display none \
+		-chardev stdio,id=cons0,mux=on,signal=off,logfile=$(LOG_DIR)/qemu_rc0.log \
+		-serial chardev:cons0 -mon chardev=cons0,mode=readline
+else ifeq ($(CONSOLE),login-multi)
+	@echo "[cosim] 多控制台登录模式: $(NUM_RC) 个后台 QEMU, 每 RC 一个控制台 socket + 独立日志"
+	@PIDS=""; \
+	cleanup() { echo; echo "[cosim] 停 QEMU..."; for p in $$PIDS; do kill $$p 2>/dev/null || true; done; wait 2>/dev/null || true; }; \
+	trap cleanup INT TERM EXIT; \
+	for r in $$(seq 0 $$(($(NUM_RC)-1))); do \
+		$(_QEMU_LD_PATH) $(QEMU) -M q35 -m $(GUEST_MEMORY) -smp 1 -snapshot \
+			-kernel $(KERNEL) -drive file=$(ROOTFS),format=raw,if=none,id=rootdisk$$r \
+			-device virtio-blk-pci,drive=rootdisk$$r,addr=0x10 \
+			-append "console=ttyS0 root=/dev/vda rw guest_ip=10.0.0.$$((10+r))" \
+			-device "cosim-pcie-rc,transport=tcp,port_base=$(PORT_BASE),instance_id=$$r" \
+			-display none \
+			-chardev socket,id=cons$$r,path=$(RUN_DIR)/console_rc$$r.sock,server=on,wait=off,logfile=$(LOG_DIR)/qemu_rc$$r.log \
+			-serial chardev:cons$$r \
+			-monitor unix:$(RUN_DIR)/monitor_rc$$r.sock,server=on,wait=off \
+			> $(LOG_DIR)/qemu_rc$$r.boot 2>&1 & \
+		PIDS="$$PIDS $$!"; \
+		echo "  RC$$r: TCP $$(($(PORT_BASE)+r*3))  控制台 $(RUN_DIR)/console_rc$$r.sock  日志 $(LOG_DIR)/qemu_rc$$r.log"; \
+	done; \
+	{ echo "{"; \
+	  echo "  \"transport\": \"tcp\","; \
+	  echo "  \"host\": \"$(ADVERTISE_HOST)\","; \
+	  echo "  \"port_base\": $(PORT_BASE),"; \
+	  echo "  \"num_rc\": $(NUM_RC),"; \
+	  echo "  \"port_formula\": \"port = port_base + instance_id*3\","; \
+	  printf "  \"rcs\": ["; \
+	  for r in $$(seq 0 $$(($(NUM_RC)-1))); do [ $$r -gt 0 ] && printf ","; printf " {\"rc\": %d, \"instance_id\": %d, \"port\": %d}" $$r $$r $$(($(PORT_BASE)+r*3)); done; \
+	  echo " ],"; \
+	  echo "  \"device\": { \"vendor\": \"$(DEV_VENDOR)\", \"device\": \"$(DEV_DEVICE)\", \"bar0_size\": \"$(DEV_BAR0_SIZE)\" }"; \
+	  echo "}"; } > $(CONN_JSON); \
+	echo "[cosim] 描述符: $(CONN_JSON)"; cat $(CONN_JSON); \
+	echo "[cosim] 登录各 RC 控制台(每个开一个终端): socat -,raw,echo=0 unix-connect:$(RUN_DIR)/console_rc<N>.sock"; \
+	echo "[cosim] QEMU monitor: socat -,raw,echo=0 unix-connect:$(RUN_DIR)/monitor_rc<N>.sock ; Ctrl-C 停全部。"; \
+	wait
+else
 	@echo "[cosim] 起 $(NUM_RC) 个 QEMU(tcp, port_base=$(PORT_BASE), inst 0..$$(($(NUM_RC)-1)))"
 	@PIDS=""; \
 	cleanup() { echo; echo "[cosim] 停 QEMU..."; for p in $$PIDS; do kill $$p 2>/dev/null || true; done; wait 2>/dev/null || true; }; \
@@ -136,6 +196,7 @@ run-qemu:
 	echo "[cosim] 描述符: $(CONN_JSON)"; cat $(CONN_JSON); \
 	echo "[cosim] VCS 侧读它连过来;Ctrl-C 停。"; \
 	wait
+endif
 
 # ============================================================
 # 测试
