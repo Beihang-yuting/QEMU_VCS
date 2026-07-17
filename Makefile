@@ -43,6 +43,9 @@ NUM_RC         ?= 1
 #             login-multi = NUM_RC 个后台 QEMU, 每 RC 一个控制台 socket(可登录)+独立日志
 #             file        = 无人值守, NUM_RC 个后台 QEMU, 串口只写日志文件
 CONSOLE        ?= login
+# MMIO 读超时(ms): >0 时 BAR MMIO 读等 VCS 应答超时即返 0xFFFFFFFF, 设备无响应也能启动到登录;
+#                  0=禁用(永久阻塞,旧行为)。默认 180000(3min)。传给 cosim-pcie-rc 设备属性。
+MMIO_TIMEOUT_MS ?= 180000
 ADVERTISE_HOST ?= $(shell hostname -I 2>/dev/null | awk '{print $$1}')
 CONN_JSON      ?= $(RUN_DIR)/cosim-conn.json
 DEV_VENDOR     ?= 0x1af4
@@ -128,7 +131,7 @@ ifeq ($(CONSOLE),login)
 		-kernel $(KERNEL) -drive file=$(ROOTFS),format=raw,if=none,id=rootdisk0 \
 		-device virtio-blk-pci,drive=rootdisk0,addr=0x10 \
 		-append "console=ttyS0 root=/dev/vda rw guest_ip=10.0.0.10" \
-		-device "cosim-pcie-rc,transport=tcp,port_base=$(PORT_BASE),instance_id=0" \
+		-device "cosim-pcie-rc,transport=tcp,port_base=$(PORT_BASE),instance_id=0,mmio_timeout_ms=$(MMIO_TIMEOUT_MS)" \
 		-display none \
 		-chardev stdio,id=cons0,mux=on,signal=off,logfile=$(LOG_DIR)/qemu_rc0.log \
 		-serial chardev:cons0 -mon chardev=cons0,mode=readline
@@ -142,7 +145,7 @@ else ifeq ($(CONSOLE),login-multi)
 			-kernel $(KERNEL) -drive file=$(ROOTFS),format=raw,if=none,id=rootdisk$$r \
 			-device virtio-blk-pci,drive=rootdisk$$r,addr=0x10 \
 			-append "console=ttyS0 root=/dev/vda rw guest_ip=10.0.0.$$((10+r))" \
-			-device "cosim-pcie-rc,transport=tcp,port_base=$(PORT_BASE),instance_id=$$r" \
+			-device "cosim-pcie-rc,transport=tcp,port_base=$(PORT_BASE),instance_id=$$r,mmio_timeout_ms=$(MMIO_TIMEOUT_MS)" \
 			-display none \
 			-chardev socket,id=cons$$r,path=$(RUN_DIR)/console_rc$$r.sock,server=on,wait=off,logfile=$(LOG_DIR)/qemu_rc$$r.log \
 			-serial chardev:cons$$r \
@@ -176,7 +179,7 @@ else
 			-kernel $(KERNEL) -drive file=$(ROOTFS),format=raw,if=none,id=rootdisk$$r \
 			-device virtio-blk-pci,drive=rootdisk$$r,addr=0x10 \
 			-append "console=ttyS0 root=/dev/vda rw guest_ip=10.0.0.$$((10+r))" \
-			-device "cosim-pcie-rc,transport=tcp,port_base=$(PORT_BASE),instance_id=$$r" \
+			-device "cosim-pcie-rc,transport=tcp,port_base=$(PORT_BASE),instance_id=$$r,mmio_timeout_ms=$(MMIO_TIMEOUT_MS)" \
 			-nographic -serial file:$(LOG_DIR)/qemu_rc$$r.log -monitor none \
 			> $(LOG_DIR)/qemu_rc$$r.boot 2>&1 & \
 		PIDS="$$PIDS $$!"; \
@@ -249,10 +252,15 @@ help:
 	@echo "  make cosim-lib-eth   同上,含完整 ETH DPI;ABI 对齐加 COSIM_CC=<vcs-gcc>"
 	@echo "  make qemu-device     重编 QEMU 设备模型(改 cosim_pcie_*.c 后, ninja)"
 	@echo ""
-	@echo "运行 QEMU(tcp, 供外部 VCS 连过来):"
-	@echo "  make run-qemu                    起 1 个 QEMU"
-	@echo "  make run-qemu NUM_RC=4           起 4 个 QEMU(端口=PORT_BASE+id*3)"
-	@echo "  连接描述符写入 $(CONN_JSON)"
+	@echo "运行 QEMU(tcp, 供外部 VCS 连过来) — CONSOLE 三模式:"
+	@echo "  make run-qemu                        [默认] login: 单 RC 前台交互控制台(可登录)+同时写日志"
+	@echo "  make run-qemu CONSOLE=login-multi NUM_RC=2"
+	@echo "                                       多 RC: 每 RC 后台 + 独立控制台/monitor socket(可登录) + 独立日志"
+	@echo "                                       登录:  socat -,raw,echo=0 unix-connect:$(RUN_DIR)/console_rc<N>.sock"
+	@echo "  make run-qemu CONSOLE=file NUM_RC=4  无人值守: NUM_RC 个后台 QEMU, 串口只写日志文件"
+	@echo "  控制台内容同时写 $(LOG_DIR)/qemu_rc<N>.log; 连接描述符写 $(CONN_JSON)"
+	@echo "  login 模式登录后: Ctrl-A C 切 QEMU monitor, Ctrl-A X 退出"
+	@echo "  设备无响应也能进登录: MMIO 读默认 3min 超时(见下 MMIO_TIMEOUT_MS)"
 	@echo ""
 	@echo "测试:"
 	@echo "  make test-unit        单元测试"
@@ -268,6 +276,8 @@ help:
 	@echo "参数（KEY=VALUE）:"
 	@echo "  NUM_RC=1               QEMU 实例数"
 	@echo "  PORT_BASE=9100         TCP 端口基数（端口=BASE+instance_id*3）"
+	@echo "  CONSOLE=login|login-multi|file  控制台模式(默认 login)"
+	@echo "  MMIO_TIMEOUT_MS=180000  MMIO 读等 VCS 应答超时 ms(默认 3min; 0=禁用,永久阻塞)"
 	@echo "  ADVERTISE_HOST         写入描述符的 host（默认本机 IP）"
 	@echo "  GUEST_TYPE=ubuntu|debian  Guest 系统（默认 ubuntu）"
 	@echo "  QEMU= KERNEL= ROOTFS=  路径覆盖"

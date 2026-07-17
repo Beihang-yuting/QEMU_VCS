@@ -28,6 +28,13 @@ int bridge_connect(bridge_ctx_t *ctx);
 int bridge_send_tlp(bridge_ctx_t *ctx, tlp_entry_t *req);
 int bridge_wait_completion(bridge_ctx_t *ctx, uint16_t tag, cpl_entry_t *cpl);
 int bridge_send_tlp_and_wait(bridge_ctx_t *ctx, tlp_entry_t *req, cpl_entry_t *cpl);
+/* Timed variants: bound the ctrl-channel completion wait to timeout_ms.
+ * Return 0 on match, -2 on timeout, -1 on error. Fall back to the blocking
+ * variant when the transport has no timed recv. */
+int bridge_wait_completion_timed(bridge_ctx_t *ctx, uint16_t tag,
+                                 cpl_entry_t *cpl, int timeout_ms);
+int bridge_send_tlp_and_wait_timed(bridge_ctx_t *ctx, tlp_entry_t *req,
+                                   cpl_entry_t *cpl, int timeout_ms);
 int bridge_send_tlp_fire(bridge_ctx_t *ctx, tlp_entry_t *req);
 void bridge_destroy(bridge_ctx_t *ctx);
 

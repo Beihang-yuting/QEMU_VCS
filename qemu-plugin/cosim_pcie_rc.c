@@ -54,10 +54,15 @@ static uint64_t cosim_mmio_read(void *opaque, hwaddr addr, unsigned size)
     req.last_be  = 0;
 
     cpl_entry_t cpl = {0};
-    int ret = bridge_send_tlp_and_wait(ctx, &req, &cpl);
+    /* mmio_timeout_ms>0: 超时即返回 0xFFFFFFFF, guest 不死等无响应的 VCS ->
+     * 设备 probe 优雅失败, boot 继续到登录。0: 旧行为(永久阻塞)。 */
+    int ret = (s->mmio_timeout_ms > 0)
+              ? bridge_send_tlp_and_wait_timed(ctx, &req, &cpl, (int)s->mmio_timeout_ms)
+              : bridge_send_tlp_and_wait(ctx, &req, &cpl);
     if (ret < 0) {
-        qemu_log_mask(LOG_GUEST_ERROR, "cosim: MRd failed addr=0x%lx\n",
-                      (unsigned long)addr);
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "cosim: MRd %s pcie=0x%lx -> 0xFFFFFFFF (VCS 未应答)\n",
+                      ret == -2 ? "timeout" : "failed", (unsigned long)pcie_addr);
         return 0xFFFFFFFF;
     }
 
@@ -742,6 +747,7 @@ static Property cosim_properties[] = {
     DEFINE_PROP_STRING("remote_host", CosimPCIeRC, remote_host),
     DEFINE_PROP_UINT32("port_base", CosimPCIeRC, port_base, 9100),
     DEFINE_PROP_UINT32("instance_id", CosimPCIeRC, instance_id, 0),
+    DEFINE_PROP_UINT32("mmio_timeout_ms", CosimPCIeRC, mmio_timeout_ms, 180000),
     DEFINE_PROP_BOOL("debug", CosimPCIeRC, debug, false),
     DEFINE_PROP_END_OF_LIST(),
 };

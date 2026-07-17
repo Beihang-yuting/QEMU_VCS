@@ -59,6 +59,11 @@ struct CosimPCIeRC {
     uint32_t port_base;    /* TCP: port base (default 9100) */
     uint32_t instance_id;  /* TCP: instance ID (default 0) */
 
+    /* MMIO 读完成超时(ms): >0 时 BAR MMIO 读等 VCS completion 超时即返回
+     * 0xFFFFFFFF(设备视为无响应), guest 不再死等 -> 能启动到登录。0=禁用(永久阻塞,
+     * 旧行为)。默认 180000(3min)。-device cosim-pcie-rc,...,mmio_timeout_ms=N */
+    uint32_t mmio_timeout_ms;
+
     /* 运行时 debug 开关 -- -device cosim-pcie-rc,...,debug=on */
     bool debug;
 

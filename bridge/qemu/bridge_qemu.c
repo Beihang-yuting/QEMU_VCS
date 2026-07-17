@@ -142,6 +142,47 @@ int bridge_send_tlp_and_wait(bridge_ctx_t *ctx, tlp_entry_t *req, cpl_entry_t *c
     return ret;
 }
 
+int bridge_wait_completion_timed(bridge_ctx_t *ctx, uint16_t tag,
+                                 cpl_entry_t *cpl, int timeout_ms) {
+    /* SHM or a transport without timed recv → fall back to the blocking wait. */
+    if (!ctx->transport || !ctx->transport->recv_sync_timed)
+        return bridge_wait_completion(ctx, tag, cpl);
+
+    sync_msg_t msg;
+    int ret;
+    int drain_guard = 256;  /* bound stale-cpl drain (same as bridge_wait_completion) */
+    while (drain_guard-- > 0) {
+        ret = ctx->transport->recv_sync_timed(ctx->transport, &msg, timeout_ms);
+        if (ret == 1) return -2;   /* poll timeout: VCS did not answer within timeout_ms */
+        if (ret != 0) return -1;
+        if (msg.type != SYNC_MSG_CPL_READY) {
+            fprintf(stderr, "bridge_wait_completion_timed: unexpected msg type %d\n", msg.type);
+            return -1;
+        }
+        if (ctx->transport->recv_cpl(ctx->transport, cpl) < 0) {
+            fprintf(stderr, "bridge_wait_completion_timed: recv_cpl failed\n");
+            return -1;
+        }
+        if (ctx->trace_enabled) trace_log_cpl(&ctx->trace, cpl);
+        if (cpl->tag == tag) return 0;
+        /* stale cpl (prior fire-and-forget TLP) — drop and retry */
+    }
+    return -1;
+}
+
+int bridge_send_tlp_and_wait_timed(bridge_ctx_t *ctx, tlp_entry_t *req,
+                                   cpl_entry_t *cpl, int timeout_ms) {
+    pthread_mutex_lock(&ctx->tlp_mutex);
+    int ret = bridge_send_tlp(ctx, req);
+    if (ret < 0) {
+        pthread_mutex_unlock(&ctx->tlp_mutex);
+        return ret;
+    }
+    ret = bridge_wait_completion_timed(ctx, req->tag, cpl, timeout_ms);
+    pthread_mutex_unlock(&ctx->tlp_mutex);
+    return ret;
+}
+
 int bridge_send_tlp_fire(bridge_ctx_t *ctx, tlp_entry_t *req) {
     pthread_mutex_lock(&ctx->tlp_mutex);
     int ret = bridge_send_tlp(ctx, req);
