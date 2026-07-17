@@ -946,6 +946,93 @@ int bridge_vcs_dma_write_rc(int rc, unsigned long long host_addr,
     return -1;
 }
 
+/* DPI-C: Per-RC inbound AtomicOp — DUT/EP (requester) issues FetchAdd/Swap/CAS
+ * against Guest memory through RC slot `rc`; QEMU performs the RMW and returns
+ * the ORIGINAL value. Combines write_rc (send req + operands) with read_rc
+ * (recv old value + cpl).
+ *   op      ∈ {DMA_DIR_ATOMIC_FETCHADD=2, SWAP=3, CAS=4}
+ *   op_size ∈ {4, 8}  (memory datum size)
+ *   operands: FetchAdd/Swap → 1 operand (op_size B); CAS → compare‖swap
+ *             (2*op_size B), little-endian, packed in operands[] words.
+ *   old_out : receives the pre-op original value (op_size B).
+ * Blocks until SYNC_MSG_DMA_CPL. */
+int bridge_vcs_dma_atomic_rc(int rc, unsigned long long host_addr,
+                             int op, int op_size,
+                             const unsigned int *operands,
+                             unsigned int *old_out) {
+    if (!rc_ok(rc)) return -1;
+    if (op < DMA_DIR_ATOMIC_FETCHADD || op > DMA_DIR_ATOMIC_CAS) return -1;
+    if (op_size != 4 && op_size != 8) return -1;
+    cosim_transport_t *tr = g_rc[rc].transport;
+    if (!tr) return -1;
+
+    /* operand payload: CAS carries compare+swap (2x op_size), others 1x. */
+    uint32_t op_bytes = (op == DMA_DIR_ATOMIC_CAS)
+                        ? (uint32_t)(op_size * 2) : (uint32_t)op_size;
+
+    static uint32_t next_tag = 5000;
+    uint32_t tag = next_tag++;
+    dma_req_t req = {
+        .tag = tag,
+        .direction = (uint32_t)op,
+        .host_addr = host_addr,
+        .len = (uint32_t)op_size,   /* memory datum size (4/8) */
+        .dma_offset = 0,
+        .timestamp = 0,
+    };
+
+    if (tr->send_dma_req(tr, &req) < 0) {
+        fprintf(stderr, "[VCS Bridge] Atomic rc%d: send_dma_req failed\n", rc);
+        return -1;
+    }
+    /* operands ride in DMA_DATA (direction WRITE = device→host payload), mirrors
+     * bridge_vcs_dma_write_rc: send_dma_req MUST precede send_dma_data. */
+    if (tr->send_dma_data(tr, tag, DMA_DIR_WRITE, host_addr,
+                          (const uint8_t *)operands, op_bytes) < 0) {
+        fprintf(stderr, "[VCS Bridge] Atomic rc%d: send_dma_data failed\n", rc);
+        return -1;
+    }
+
+    for (int i = 0; i < 1000; i++) {
+        sync_msg_t msg;
+        if (tr->recv_sync(tr, &msg) < 0) {
+            fprintf(stderr, "[VCS Bridge] Atomic rc%d: recv_sync error\n", rc);
+            return -1;
+        }
+        if (msg.type == SYNC_MSG_SHUTDOWN) return -1;
+        if (msg.type == SYNC_MSG_TLP_READY) {
+            tlp_entry_t cached_tlp;
+            if (tr->recv_tlp(tr, &cached_tlp) == 0)
+                tlp_cache_push_ctx(&g_rc[rc], &cached_tlp);
+            continue;
+        }
+        if (msg.type == SYNC_MSG_DMA_CPL) {
+            /* QEMU returns ORIGINAL value: DMA_DATA (old) before DMA_CPL —
+             * read data first, then completion (order must match sender). */
+            uint32_t rx_tag, rx_dir, rx_len = (uint32_t)op_size;
+            uint64_t rx_addr;
+            uint8_t tmp_buf[64];
+            if (tr->recv_dma_data(tr, &rx_tag, &rx_dir, &rx_addr, tmp_buf, &rx_len) < 0) {
+                fprintf(stderr, "[VCS Bridge] Atomic rc%d: recv_dma_data failed\n", rc);
+                return -1;
+            }
+            dma_cpl_t cpl;
+            if (tr->recv_dma_cpl(tr, &cpl) < 0) return -1;
+            if (cpl.tag != tag || cpl.status != 0) {
+                fprintf(stderr, "[VCS Bridge] Atomic rc%d: cpl tag=%u status=%u (expected tag=%u)\n",
+                        rc, cpl.tag, cpl.status, tag);
+                return -1;
+            }
+            int words = (op_size + 3) / 4;
+            for (int w = 0; w < words && w < 2; w++)
+                memcpy(&old_out[w], tmp_buf + w * 4, 4);
+            return 0;
+        }
+    }
+    fprintf(stderr, "[VCS Bridge] Atomic rc%d: timeout\n", rc);
+    return -1;
+}
+
 /* DPI-C: VCS raises MSI interrupt */
 int bridge_vcs_raise_msi(int vector) {
     msi_event_t ev = { .requester_id = 0, .vector = (uint16_t)vector, .timestamp = 0 };

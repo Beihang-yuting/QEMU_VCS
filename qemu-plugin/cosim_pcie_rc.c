@@ -122,6 +122,46 @@ static void cosim_mmio_write(void *opaque, hwaddr addr, uint64_t val,
 
 /* ========== P2: DMA / MSI 回调 ========== */
 
+/* Inbound AtomicOp compute — PCIe AtomicOp operands are little-endian.
+ * dir ∈ {DMA_DIR_ATOMIC_FETCHADD/SWAP/CAS}; sz = op_size (4 or 8 bytes).
+ * ops: [operand] for FetchAdd/Swap, [compare‖swap] for CAS.
+ * Writes the new value into newv (sz bytes); *do_write=0 iff CAS mismatched
+ * (memory then stays unchanged, but the ORIGINAL value is still returned). */
+static void cosim_atomic_compute(uint32_t dir, uint32_t sz,
+                                 const uint8_t *oldv, const uint8_t *ops,
+                                 uint8_t *newv, int *do_write)
+{
+    uint64_t o = 0, a = 0;
+    for (uint32_t i = 0; i < sz; i++) {
+        o |= (uint64_t)oldv[i] << (8 * i);
+        a |= (uint64_t)ops[i]  << (8 * i);   /* first operand: add/swap/compare */
+    }
+    uint64_t n = o;
+    *do_write = 1;
+    switch (dir) {
+    case DMA_DIR_ATOMIC_FETCHADD:
+        n = o + a;
+        break;
+    case DMA_DIR_ATOMIC_SWAP:
+        n = a;
+        break;
+    case DMA_DIR_ATOMIC_CAS: {
+        uint64_t swp = 0;
+        for (uint32_t i = 0; i < sz; i++)
+            swp |= (uint64_t)ops[sz + i] << (8 * i);  /* second operand: swap */
+        if (o == a) n = swp;         /* compare matched → store swap */
+        else        *do_write = 0;   /* mismatch → leave memory unchanged */
+        break;
+    }
+    default:
+        *do_write = 0;
+        break;
+    }
+    if (sz == 4) n &= 0xFFFFFFFFull;  /* 32-bit AtomicOp wraps mod 2^32 */
+    for (uint32_t i = 0; i < sz; i++)
+        newv[i] = (uint8_t)(n >> (8 * i));
+}
+
 /* DMA 请求回调：从 VCS 收到 DMA 请求 —
  *   direction=WRITE 表示设备→Host 写 (DMA write to guest memory)
  *   direction=READ  表示 Host→设备 读 (DMA read from guest memory)
@@ -132,6 +172,37 @@ static void cosim_dma_cb(const dma_req_t *req, void *user)
     bridge_ctx_t *ctx = (bridge_ctx_t *)s->bridge_ctx;
 
     if (ctx->transport) {
+        if (DMA_DIR_IS_ATOMIC(req->direction)) {
+            /* Inbound AtomicOp (EP requester): operand(s) arrive via DMA_DATA
+             * (like a write); RMW guest RAM and return the ORIGINAL value via
+             * DMA_DATA+DMA_CPL (like a read). The single poller thread serializes
+             * this RMW w.r.t. other device DMA. req->len carries op_size (4/8). */
+            uint32_t rtag, rdir, oplen = sizeof(((tlp_entry_t *)0)->data);
+            uint64_t raddr;
+            uint8_t opbuf[COSIM_TLP_DATA_SIZE];
+            int ret = ctx->transport->recv_dma_data(ctx->transport, &rtag, &rdir,
+                                                     &raddr, opbuf, &oplen);
+            uint32_t sz = req->len;
+            if (ret < 0 || (sz != 4 && sz != 8)) {
+                qemu_log("cosim: AtomicOp bad (ret=%d sz=%u) tag=%u\n", ret, sz, req->tag);
+                bridge_complete_dma(ctx, req->tag, 1);
+                return;
+            }
+            uint8_t oldv[8] = {0}, newv[8] = {0};
+            int do_write = 0;
+            pci_dma_read(PCI_DEVICE(s), req->host_addr, oldv, sz);
+            cosim_atomic_compute(req->direction, sz, oldv, opbuf, newv, &do_write);
+            if (do_write)
+                pci_dma_write(PCI_DEVICE(s), req->host_addr, newv, sz);
+            bridge_complete_dma_with_data(ctx, req->tag, 0, DMA_DIR_READ,
+                                          req->host_addr, oldv, sz);
+            uint64_t old_u64 = 0;
+            for (uint32_t i = 0; i < sz; i++) old_u64 |= (uint64_t)oldv[i] << (8 * i);
+            qemu_log("cosim: AtomicOp dir=%u GPA=0x%lx sz=%u old=0x%llx wrote=%d tag=%u (TCP)\n",
+                     req->direction, (unsigned long)req->host_addr, sz,
+                     (unsigned long long)old_u64, do_write, req->tag);
+            return;
+        }
         /* TCP mode: no shared dma_buf, must transfer data via network */
         if (req->direction == DMA_DIR_WRITE) {
             /* Device→Host: VCS sends data via DMA_DATA, we write to guest RAM.
@@ -167,12 +238,30 @@ static void cosim_dma_cb(const dma_req_t *req, void *user)
     } else {
         /* SHM mode: data is in shared dma_buf */
         uint8_t *dma_buf = (uint8_t *)ctx->shm.dma_buf + req->dma_offset;
-        if (req->direction == DMA_DIR_WRITE) {
-            cpu_physical_memory_write(req->host_addr, dma_buf, req->len);
+        if (DMA_DIR_IS_ATOMIC(req->direction)) {
+            /* Operand(s) sit in dma_buf; RMW guest RAM, write ORIGINAL value
+             * back into dma_buf for the requester to read. */
+            uint32_t sz = req->len, status = 0;
+            if (sz == 4 || sz == 8) {
+                uint8_t oldv[8] = {0}, newv[8] = {0};
+                int do_write = 0;
+                pci_dma_read(PCI_DEVICE(s), req->host_addr, oldv, sz);
+                cosim_atomic_compute(req->direction, sz, oldv, dma_buf, newv, &do_write);
+                if (do_write)
+                    pci_dma_write(PCI_DEVICE(s), req->host_addr, newv, sz);
+                memcpy(dma_buf, oldv, sz);
+            } else {
+                status = 1;
+            }
+            bridge_complete_dma(ctx, req->tag, status);
         } else {
-            cpu_physical_memory_read(req->host_addr, dma_buf, req->len);
+            if (req->direction == DMA_DIR_WRITE) {
+                cpu_physical_memory_write(req->host_addr, dma_buf, req->len);
+            } else {
+                cpu_physical_memory_read(req->host_addr, dma_buf, req->len);
+            }
+            bridge_complete_dma(ctx, req->tag, 0);
         }
-        bridge_complete_dma(ctx, req->tag, 0);
     }
 
     qemu_log("cosim: DMA %s OK GPA=0x%lx len=%u tag=%u (%s)\n",

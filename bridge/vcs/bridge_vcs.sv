@@ -223,4 +223,13 @@ package cosim_bridge_pkg;
     import "DPI-C" function int bridge_vcs_dma_write_rc(input int rc, input longint unsigned host_addr,
                                                         input int unsigned data[16], input int len);
 
+    /* DUT 入向 AtomicOp：per-RC FetchAdd/Swap/CAS（DUT requester，host RMW 返旧值）。
+     * op ∈ {2=FETCHADD,3=SWAP,4=CAS}；op_size ∈ {4,8}。
+     * operands[4]: FA/Swap 用 1 个 datum；CAS 用 compare‖swap（低位在前）。
+     * old_out[2]: 返回运算前的原值。 */
+    import "DPI-C" function int bridge_vcs_dma_atomic_rc(input int rc, input longint unsigned host_addr,
+                                                         input int op, input int op_size,
+                                                         input int unsigned operands[4],
+                                                         output int unsigned old_out[2]);
+
 endpackage

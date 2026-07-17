@@ -114,7 +114,18 @@ _Static_assert(sizeof(cpl_entry_t) == 84, "cpl_entry_t must be 84 bytes");
 typedef enum {
     DMA_DIR_READ  = 0,
     DMA_DIR_WRITE = 1,
+    /* Inbound AtomicOp (DUT/EP requester → Host completer). Operand(s) ride in
+     * DMA_DATA (like a write): FetchAdd/Swap = 1 operand (op_size B), CAS =
+     * compare‖swap (2*op_size B). dma_req_t.len carries op_size (4 or 8). The
+     * host RMW returns the ORIGINAL value via DMA_DATA+DMA_CPL (like a read).
+     * Values 2..4 are additive — struct layout/ABI unchanged. */
+    DMA_DIR_ATOMIC_FETCHADD = 2,
+    DMA_DIR_ATOMIC_SWAP     = 3,
+    DMA_DIR_ATOMIC_CAS      = 4,
 } dma_direction_t;
+
+#define DMA_DIR_IS_ATOMIC(d) \
+    ((d) >= DMA_DIR_ATOMIC_FETCHADD && (d) <= DMA_DIR_ATOMIC_CAS)
 
 typedef struct {
     uint16_t requester_id;    /* PCIe BDF of DMA initiator (P3: multi-function) */
