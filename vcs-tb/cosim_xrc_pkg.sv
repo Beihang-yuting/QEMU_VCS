@@ -11,6 +11,9 @@ package cosim_xrc_pkg;
     import pcie_tl_pkg::*;
     import xilinx_pcie_adapter_pkg::*;
     import cosim_bridge_pkg::*;
+`ifdef AIP_CORE_PKG_SV
+    import aip_core_pkg::*;           // aip_cmd + aip_cmd_1i 宏(UCLI start_cosim 注册)
+`endif
     `include "uvm_macros.svh"
 
     `include "cosim_xrc_driver.sv"    // cosim_xrc_driver  extends pcie_tl_rc_driver

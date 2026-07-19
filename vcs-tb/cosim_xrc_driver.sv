@@ -53,6 +53,13 @@ class cosim_xrc_driver extends pcie_tl_rc_driver;
     event shutdown_event;
     int   polling_interval_ns = 10;
 
+    // ---- 两阶段切换控制(cosim 替换 VIP 的运行时开关)----
+    //   阶段1: VIP 主导(super.run_phase 驱动真实 DUT)。
+    //   UCLI 敲 start_cosim -> notify_start -> drain -> 阶段2 连 QEMU, QEMU 主导。
+    static cosim_xrc_driver s_registry[$];   // 全实例表, 供 UCLI 入口广播触发
+    bit   cosim_active = 0;                  // 0=VIP阶段, 1=QEMU主导(rx_loop 分流依据)
+    event start_cosim_ev;                    // UCLI notify_start 触发切换
+
     // ---- Stats ----
     int unsigned total_tlp_count;
     int unsigned total_cpl_count;
@@ -77,6 +84,7 @@ class cosim_xrc_driver extends pcie_tl_rc_driver;
             rc_index = parse_rc_index_from_name(get_full_name());
 
         config_proxy = pcie_tl_config_proxy::type_id::create("config_proxy", this);
+        s_registry.push_back(this);   // 注册实例, 供 UCLI notify_start 广播
 
         `uvm_info(get_name(), $sformatf("cosim_xrc_driver bound to RC index %0d", rc_index),
                   UVM_LOW)
@@ -106,6 +114,17 @@ class cosim_xrc_driver extends pcie_tl_rc_driver;
     endfunction
 
     // -----------------------------------------------------------------------
+    // UCLI 触发入口(供 aip_cmd 命令壳调用)。rc<0 = 全部 RC; 否则只切指定 RC。
+    // 广播 start_cosim_ev, 各 driver run_phase 从阶段1(VIP)切阶段2(QEMU)。
+    // 与 aip 解耦: aip 命令壳只需 new + cmd_exec 调本函数, driver 侧零 aip 依赖。
+    // -----------------------------------------------------------------------
+    static function void notify_start(int rc = -1);
+        foreach (s_registry[i])
+            if (rc < 0 || s_registry[i].rc_index == rc)
+                -> s_registry[i].start_cosim_ev;
+    endfunction
+
+    // -----------------------------------------------------------------------
     // 自初始化开关。默认 1:driver 自己连 QEMU(读 +REMOTE_HOST/+PORT_BASE),
     // 无需外部 test 调 init —— 这样集成进现有环境只要一行工厂 override。
     // 若某 test 想自己管 init,先设 bridge_ready=1 即跳过。
@@ -113,20 +132,44 @@ class cosim_xrc_driver extends pcie_tl_rc_driver;
     bit self_init_bridge_en = 1;
 
     // -----------------------------------------------------------------------
-    // run_phase: 自 init bridge(可选) + 两个 loop。NO super.run_phase。
+    // run_phase: 两阶段 ——
+    //   阶段1  VIP 主导: super.run_phase 的 get_next_item/send_tlp 驱动真实 DUT。
+    //   触发   UCLI 敲 start_cosim -> notify_start -> start_cosim_ev。
+    //   drain  停发 VIP + 等 in-flight completion 收干净(rx_loop 走 VIP 路径)。
+    //   阶段2  连 QEMU, cosim_active=1, request_loop 由 QEMU 主导发包。
+    // rx_loop 全程运行, 按 cosim_active 分流 DUT 回来的 completion。
     // -----------------------------------------------------------------------
     virtual task run_phase(uvm_phase phase);
-        phase.raise_objection(this, "cosim_xrc_driver running");
-        `uvm_info(get_name(), $sformatf("run_phase started (RC%0d, DPI polling)", rc_index),
-                  UVM_MEDIUM)
+        // 全程 hold objection: 交互式 cosim 期望"不敲 start_cosim 就一直跑等你",
+        // 结束由 UCLI finish 或 request_loop shutdown 决定。
+        phase.raise_objection(this, "cosim_xrc_driver holding run");
+        `uvm_info(get_name(), $sformatf("run_phase started (RC%0d)", rc_index), UVM_MEDIUM)
 
+        // rx_loop 全程跑: 阶段1 收 DUT cpl 回 VIP, 阶段2 回 QEMU
+        fork
+            rx_loop(phase);
+        join_none
+
+        // ---- 阶段1: VIP 主导, 等 UCLI 触发 ----
+        if (!bridge_ready) begin
+            fork : vip_stage
+                super.run_phase(phase);   // 基类 forever get_next_item/send_tlp/item_done
+            join_none
+
+            @start_cosim_ev;              // UCLI notify_start 触发
+            `uvm_info(get_name(), $sformatf("RC%0d start_cosim: stop VIP, draining", rc_index),
+                      UVM_LOW)
+            disable vip_stage;                    // 停止 VIP 发新包
+            wait (get_pending_count() == 0);      // drain: rx_loop 收干净 in-flight cpl
+            `uvm_info(get_name(), $sformatf("RC%0d drained, switch to QEMU", rc_index),
+                      UVM_LOW)
+        end
+
+        // ---- 阶段2: 连 QEMU + QEMU 主导 ----
         if (self_init_bridge_en && !bridge_ready)
             self_init_bridge();
-
-        fork
-            request_loop(phase);
-            rx_loop(phase);
-        join
+        cosim_active = 1;                 // rx_loop 切到 forward_to_qemu
+        request_loop(phase);              // QEMU poll → DUT, 阻塞直到 shutdown
 
         bridge_vcs_cleanup_ex_rc(rc_index);
         phase.drop_objection(this, "cosim_xrc_driver done");
@@ -242,7 +285,7 @@ class cosim_xrc_driver extends pcie_tl_rc_driver;
         pcie_tl_tlp     rx_tlp;
         pcie_tl_cpl_tlp cpl;
 
-        wait (bridge_ready);
+        // 全程运行(不再 wait bridge_ready): 阶段1 就要收 DUT 的 CplD。
         forever begin
             adapter.receive(rx_tlp);   // xilinx adapter: non-blocking, null if empty
             if (rx_tlp == null) begin
@@ -251,7 +294,10 @@ class cosim_xrc_driver extends pcie_tl_rc_driver;
             end
 
             if ($cast(cpl, rx_tlp)) begin
-                forward_completion_to_qemu(cpl);
+                if (cosim_active)
+                    forward_completion_to_qemu(cpl);      // 阶段2: VIP tag→QEMU tag, 回 QEMU
+                else
+                    void'(super.handle_completion(cpl));  // 阶段1: VIP tag_mgr 匹配+释放, 回 sequence
             end else begin
                 // DUT-initiated request (DMA MRd/MWr). MMIO-first scope: log only.
                 inbound_req_count++;
@@ -372,5 +418,16 @@ class cosim_xrc_driver extends pcie_tl_rc_driver;
     endfunction
 
 endclass
+
+// -----------------------------------------------------------------------
+// UCLI 命令注册(aip_core): start_cosim [rc=<n>] -> notify_start。
+//   start_cosim         全部 RC        start_cosim rc=0   只切 RC0
+// 宏内 static __inst 自动注册, 无需 initial。
+// AIP_CORE_PKG_SV 由 aip_core_pkg.sv 定义 —— 编了 aip(filelist 中 aip 在前)
+// 才启用本段; 未集成时天然跳过, driver 两阶段逻辑不受影响(仅无 UCLI 命令)。
+// -----------------------------------------------------------------------
+`ifdef AIP_CORE_PKG_SV
+`aip_cmd_1i(start_cosim, cosim_xrc_driver::notify_start, int, rc, -1)
+`endif
 
 `endif // COSIM_XRC_DRIVER_SV
