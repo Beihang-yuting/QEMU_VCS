@@ -60,6 +60,10 @@ class cosim_xrc_driver extends pcie_tl_rc_driver;
     bit   cosim_active = 0;                  // 0=VIP阶段, 1=QEMU主导(rx_loop 分流依据)
     event start_cosim_ev;                    // UCLI notify_start 触发切换
 
+    // rx_loop 的 completion 来源: 订阅本 agent monitor 的 tlp_ap(CC/RX: DUT->RC),
+    // 不与 monitor 争抢同一 adapter rx_queue(否则 monitor 抢走 cpl 不释放 tag -> 超时)。
+    uvm_tlm_analysis_fifo #(pcie_tl_tlp) m_rx_fifo;
+
     // ---- Stats ----
     int unsigned total_tlp_count;
     int unsigned total_cpl_count;
@@ -85,9 +89,25 @@ class cosim_xrc_driver extends pcie_tl_rc_driver;
 
         config_proxy = pcie_tl_config_proxy::type_id::create("config_proxy", this);
         s_registry.push_back(this);   // 注册实例, 供 UCLI notify_start 广播
+        m_rx_fifo = new("m_rx_fifo", this);
 
         `uvm_info(get_name(), $sformatf("cosim_xrc_driver bound to RC index %0d", rc_index),
                   UVM_LOW)
+    endfunction
+
+    // -----------------------------------------------------------------------
+    // connect_phase: 把本 agent monitor 的 tlp_ap(CC/RX: DUT->RC 的 TLP)接到
+    //   m_rx_fifo。rx_loop 从 fifo 取, 让 monitor 当 adapter rx_queue 唯一消费者,
+    //   消除 monitor/driver 争抢导致的 completion 丢失(tag 不释放 -> 超时)。
+    // -----------------------------------------------------------------------
+    virtual function void connect_phase(uvm_phase phase);
+        pcie_tl_base_agent ag;
+        super.connect_phase(phase);
+        if ($cast(ag, get_parent()) && ag.monitor != null)
+            ag.monitor.tlp_ap.connect(m_rx_fifo.analysis_export);
+        else
+            `uvm_fatal(get_name(),
+                "cosim_xrc_driver: 无法连接 monitor.tlp_ap(parent 非 pcie_tl_base_agent 或 monitor 为空)")
     endfunction
 
     // Parse "...rc_agent_<N>..." -> N ; returns 0 if not found.
@@ -285,13 +305,9 @@ class cosim_xrc_driver extends pcie_tl_rc_driver;
         pcie_tl_tlp     rx_tlp;
         pcie_tl_cpl_tlp cpl;
 
-        // 全程运行(不再 wait bridge_ready): 阶段1 就要收 DUT 的 CplD。
+        // 从 monitor.tlp_ap 订阅(阻塞 get), 不抢 adapter rx_queue。阶段1 就要收 CplD。
         forever begin
-            adapter.receive(rx_tlp);   // xilinx adapter: non-blocking, null if empty
-            if (rx_tlp == null) begin
-                #(polling_interval_ns * 1ns);
-                continue;
-            end
+            m_rx_fifo.get(rx_tlp);   // 阻塞: 有 TLP(CC/RX)才返回, 永不为 null
 
             if ($cast(cpl, rx_tlp)) begin
                 if (cosim_active)
