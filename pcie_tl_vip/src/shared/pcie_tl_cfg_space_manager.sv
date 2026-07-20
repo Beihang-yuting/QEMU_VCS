@@ -97,6 +97,56 @@ class pcie_tl_cfg_space_manager extends uvm_object;
     endfunction
 
     //=========================================================================
+    // Initialize Type 1 Configuration Header (PCI-to-PCI bridge / switch / port)
+    //   与 Type 0 布局不同: 只有 BAR0-1, 之后是 bus number + bridge windows。
+    //=========================================================================
+    function void init_type1_header(
+        bit [15:0] vendor_id       = 16'hABCD,
+        bit [15:0] device_id       = 16'h1234,
+        bit [7:0]  revision_id     = 8'h01,
+        bit [7:0]  primary_bus     = 8'h00,
+        bit [7:0]  secondary_bus   = 8'h01,
+        bit [7:0]  subordinate_bus = 8'h01
+    );
+        foreach (cfg_space[i]) cfg_space[i] = 0;
+
+        // Vendor/Device ID (00h/02h) - RO
+        cfg_space[0] = vendor_id[7:0];   cfg_space[1] = vendor_id[15:8];
+        cfg_space[2] = device_id[7:0];   cfg_space[3] = device_id[15:8];
+        field_attrs[0] = CFG_FIELD_RO; field_attrs[1] = CFG_FIELD_RO;
+        field_attrs[2] = CFG_FIELD_RO; field_attrs[3] = CFG_FIELD_RO;
+
+        // Status (06h) - RW1C
+        field_attrs[6] = CFG_FIELD_RW1C; field_attrs[7] = CFG_FIELD_RW1C;
+
+        // Revision ID (08h) - RO
+        cfg_space[8] = revision_id;      field_attrs[8] = CFG_FIELD_RO;
+
+        // Class Code (09h-0Bh) = 0x060400 (PCI-to-PCI bridge) - RO
+        cfg_space[9]  = 8'h00;  // prog-if
+        cfg_space[10] = 8'h04;  // sub-class = PCI-to-PCI
+        cfg_space[11] = 8'h06;  // base-class = bridge
+        field_attrs[9] = CFG_FIELD_RO; field_attrs[10] = CFG_FIELD_RO; field_attrs[11] = CFG_FIELD_RO;
+
+        // Header Type (0Eh) = 0x01 (bridge) - RO
+        cfg_space[14] = 8'h01;           field_attrs[14] = CFG_FIELD_RO;
+
+        // BAR0/BAR1 (10h-17h) - RW (Type1 仅 2 个 BAR)
+
+        // Primary/Secondary/Subordinate Bus Number (18h/19h/1Ah) - RW
+        cfg_space[24] = primary_bus;
+        cfg_space[25] = secondary_bus;
+        cfg_space[26] = subordinate_bus;
+
+        // IO/Memory/Prefetch windows (1Ch-33h) - RW, 由 OS 分配, 默认 0
+        // Capabilities Pointer (34h) - RO
+        field_attrs[52] = CFG_FIELD_RO;
+
+        // Interrupt Pin (3Dh) - RO ; Bridge Control (3Eh) - RW
+        field_attrs[61] = CFG_FIELD_RO;
+    endfunction
+
+    //=========================================================================
     // Register a standard capability
     //=========================================================================
     function void register_capability(pcie_capability cap);

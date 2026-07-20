@@ -43,6 +43,12 @@ class pcie_tl_func_context extends uvm_object;
     //--- Bus Master Enable (mirrors Command register bit 2) ---
     bit        bus_master_en;
 
+    //--- Bridge (Type 1) support: 该 context 是桥则置位 + bus number 窗口 ---
+    bit        is_bridge;
+    bit [7:0]  primary_bus;
+    bit [7:0]  secondary_bus;
+    bit [7:0]  subordinate_bus;
+
     function new(string name = "pcie_tl_func_context");
         super.new(name);
         vf_index      = -1;
@@ -64,9 +70,18 @@ class pcie_tl_func_context extends uvm_object;
     );
         cfg_mgr = pcie_tl_cfg_space_manager::type_id::create(
             $sformatf("cfg_mgr_bdf%04h", bdf));
-        cfg_mgr.init_type0_header(vendor_id, device_id, .header_type(header_type));
-        cfg_mgr.init_pcie_capability();
-        cfg_mgr.init_pm_capability();
+        if (is_bridge) begin
+            // Type 1 (bridge/switch): bus number 窗口由本 context 携带
+            cfg_mgr.init_type1_header(vendor_id, device_id,
+                .primary_bus(primary_bus), .secondary_bus(secondary_bus),
+                .subordinate_bus(subordinate_bus));
+            cfg_mgr.init_pcie_capability();  // TODO: bridge 的 PCIe cap port type(switch/root)细化
+        end else begin
+            // Type 0 (endpoint)
+            cfg_mgr.init_type0_header(vendor_id, device_id, .header_type(header_type));
+            cfg_mgr.init_pcie_capability();
+            cfg_mgr.init_pm_capability();
+        end
     endfunction
 
 endclass

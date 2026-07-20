@@ -97,15 +97,16 @@ class cosim_xrc_driver extends pcie_tl_rc_driver;
         // 统一 config space: 建 func_mgr(num_pfs=1 即单func), 走 _bdf 应答 QEMU 枚举。
         // plusarg 可配: +NUM_PFS +MAX_VFS +NUM_VFS +VENDOR_ID +DEVICE_ID +VF_DEVICE_ID
         begin
-            int n_pfs, max_vfs, n_vfs, ven, dev, vfdev;
+            int n_pfs, max_vfs, n_vfs, ven, dev, vfdev, topo;
             if (!$value$plusargs("NUM_PFS=%d", n_pfs))      n_pfs   = 1;
             if (!$value$plusargs("MAX_VFS=%d", max_vfs))    max_vfs = 0;
             if (!$value$plusargs("NUM_VFS=%d", n_vfs))      n_vfs   = 0;
+            if (!$value$plusargs("TOPO=%d", topo))          topo    = 0;  // 0=ep_direct 1=switch 2=multi_layer
             if (!$value$plusargs("VENDOR_ID=%h", ven))      ven     = 32'h1AF4;
             if (!$value$plusargs("DEVICE_ID=%h", dev))      dev     = 32'h1041;
             if (!$value$plusargs("VF_DEVICE_ID=%h", vfdev)) vfdev   = 32'h1041;
             func_mgr = pcie_tl_func_manager::type_id::create("func_mgr");
-            func_mgr.build(n_pfs, max_vfs, ven[15:0], dev[15:0], vfdev[15:0]);
+            func_mgr.build_topology(topo, n_pfs, max_vfs, ven[15:0], dev[15:0], vfdev[15:0]);
             config_proxy.func_mgr            = func_mgr;
             config_proxy.multi_function_mode = 1;
             config_proxy.bypass_enable       = 1;   // SV 应答 config 枚举, 不下 DUT
