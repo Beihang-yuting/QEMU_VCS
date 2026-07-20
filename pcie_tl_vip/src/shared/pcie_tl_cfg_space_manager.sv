@@ -319,23 +319,60 @@ class pcie_tl_cfg_space_manager extends uvm_object;
         pcie_cap = pcie_capability::type_id::create("pcie_cap");
         pcie_cap.cap_id = CAP_ID_PCIE;
         pcie_cap.offset = cap_offset;
-        pcie_cap.data = new[10];
-        pcie_cap.data[0] = 8'h02;  // PCIe Caps: version=2, type=EP
+        // 完整 PCIe Express Capability v2 (EP): 结构 0x00..0x33 (52B)。
+        // data[] 从 cap+0x02 起 = 50 字节。驱动按固定偏移读 Device Cap2(0x24),
+        // 结构必须够长否则读到 0。
+        pcie_cap.data = new[50];
+        foreach (pcie_cap.data[i]) pcie_cap.data[i] = 8'h00;
+
+        // +0x02 PCI Express Capabilities: version=2, device type=EP(0)
+        pcie_cap.data[0] = 8'h02;
         pcie_cap.data[1] = 8'h00;
+        // +0x04 Device Capabilities: MPS (data[2..5])
         pcie_cap.data[2] = dev_cap[7:0];
         pcie_cap.data[3] = dev_cap[15:8];
         pcie_cap.data[4] = dev_cap[23:16];
         pcie_cap.data[5] = dev_cap[31:24];
+        // +0x08 Device Control: MPS/MRRS/RCB (data[6..7])
         pcie_cap.data[6] = dev_ctrl[7:0];
         pcie_cap.data[7] = dev_ctrl[15:8];
-        pcie_cap.data[8] = dev_ctrl[23:16];
-        pcie_cap.data[9] = dev_ctrl[31:24];
+        // +0x0A Device Status = 0 (data[8..9])
+        // +0x0C Link Capabilities: max speed=1(2.5GT/s), max width=x1 占位, 让驱动读 link 不崩
+        pcie_cap.data[10] = 8'h11;   // [3:0]=speed=1, [9:4]=width=1
+        // +0x10 Link Control = 0 (data[14..15])
+        // +0x12 Link Status: current speed=1, width=1 (data[16..17])
+        pcie_cap.data[16] = 8'h11;
+        // +0x14..0x23 Slot/Root (EP 不适用, 全 0: data[18..33])
+        // +0x24 Device Capabilities 2: bit5 = ARI Forwarding Supported (data[34..37])
+        pcie_cap.data[34] = 8'h20;
+        // +0x28 Device Control 2 = 0 (data[38..39]); guest 写 bit5=ARI Forwarding Enable
+        // +0x2C Link Cap2 (data[42..45]); +0x30 Link Ctrl2 (46..47); +0x32 Link Stat2 (48..49)
 
         register_capability(pcie_cap);
 
-        // Device Capabilities = RO
-        for (int i = 0; i < 4; i++)
-            field_attrs[cap_offset + 4 + i] = CFG_FIELD_RO;
+        // Device Capabilities / Device Cap2 / Link Capabilities = RO
+        for (int i = 0; i < 4; i++) begin
+            field_attrs[cap_offset + 4  + i] = CFG_FIELD_RO;  // Device Cap  (+0x04)
+            field_attrs[cap_offset + 12 + i] = CFG_FIELD_RO;  // Link Cap    (+0x0C)
+            field_attrs[cap_offset + 36 + i] = CFG_FIELD_RO;  // Device Cap2 (+0x24)
+        end
+    endfunction
+
+    //=========================================================================
+    // Initialize Power Management Capability (cap id 0x01)
+    //   放在 PCIe cap(默认 0x40,占 0x40..0x73)之后, 避免重叠。
+    //=========================================================================
+    function void init_pm_capability(bit [7:0] cap_offset = 8'h80);
+        pcie_capability pm_cap;
+        pm_cap = pcie_capability::type_id::create("pm_cap");
+        pm_cap.cap_id = CAP_ID_PM;   // 0x01
+        pm_cap.offset = cap_offset;
+        pm_cap.data = new[4];
+        pm_cap.data[0] = 8'h03;      // PMC: version=3 (PCI PM 1.2)
+        pm_cap.data[1] = 8'h00;
+        pm_cap.data[2] = 8'h00;      // PMCSR: PowerState=D0
+        pm_cap.data[3] = 8'h00;
+        register_capability(pm_cap);
     endfunction
 
     //=========================================================================

@@ -66,6 +66,7 @@ class pcie_tl_func_context extends uvm_object;
             $sformatf("cfg_mgr_bdf%04h", bdf));
         cfg_mgr.init_type0_header(vendor_id, device_id, .header_type(header_type));
         cfg_mgr.init_pcie_capability();
+        cfg_mgr.init_pm_capability();
     endfunction
 
 endclass
@@ -137,20 +138,51 @@ class pcie_tl_func_manager extends uvm_object;
             pf_ctx[pf].bdf      = pf_bdf;
             pf_ctx[pf].is_vf    = 0;
             pf_ctx[pf].enabled  = 1;
-            pf_ctx[pf].init_cfg_space(vendor_id, device_id);
+            // 多 PF 时置 Header Type multi-function bit(0x80), 否则 OS 只扫 function 0
+            pf_ctx[pf].init_cfg_space(vendor_id, device_id,
+                                      .header_type((num_pfs > 1) ? 8'h80 : 8'h00));
 
             // Register PF in BDF lookup table
             bdf_lut[pf_bdf] = pf_ctx[pf];
 
-            // Create SR-IOV extended capability for this PF
+            // ARI Extended Capability (0x000E): extended cap 链头必须在 0x100,
+            // 否则 OS 从 0x100 见空即止, SR-IOV(@0x200)永远发现不了。
+            // 且多 VF(function# > 7)路由依赖 ARI。先注册 ARI(占 0x100)再链到 SR-IOV。
+            begin
+                pcie_ext_capability ari_cap = pcie_ext_capability::type_id::create(
+                    $sformatf("ari_cap_%0d", pf));
+                ari_cap.cap_id  = EXT_CAP_ID_ARI;
+                ari_cap.cap_ver = 4'h1;
+                ari_cap.data    = new[4];   // ARI Cap Reg(next func=0) + ARI Control=0
+                foreach (ari_cap.data[i]) ari_cap.data[i] = 8'h00;
+                pf_ctx[pf].cfg_mgr.register_ext_capability(ari_cap);  // 首个 -> 0x100
+            end
+
+            // Create SR-IOV extended capability for this PF (链在 ARI 之后 @0x200)
             sriov_caps[pf] = pcie_tl_sriov_cap::type_id::create(
                 $sformatf("sriov_cap_%0d", pf));
-            sriov_caps[pf].pf_bdf       = pf_bdf;
-            sriov_caps[pf].total_vfs    = max_vfs_per_pf;
-            sriov_caps[pf].vf_device_id = vf_dev_id;
-            sriov_caps[pf].offset       = 12'h200;
+            sriov_caps[pf].pf_bdf                = pf_bdf;
+            sriov_caps[pf].total_vfs             = max_vfs_per_pf;
+            sriov_caps[pf].initial_vfs           = max_vfs_per_pf;  // InitialVFs = TotalVFs
+            sriov_caps[pf].vf_device_id          = vf_dev_id;
+            sriov_caps[pf].ari_capable_hierarchy = 1;               // 多 VF 需 ARI capable
+            sriov_caps[pf].vf_bar_size[0]        = 64 * 1024;       // VF BAR0 默认 64KB(sizing 用)
+            sriov_caps[pf].offset                = 12'h200;
             sriov_caps[pf].build_data();
             pf_ctx[pf].cfg_mgr.register_ext_capability(sriov_caps[pf]);
+
+            // AER Extended Capability (0x0001) stub —— 链在 SR-IOV 之后 @0x300。
+            // 错误寄存器全 0(无错误), 让 OS AER 服务能遍历到而不崩。
+            begin
+                pcie_ext_capability aer_cap = pcie_ext_capability::type_id::create(
+                    $sformatf("aer_cap_%0d", pf));
+                aer_cap.cap_id  = EXT_CAP_ID_AER;
+                aer_cap.cap_ver = 4'h2;
+                aer_cap.offset  = 12'h300;
+                aer_cap.data    = new[64];
+                foreach (aer_cap.data[i]) aer_cap.data[i] = 8'h00;
+                pf_ctx[pf].cfg_mgr.register_ext_capability(aer_cap);
+            end
 
             // Pre-allocate VF contexts (disabled by default)
             vf_ctx[pf] = new[max_vfs_per_pf];

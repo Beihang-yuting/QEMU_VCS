@@ -37,6 +37,9 @@ class cosim_xrc_driver extends pcie_tl_rc_driver;
     // ---- Config-space bypass proxy (answers enumeration in SV) ----
     pcie_tl_config_proxy config_proxy;
 
+    // ---- 统一 config space: func_mgr(num_pfs=1 即单func, 多func/SR-IOV 同一套)----
+    pcie_tl_func_manager func_mgr;
+
     // ---- Tag mapping: QEMU 8-bit tag <-> VIP tag ----
     bit [9:0] vip_tag_to_qemu_tag[int];        // 10-bit QEMU tag (extended tag)
     int       qemu_tag_to_vip_tag[bit [9:0]];
@@ -90,6 +93,27 @@ class cosim_xrc_driver extends pcie_tl_rc_driver;
         config_proxy = pcie_tl_config_proxy::type_id::create("config_proxy", this);
         s_registry.push_back(this);   // 注册实例, 供 UCLI notify_start 广播
         m_rx_fifo = new("m_rx_fifo", this);
+
+        // 统一 config space: 建 func_mgr(num_pfs=1 即单func), 走 _bdf 应答 QEMU 枚举。
+        // plusarg 可配: +NUM_PFS +MAX_VFS +NUM_VFS +VENDOR_ID +DEVICE_ID +VF_DEVICE_ID
+        begin
+            int n_pfs, max_vfs, n_vfs, ven, dev, vfdev;
+            if (!$value$plusargs("NUM_PFS=%d", n_pfs))      n_pfs   = 1;
+            if (!$value$plusargs("MAX_VFS=%d", max_vfs))    max_vfs = 0;
+            if (!$value$plusargs("NUM_VFS=%d", n_vfs))      n_vfs   = 0;
+            if (!$value$plusargs("VENDOR_ID=%h", ven))      ven     = 32'h1AF4;
+            if (!$value$plusargs("DEVICE_ID=%h", dev))      dev     = 32'h1041;
+            if (!$value$plusargs("VF_DEVICE_ID=%h", vfdev)) vfdev   = 32'h1041;
+            func_mgr = pcie_tl_func_manager::type_id::create("func_mgr");
+            func_mgr.build(n_pfs, max_vfs, ven[15:0], dev[15:0], vfdev[15:0]);
+            config_proxy.func_mgr            = func_mgr;
+            config_proxy.multi_function_mode = 1;
+            config_proxy.bypass_enable       = 1;   // SV 应答 config 枚举, 不下 DUT
+            // 可选预启用 VF(否则等 guest 写 sriov_numvfs 动态启用)
+            if (n_vfs > 0)
+                for (int pf = 0; pf < n_pfs; pf++)
+                    func_mgr.enable_vfs(pf, n_vfs);
+        end
 
         `uvm_info(get_name(), $sformatf("cosim_xrc_driver bound to RC index %0d", rc_index),
                   UVM_LOW)
@@ -242,12 +266,14 @@ class cosim_xrc_driver extends pcie_tl_rc_driver;
             for (int i = 0; i < 16; i++)
                 dpi_data[i] = bridge_vcs_get_poll_data_rc(rc_index, i);
 
-            // ---- Config-space bypass: proxy answers, never reaches the DUT ----
+            // ---- Config-space bypass: func_mgr(_bdf) answers, never reaches DUT ----
+            //   target BDF 从 TLP 取(QEMU 已填, DPI getter 现成), 路由到对应 PF/VF。
             if (config_proxy != null && config_proxy.bypass_enable) begin
+                bit [15:0] tgt_bdf = bridge_vcs_get_tlp_target_bdf_rc(rc_index);
                 if (dpi_type == BV_TLP_CFGRD0) begin
                     bit [31:0] cfg_data;
                     int dw_addr = int'(dpi_addr) >> 2;
-                    if (config_proxy.handle_cfg_read(dw_addr, cfg_data)) begin
+                    if (config_proxy.handle_cfg_read_bdf(tgt_bdf, dw_addr, cfg_data)) begin
                         for (int i = 0; i < 16; i++) bridge_vcs_set_cpl_data_rc(rc_index, i, 0);
                         bridge_vcs_set_cpl_data_rc(rc_index, 0, cfg_data);
                         void'(bridge_vcs_send_cpl_scalar_rc(rc_index, dpi_tag, 1));
@@ -260,12 +286,14 @@ class cosim_xrc_driver extends pcie_tl_rc_driver;
                     int dw_addr = int'(dpi_addr) >> 2;
                     int byte_off = int'(dpi_addr) & 3;
                     bit [31:0] wr_data = dpi_data[0];
-                    if (config_proxy.handle_cfg_write(dw_addr, wr_data, byte_off, dpi_len)) begin
-                        // Keep the C-side per-RC BAR base in sync for address decode
-                        if (dw_addr == 4 && wr_data != 32'hFFFF_FFFF)
-                            bridge_vcs_set_bar_base_rc(rc_index, 0, {32'h0, config_proxy.bar0_addr[31:0]});
-                        if (dw_addr == 5)
-                            bridge_vcs_set_bar_base_rc(rc_index, 0, config_proxy.bar0_addr);
+                    if (config_proxy.handle_cfg_write_bdf(tgt_bdf, dw_addr, wr_data, byte_off, dpi_len)) begin
+                        // BAR base 同步 C 侧(per-RC, 供 MMIO 解码): 取该 bdf 的 bar_base[0]。
+                        // 多 bdf 的 per-bdf BAR 另由 config_proxy 内部 set_bar_base_bdf 同步。
+                        if (dw_addr == 4 || dw_addr == 5) begin
+                            pcie_tl_func_context ctx = func_mgr.lookup_by_bdf(tgt_bdf);
+                            if (ctx != null)
+                                bridge_vcs_set_bar_base_rc(rc_index, 0, ctx.bar_base[0]);
+                        end
                         // CfgWr is fire-and-forget (QEMU does not wait on completion)
                         total_tlp_count++;
                         #1;

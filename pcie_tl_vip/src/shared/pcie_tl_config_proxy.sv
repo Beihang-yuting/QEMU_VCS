@@ -282,6 +282,18 @@ class pcie_tl_config_proxy extends uvm_component;
             end
         end
 
+        // VF BAR sizing read (SR-IOV cap VF BAR, dw 0x89..0x8E)
+        if (dw_addr >= 'h89 && dw_addr <= 'h8E) begin
+            int vbar = dw_addr - 'h89;
+            if (func_mgr.sriov_caps[ctx.pf_index].vf_bar_sizing[vbar]) begin
+                if (func_mgr.sriov_caps[ctx.pf_index].vf_bar_size[vbar] != 0)
+                    data = ~(func_mgr.sriov_caps[ctx.pf_index].vf_bar_size[vbar][31:0] - 1);
+                else
+                    data = 32'h0;
+                return 1;
+            end
+        end
+
         // Normal config read via func_mgr
         data = func_mgr.cfg_read(target_bdf, dw_addr[11:0] << 2);
         `uvm_info("CFG_PROXY", $sformatf("CfgRd BDF=0x%04h DW[%0d]=0x%08h (multi-func)",
@@ -322,24 +334,43 @@ class pcie_tl_config_proxy extends uvm_component;
             return 1;
         end
 
-        // SR-IOV NumVFs write detection
-        // SR-IOV cap at offset 0x200; NumVFs is at cap+0x10 = byte offset 0x210
-        // DW index = 0x210 / 4 = 0x84 = 132
+        // SR-IOV NumVFs write (@0x210, dw 0x84): 只记录数量, 不立即实例化(符合 spec)
         if (dw_addr == 'h84 && !ctx.is_vf) begin
-            bit [15:0] new_num_vfs = data[15:0];
-            `uvm_info("CFG_PROXY", $sformatf("SR-IOV NumVFs write BDF=0x%04h num_vfs=%0d",
-                target_bdf, new_num_vfs), UVM_MEDIUM)
-            if (new_num_vfs > 0) begin
-                func_mgr.enable_vfs(ctx.pf_index, int'(new_num_vfs));
+            func_mgr.sriov_caps[ctx.pf_index].num_vfs = data[15:0];
+            `uvm_info("CFG_PROXY", $sformatf("SR-IOV NumVFs record BDF=0x%04h num_vfs=%0d",
+                target_bdf, data[15:0]), UVM_MEDIUM)
+        end
+
+        // SR-IOV Control (@0x208, dw 0x82) bit0 = VF Enable: 置 1 才实例化 VF。
+        // spec 时序: guest 先写 NumVFs 再写 VF Enable, VF 在 Enable=1 后出现。
+        if (dw_addr == 'h82 && !ctx.is_vf) begin
+            bit vf_en = data[0];
+            int n     = int'(func_mgr.sriov_caps[ctx.pf_index].num_vfs);
+            if (vf_en && n > 0) begin
+                func_mgr.enable_vfs(ctx.pf_index, n);
+                `uvm_info("CFG_PROXY", $sformatf("SR-IOV VF Enable BDF=0x%04h num_vfs=%0d",
+                    target_bdf, n), UVM_MEDIUM)
                 `ifdef PCIE_COSIM_ENABLE
-                void'(bridge_vcs_send_vf_event(1, ctx.pf_index, int'(new_num_vfs)));
+                void'(bridge_vcs_send_vf_event(1, ctx.pf_index, n));
                 `endif
-            end else begin
+            end else if (!vf_en) begin
                 func_mgr.disable_vfs(ctx.pf_index);
                 `ifdef PCIE_COSIM_ENABLE
                 void'(bridge_vcs_send_vf_event(0, ctx.pf_index, 0));
                 `endif
             end
+        end
+
+        // VF BAR sizing (SR-IOV cap VF BAR @0x224-0x23B, dw 0x89..0x8E)
+        if (dw_addr >= 'h89 && dw_addr <= 'h8E && !ctx.is_vf) begin
+            int vbar = dw_addr - 'h89;
+            if (data == 32'hFFFF_FFFF)
+                func_mgr.sriov_caps[ctx.pf_index].vf_bar_sizing[vbar] = 1;
+            else begin
+                func_mgr.sriov_caps[ctx.pf_index].vf_bar_sizing[vbar] = 0;
+                func_mgr.sriov_caps[ctx.pf_index].vf_bar[vbar]        = data;
+            end
+            return 1;
         end
 
         // Normal config write via func_mgr
