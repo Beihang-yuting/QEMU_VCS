@@ -98,13 +98,15 @@ class xilinx_desc_codec;
     // 复用 128 位请求描述符家族。配置请求不携带 BAR 定位信息，故 RQ 与 CQ 的
     // 配置描述符布局完全相同，由下面的 encode_cfg_desc/decode_cfg_desc 共享。
     //
-    // 配置请求描述符字段放置（ASSUMPTION，见文件头/报告）：PG213 把配置请求的
-    // register-number/BDF 放在内存请求描述符的地址区。此处按类比放置——
-    //   [11:2]    reg_num[9:0]      DW 寄存器号（= 内存路径 addr[11:2]，DW 对齐）
-    //   [63:48]   completer_id[15:0] 目标 BDF（放在地址高 DW 区）
-    //   [111:108] first_dw_be       首 DW 字节使能（与内存 RQ 同位置）
-    // 其余 length/req_type/ep_bit/requester_id/tag/attr/tc/td 与内存 RQ 同位置。
-    // encode 与 decode 对称，BFM 内部往返自洽。
+    // 配置请求描述符字段放置（已按 PG213 config RQ 描述符逐位校准）：
+    //   [7:2]     reg_num[5:0]      寄存器号低 6 位
+    //   [11:8]    ext_reg[3:0]      扩展寄存器号（合起来 desc[11:2]=reg_num[9:0]，DW 对齐）
+    //   [119:104] completer_id[15:0] 目标 BDF（by-ID 路由，配置/消息专用字段）
+    //   [120]     req_id_enable     恒 0
+    //   [123:121] tc / [126:124] attr / [127] force_ecrc(td)
+    // 其余 length/req_type/ep_bit/requester_id/tag 与内存 RQ 同位置。
+    // first_be/last_be 不在描述符，经 RQ/CQ tuser 携带（PG213）。
+    // encode 与 decode 对称，BFM 内部往返自洽，且线格式匹配真实 PG213 IP。
     // -------------------------------------------------------------------------
 
     // is_cfg_kind: 判断 tlp_kind_e 是否为配置请求种类
@@ -131,10 +133,8 @@ class xilinx_desc_codec;
             return '0;
         end
 
-        // [11:2]    reg_num：DW 寄存器号（配置空间字节地址 = {reg_num,2'b00}）
+        // [11:2]    reg_num[9:0]：DW 寄存器号（[7:2]=reg[5:0]，[11:8]=ext_reg[3:0]）
         desc[11:2]    = cfg.reg_num;
-        // [63:48]   completer_id：目标 BDF
-        desc[63:48]   = cfg.completer_id;
         // [74:64]   length：配置请求恒为 1 DW
         desc[74:64]   = tlp.length;
         // [78:75]   req_type：配置请求类型编码
@@ -145,14 +145,17 @@ class xilinx_desc_codec;
         desc[95:80]   = tlp.requester_id;
         // [103:96]  tag[7:0]：Tag 低 8 位（高 2 位经 tuser 携带）
         desc[103:96]  = tlp.tag[7:0];
-        // [111:108] first_dw_be：首 DW 字节使能
-        desc[111:108] = cfg.first_be;
-        // [114:112] attr：属性字段
-        desc[114:112] = tlp.attr;
-        // [117:115] tc：流量类别
-        desc[117:115] = tlp.tc;
-        // [127]     td：TLP Digest 标志
+        // [119:104] completer_id：目标 BDF（配置/消息 by-ID 路由）
+        desc[119:104] = cfg.completer_id;
+        // [120]     req_id_enable：恒 0
+        desc[120]     = 1'b0;
+        // [123:121] tc：流量类别
+        desc[123:121] = tlp.tc;
+        // [126:124] attr：属性字段
+        desc[126:124] = tlp.attr;
+        // [127]     force_ecrc（td）：TLP Digest / ECRC 标志
         desc[127]     = tlp.td;
+        // 注：first_be 不在描述符，经 RQ/CQ tuser 携带（PG213）
 
         return desc;
     endfunction : encode_cfg_desc
@@ -180,15 +183,15 @@ class xilinx_desc_codec;
 
         // 字段还原（与 encode_cfg_desc 对称）
         cfg.reg_num      = desc[11:2];
-        cfg.completer_id = desc[63:48];
         cfg.length       = desc[74:64];
         cfg.ep_bit       = desc[79];
         cfg.requester_id = desc[95:80];
         cfg.tag          = {2'b00, desc[103:96]};
-        cfg.first_be     = desc[111:108];
-        cfg.attr         = desc[114:112];
-        cfg.tc           = desc[117:115];
+        cfg.completer_id = desc[119:104];
+        cfg.attr         = desc[126:124];
+        cfg.tc           = desc[123:121];
         cfg.td           = desc[127];
+        // first_be 经 tuser 携带（adapter apply_tuser_be 填充）；描述符不含 BE
 
         // 复制 payload 字节数组（CfgWr 携带 1 DW）
         cfg.payload = new[payload.size()];
@@ -268,23 +271,23 @@ class xilinx_desc_codec;
         // [103:96]  tag[7:0]：TLP Tag 低 8 位（扩展 Tag[9:8] 通过 tuser 携带）
         desc[103:96]  = tlp.tag[7:0];
 
-        // [107:104] last_dw_be：末 DW 字节使能
-        desc[107:104] = last_be;
+        // [119:104] completer_id：内存/IO/原子请求恒 0（仅配置/消息 by-ID 路由使用）
+        desc[119:104] = 16'h0;
 
-        // [111:108] first_dw_be：首 DW 字节使能
-        desc[111:108] = first_be;
+        // [120]     requester_id_enable：BFM 显式提供 requester_id，恒 0
+        desc[120]     = 1'b0;
 
-        // [114:112] attr[2:0]：属性字段 [0]=RO, [1]=IDO, [2]=NS
-        desc[114:112] = tlp.attr;
+        // [123:121] tc[2:0]：流量类别（Traffic Class）
+        desc[123:121] = tlp.tc;
 
-        // [117:115] tc[2:0]：流量类别（Traffic Class）
-        desc[117:115] = tlp.tc;
+        // [126:124] attr[2:0]：属性字段 [0]=RO, [1]=IDO, [2]=NS
+        desc[126:124] = tlp.attr;
 
-        // [118]     th：TLP 处理提示（TLP Processing Hint）
-        desc[118]     = tlp.th;
-
-        // [127]     td：TLP Digest 标志（ECRC 存在时为 1）
+        // [127]     force_ecrc（td）：TLP Digest / ECRC 标志
         desc[127]     = tlp.td;
+
+        // 注：first_be/last_be 不在 RQ 描述符（PG213），仅经 s_axis_rq_tuser 携带；
+        //     上文提取的 first_be/last_be 在此路径不写入描述符（tuser codec 负责）。
 
         return desc;
     endfunction : encode_rq
@@ -334,22 +337,16 @@ class xilinx_desc_codec;
         // [103:96]  tag[7:0]：Tag 低 8 位（高 2 位默认 0，由 tuser 扩展）
         tlp.tag          = {2'b00, desc[103:96]};
 
-        // [107:104] last_dw_be：末 DW 字节使能
-        tlp.last_be      = desc[107:104];
+        // first_be/last_be 不在 RQ 描述符（PG213）；由 adapter apply_tuser_be 从 tuser 填充。
+        // 此处保持默认 0，避免从 Completer ID 区误读。
 
-        // [111:108] first_dw_be：首 DW 字节使能
-        tlp.first_be     = desc[111:108];
+        // [123:121] tc：流量类别
+        tlp.tc           = desc[123:121];
 
-        // [114:112] attr：属性字段
-        tlp.attr         = desc[114:112];
+        // [126:124] attr：属性字段
+        tlp.attr         = desc[126:124];
 
-        // [117:115] tc：流量类别
-        tlp.tc           = desc[117:115];
-
-        // [118]     th：处理提示
-        tlp.th           = desc[118];
-
-        // [127]     td：TLP Digest 标志
+        // [127]     force_ecrc（td）：TLP Digest 标志
         tlp.td           = desc[127];
 
         // 复制 payload 字节数组
@@ -395,25 +392,19 @@ class xilinx_desc_codec;
         // 判断是否为锁定完成（Locked Completion：CPL_LK 或 CPLD_LK）
         locked = (tlp.kind == TLP_CPL_LK || tlp.kind == TLP_CPLD_LK);
 
-        // [6:0]     lower_addr：完成数据首字节的地址低 7 位
-        desc[6:0]   = cpl.lower_addr;
+        // [11:0]    lower_addr：完成首字节地址低 12 位（模型 lower_addr 仅 7 位，高位补 0）
+        desc[11:0]  = {5'h0, cpl.lower_addr};
 
-        // [8:7]     保留（Reserved），保持 0
-        desc[8:7]   = 2'b00;
+        // [15:12]   error_code[3:0]：由 cpl_status 转换的错误码（cpl_status 3 位，[15] 恒 0）
+        desc[15:12] = {1'b0, encode_error_code(cpl_status_e'(cpl.cpl_status))};
 
-        // [11:9]    error_code：由 cpl_status 转换的错误码（与 PCIe cpl_status 编码相同）
-        desc[11:9]  = encode_error_code(cpl_status_e'(cpl.cpl_status));
-
-        // [28:12]   byte_count：剩余完成字节数
-        //           pcie_tl_cpl_tlp.byte_count 为 12 位，PG213 描述符此字段为 17 位
-        //           高 5 位补零（byte_count 最大值为 4096，不超过 12 位）
-        desc[28:12] = {5'h0, cpl.byte_count};
+        // [28:16]   byte_count[12:0]：剩余完成字节数（模型 byte_count 12 位，高位补 0）
+        desc[28:16] = {1'b0, cpl.byte_count};
 
         // [29]      locked：是否为锁定完成（1=CPL_LK 或 CPLD_LK）
         desc[29]    = locked;
 
-        // [30]      bcm（Byte Count Modified）：对应 PG213 的 request_completed 位
-        //           pcie_tl_cpl_tlp 无 request_completed 字段，此处映射 bcm
+        // [30]      request_completed（映射 bcm）：请求最后一个完成置 1
         desc[30]    = cpl.bcm;
 
         // [31]      保留（Reserved），保持 0
@@ -440,14 +431,17 @@ class xilinx_desc_codec;
         // [87:72]   completer_id：完成方 BDF
         desc[87:72] = cpl.completer_id;
 
-        // [90:88]   tc：流量类别
-        desc[90:88] = tlp.tc;
+        // [88]      保留（Reserved），保持 0
+        desc[88]    = 1'b0;
 
-        // [93:91]   attr：属性字段
-        desc[93:91] = tlp.attr;
+        // [91:89]   tc：流量类别（PG213 Table 2-26）
+        desc[91:89] = tlp.tc;
 
-        // [95:94]   保留（Reserved），保持 0
-        desc[95:94] = 2'b00;
+        // [94:92]   attr：属性字段
+        desc[94:92] = tlp.attr;
+
+        // [95]      保留（Reserved），保持 0
+        desc[95]    = 1'b0;
 
         return desc;
     endfunction : encode_rc
@@ -474,13 +468,13 @@ class xilinx_desc_codec;
         // 完成 TLP 的 fmt 固定为 3DW 格式
         cpl.fmt = has_data ? FMT_3DW_WITH_DATA : FMT_3DW_NO_DATA;
 
-        // [6:0]     lower_addr：首字节地址低 7 位
+        // [6:0]     lower_addr：首字节地址低 7 位（模型 lower_addr 为 7 位）
         cpl.lower_addr   = desc[6:0];
 
-        // [28:12]   byte_count：剩余字节数（取低 12 位，与字段宽度对齐）
-        cpl.byte_count   = desc[23:12];
+        // [28:16]   byte_count[12:0]：剩余字节数（取低 12 位对齐模型宽度）
+        cpl.byte_count   = desc[27:16];
 
-        // [30]      bcm：Byte Count Modified（PG213 request_completed 位的映射）
+        // [30]      request_completed → bcm
         cpl.bcm          = desc[30];
 
         // [42:32]   length：DW 长度
@@ -501,11 +495,11 @@ class xilinx_desc_codec;
         // [87:72]   completer_id：完成方 BDF
         cpl.completer_id = desc[87:72];
 
-        // [90:88]   tc：流量类别
-        cpl.tc           = desc[90:88];
+        // [91:89]   tc：流量类别（PG213 Table 2-26）
+        cpl.tc           = desc[91:89];
 
-        // [93:91]   attr：属性字段
-        cpl.attr         = desc[93:91];
+        // [94:92]   attr：属性字段
+        cpl.attr         = desc[94:92];
 
         // 复制 payload 字节数组
         cpl.payload = new[payload.size()];
@@ -591,28 +585,25 @@ class xilinx_desc_codec;
         // [103:96]  tag[7:0]：TLP Tag 低 8 位
         desc[103:96]  = tlp.tag[7:0];
 
-        // [107:104] target_func[3:0]：目标功能编号低 4 位（CQ 特有，替换 RQ 的 last_be）
-        desc[107:104] = target_func[3:0];
+        // [111:104] target_func[7:0]：目标功能编号（CQ 特有，PG213 Table 2-23）
+        desc[111:104] = target_func;
 
-        // [110:108] bar_id[2:0]：命中的 BAR 编号（CQ 特有）
-        desc[110:108] = bar_id;
+        // [114:112] bar_id[2:0]：命中的 BAR 编号（CQ 特有）
+        desc[114:112] = bar_id;
 
-        // [116:111] bar_aperture[5:0]：BAR 孔径大小编码（CQ 特有）
-        desc[116:111] = bar_aperture;
+        // [120:115] bar_aperture[5:0]：BAR 孔径大小编码（CQ 特有）
+        desc[120:115] = bar_aperture;
 
-        // [119:117] tc[2:0]：流量类别（CQ 中 tc 位置相比 RQ 上移至 [119:117]）
-        desc[119:117] = tlp.tc;
+        // [123:121] tc[2:0]：流量类别
+        desc[123:121] = tlp.tc;
 
-        // [120]     th：TLP 处理提示
-        desc[120]     = tlp.th;
+        // [126:124] attr[2:0]：属性字段 [0]=RO, [1]=IDO, [2]=NS
+        desc[126:124] = tlp.attr;
 
-        // [123:121] attr[2:0]：属性字段。PG213 CQ 描述符 attr 精确位本项目 spec 未标定，
-        //           此处置于保留区 [123:121]，与 decode_cq 对称读取，保证 BFM 内 attr
-        //           不在 CQ 路径丢失（修复前 encode/decode 均不处理 attr，恒丢为 0）。
-        desc[123:121] = tlp.attr;
-
-        // [127]     td：TLP Digest 标志
+        // [127]     PG213 保留位；BFM 透传 td 便于内部往返，真实 IP 忽略
         desc[127]     = tlp.td;
+
+        // 注：first_be/last_be 不在 CQ 描述符（PG213），仅经 m_axis_cq_tuser 携带。
 
         return desc;
     endfunction : encode_cq
@@ -659,17 +650,15 @@ class xilinx_desc_codec;
         // [103:96]  tag[7:0]：Tag 低 8 位
         tlp.tag          = {2'b00, desc[103:96]};
 
-        // [119:117] tc：流量类别（CQ 中 tc 位于 [119:117]）
-        tlp.tc           = desc[119:117];
+        // [123:121] tc：流量类别（PG213 Table 2-23）
+        tlp.tc           = desc[123:121];
 
-        // [120]     th：处理提示
-        tlp.th           = desc[120];
+        // [126:124] attr：属性字段
+        tlp.attr         = desc[126:124];
 
-        // [123:121] attr：与 encode_cq 对称回读（修复 CQ 路径 attr 丢失）
-        tlp.attr         = desc[123:121];
-
-        // [127]     td：TLP Digest 标志
+        // [127]     PG213 保留位；BFM 透传 td
         tlp.td           = desc[127];
+        // first_be/last_be 经 tuser 携带（adapter apply_tuser_be 填充）；描述符不含 BE
 
         // 复制 payload 字节数组
         tlp.payload = new[payload.size()];
@@ -680,24 +669,24 @@ class xilinx_desc_codec;
     endfunction : decode_cq
 
     // get_cq_bar_id: 从 128 位 CQ 描述符中提取命中的 BAR 编号
-    // 位于描述符 [110:108]（3 位）
+    // 位于描述符 [114:112]（3 位，PG213 Table 2-23）
     static function bit [2:0] get_cq_bar_id(bit [127:0] desc);
-        // [110:108] bar_id：目标 BAR 编号（0-5，或 6/7 用于 ROM/扩展 ROM）
-        return desc[110:108];
+        // [114:112] bar_id：目标 BAR 编号（0-5，或 6/7 用于 ROM/扩展 ROM）
+        return desc[114:112];
     endfunction : get_cq_bar_id
 
     // get_cq_bar_aperture: 从 128 位 CQ 描述符中提取 BAR 孔径大小编码
-    // 位于描述符 [116:111]（6 位）
+    // 位于描述符 [120:115]（6 位，PG213 Table 2-23）
     static function bit [5:0] get_cq_bar_aperture(bit [127:0] desc);
-        // [116:111] bar_aperture：BAR 孔径编码值，等于 log2(BAR_size_bytes)-12
-        return desc[116:111];
+        // [120:115] bar_aperture：BAR 孔径编码值，等于 log2(BAR_size_bytes)-12
+        return desc[120:115];
     endfunction : get_cq_bar_aperture
 
     // get_cq_target_func: 从 128 位 CQ 描述符中提取目标功能编号
-    // 位于描述符 [107:104]（低 4 位，高 4 位补零）
+    // 位于描述符 [111:104]（8 位，PG213 Table 2-23）
     static function bit [7:0] get_cq_target_func(bit [127:0] desc);
-        // [107:104] target_func 低 4 位，返回 8 位值（高 4 位为 0）
-        return {4'h0, desc[107:104]};
+        // [111:104] target_func[7:0]：目标功能编号
+        return desc[111:104];
     endfunction : get_cq_target_func
 
     //=========================================================================
@@ -707,20 +696,111 @@ class xilinx_desc_codec;
     // 参考 PG213 Table 2-27 (CC Descriptor)
     // -------------------------------------------------------------------------
 
-    // encode_cc: 将完成 TLP 编码为 96 位 CC 描述符
-    // EP 侧使用此函数将 pcie_tl_cpl_tlp 转换为 CC 通道描述符
-    // CC 描述符字段布局与 RC 描述符完全相同，直接复用 encode_rc 实现
+    // encode_cc: 将完成 TLP 编码为 96 位 CC 描述符（PG213 Table 2-27）
+    // CC 与 RC 描述符不同：CC 用 AT[9:8]（无 error_code）、completer_id 拆分为
+    // func/dev[79:72]+bus[87:80]、[88]=completer_id_enable、[95]=force_ecrc。
+    // 公共字段（byte_count/length/cpl_status/poison/requester_id/tag/completer_id/
+    // tc/attr/locked）与 RC 同位，保证 CC↔RC 跨通道解码兼容。
     static function bit [95:0] encode_cc(pcie_tl_tlp tlp);
-        // CC 与 RC 描述符格式完全一致，复用 encode_rc 逻辑
-        return encode_rc(tlp);
+        bit [95:0]       desc;
+        pcie_tl_cpl_tlp  cpl;
+        bit              locked;
+
+        desc = '0;
+        if (!$cast(cpl, tlp)) begin
+            `uvm_error("XILINX_CODEC", "encode_cc: tlp 无法转型为 pcie_tl_cpl_tlp")
+            return '0;
+        end
+
+        // 完成 tag 仅 8 位（CC 描述符无 tag[9:8] 位置），扩展 tag 报错（同 encode_rc 守卫）
+        if (tlp.tag > 10'h0FF) begin
+            `uvm_error("XILINX_CODEC",
+                $sformatf("encode_cc: tag=0x%03h 超过 8 位，CC 描述符无法携带 tag[9:8]", tlp.tag))
+        end
+
+        locked = (tlp.kind == TLP_CPL_LK || tlp.kind == TLP_CPLD_LK);
+
+        // [6:0]     lower_addr：完成首字节地址低 7 位
+        desc[6:0]   = cpl.lower_addr;
+        // [9:8]     addr_type(AT)：模型无 AT 字段，置 0
+        desc[9:8]   = 2'b00;
+        // [28:16]   byte_count[12:0]：模型 byte_count 12 位，高位补 0
+        desc[28:16] = {1'b0, cpl.byte_count};
+        // [29]      locked：锁定完成
+        desc[29]    = locked;
+        // [30]      PG213 保留（RC 才是 request_completed）；CC 不携带 bcm
+        // [42:32]   length：DW 长度
+        desc[42:32] = tlp.length;
+        // [45:43]   cpl_status：完成状态码
+        desc[45:43] = cpl_status_e'(cpl.cpl_status);
+        // [46]      ep_bit：Poisoned 位
+        desc[46]    = tlp.ep_bit;
+        // [63:48]   requester_id：原始请求方 BDF
+        desc[63:48] = tlp.requester_id;
+        // [71:64]   tag[7:0]
+        desc[71:64] = tlp.tag[7:0];
+        // [79:72]   completer_id[7:0]：目标 func/dev
+        desc[79:72] = cpl.completer_id[7:0];
+        // [87:80]   completer_id[15:8]：completer bus
+        desc[87:80] = cpl.completer_id[15:8];
+        // [88]      completer_id_enable：恒 0
+        desc[88]    = 1'b0;
+        // [91:89]   tc：流量类别
+        desc[91:89] = tlp.tc;
+        // [94:92]   attr：属性字段
+        desc[94:92] = tlp.attr;
+        // [95]      force_ecrc（td）
+        desc[95]    = tlp.td;
+
+        return desc;
     endfunction : encode_cc
 
-    // decode_cc: 将 96 位 CC 描述符解码为 pcie_tl_cpl_tlp 对象
-    // EP 侧接收来自上层的完成请求时使用（测试场景中 scoreboard 解析 CC 通道数据）
-    // CC 描述符字段布局与 RC 描述符完全相同，直接复用 decode_rc 实现
+    // decode_cc: 将 96 位 CC 描述符解码为 pcie_tl_cpl_tlp 对象（PG213 Table 2-27）
     static function pcie_tl_tlp decode_cc(bit [95:0] desc, bit [7:0] payload[]);
-        // CC 与 RC 描述符格式完全一致，复用 decode_rc 逻辑
-        return decode_rc(desc, payload);
+        pcie_tl_cpl_tlp  cpl;
+        bit              locked;
+        bit              has_data;
+
+        cpl = pcie_tl_cpl_tlp::type_id::create("cc_decoded");
+
+        has_data = (payload.size() > 0);
+        locked   = desc[29];
+
+        if (locked)
+            cpl.kind = has_data ? TLP_CPLD_LK : TLP_CPL_LK;
+        else
+            cpl.kind = has_data ? TLP_CPLD    : TLP_CPL;
+
+        cpl.fmt = has_data ? FMT_3DW_WITH_DATA : FMT_3DW_NO_DATA;
+
+        // [6:0]     lower_addr
+        cpl.lower_addr   = desc[6:0];
+        // [28:16]   byte_count[12:0]（取低 12 位对齐模型宽度）
+        cpl.byte_count   = desc[27:16];
+        // [42:32]   length
+        cpl.length       = desc[42:32];
+        // [45:43]   cpl_status
+        cpl.cpl_status   = cpl_status_e'(desc[45:43]);
+        // [46]      ep_bit
+        cpl.ep_bit       = desc[46];
+        // [63:48]   requester_id
+        cpl.requester_id = desc[63:48];
+        // [71:64]   tag[7:0]（高 2 位补零）
+        cpl.tag          = {2'b00, desc[71:64]};
+        // [87:72]   completer_id（[79:72]=func/dev, [87:80]=bus）
+        cpl.completer_id = desc[87:72];
+        // [91:89]   tc
+        cpl.tc           = desc[91:89];
+        // [94:92]   attr
+        cpl.attr         = desc[94:92];
+        // [95]      force_ecrc（td）
+        cpl.td           = desc[95];
+
+        cpl.payload = new[payload.size()];
+        foreach (payload[i])
+            cpl.payload[i] = payload[i];
+
+        return cpl;
     endfunction : decode_cc
 
     //=========================================================================

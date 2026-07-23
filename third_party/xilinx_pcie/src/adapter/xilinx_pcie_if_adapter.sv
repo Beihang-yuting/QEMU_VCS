@@ -365,7 +365,9 @@ class xilinx_pcie_if_adapter extends pcie_tl_if_adapter;
             tuser_val = encode_tuser_for_beat(tlp, channel, beats[i], i,
                                               num_beats, lasts[i], keeps[i]);
             xfer.tdata = beats[i];
-            xfer.tkeep = expand_dw_keep_to_byte(keeps[i]);
+            // PG213: axis_if tkeep 为 per-DWORD (每 DW 1 位)，直接放 per-DW keep。
+            // driver 整体赋值 vif.tkeep<=xfer.tkeep 自动取低 TDATA/32 位。
+            xfer.tkeep = keeps[i];
             xfer.tlast = lasts[i];
             xfer.tuser = tuser_val;
             // first-beat 1-cycle idle so tvalid drops >=1 cycle after prior tlast
@@ -381,18 +383,67 @@ class xilinx_pcie_if_adapter extends pcie_tl_if_adapter;
         end
     endtask
 
-    protected function bit [63:0] expand_dw_keep_to_byte(bit [15:0] dw_keep);
-        bit [63:0] bk = '0;
-        for (int dw = 0; dw < 16; dw++)
-            if (dw_keep[dw]) bk[dw*4 +: 4] = 4'hF;
-        return bk;
+    // build_byte_en: construct m_axis_{cq,rc}_tuser.byte_en for ONE beat.
+    // PG213: byte_en marks valid PAYLOAD bytes on tdata and is NOT asserted for
+    // descriptor bytes. Returns 0 when the TLP carries no payload (e.g. MemRd /
+    // data-less completion). For payload DWs, boundary DWs use first_be/last_be
+    // (single-DW payload uses first_be), interior DWs are full (0xF).
+    //   desc_dw    : descriptor DW count occupying beat-0 low lanes (RQ/CQ=4, RC/CC=3)
+    //   total_pl_dw: total payload length in DW (tlp.length; 0 => 1024)
+    protected function bit [63:0] build_byte_en(
+        int beat_idx, bit [15:0] dw_keep, bit has_payload, int desc_dw,
+        bit [3:0] first_be, bit [3:0] last_be, int total_pl_dw);
+        bit [63:0] be;
+        int lanes = DATA_WIDTH / 32;         // DW lanes per beat
+        int pl_len = (total_pl_dw == 0) ? 1024 : total_pl_dw;
+        be = '0;
+        if (!has_payload) return be;         // reads / data-less completions -> 0
+        for (int j = 0; j < lanes; j++) begin
+            int pl_idx;
+            bit [3:0] dwbe;
+            if (!dw_keep[j]) continue;
+            if (beat_idx == 0 && j < desc_dw) continue;   // skip descriptor DWs
+            pl_idx = (beat_idx == 0) ? (j - desc_dw)
+                                     : ((lanes - desc_dw) + (beat_idx - 1)*lanes + j);
+            if (pl_idx < 0) continue;
+            if (pl_len <= 1)                   dwbe = first_be;   // single payload DW
+            else if (pl_idx == 0)              dwbe = first_be;   // first DW
+            else if (pl_idx == pl_len - 1)     dwbe = last_be;    // last DW
+            else                               dwbe = 4'hF;       // interior DW
+            be[4*j +: 4] = dwbe;
+        end
+        return be;
     endfunction
 
-    static function bit [15:0] compress_byte_keep_to_dw(bit [63:0] byte_keep);
-        bit [15:0] dk = '0;
-        for (int dw = 0; dw < 16; dw++)
-            if (byte_keep[dw*4 +: 4] != 4'h0) dk[dw] = 1'b1;
-        return dk;
+    // build_cpl_byte_en: byte_en for a completion beat (RC channel).
+    // A completion's valid bytes are CONTIGUOUS; the straddle packer places
+    // payload[0] at byte 0 of the first payload DW (DWORD-aligned, no offset),
+    // so valid bytes span [0 .. num_bytes-1] across the payload DWs. This marks
+    // the exact valid byte count per DW (last DW partial when num_bytes is not a
+    // multiple of 4), and 0 for a data-less completion (num_bytes == 0).
+    // NOTE: for an UNALIGNED completion (lower_addr[1:0] != 0) PG213 dword-aligned
+    // mode would shift the first valid byte to lower_addr[1:0]; the BFM does not
+    // model that leading offset in placement, so byte_en mirrors the byte-0
+    // placement it actually drives (self-consistent; see report for the limit).
+    protected function bit [63:0] build_cpl_byte_en(
+        int beat_idx, bit [15:0] dw_keep, int desc_dw, int num_bytes);
+        bit [63:0] be;
+        int lanes = DATA_WIDTH / 32;
+        be = '0;
+        if (num_bytes <= 0) return be;         // data-less completion -> 0
+        for (int j = 0; j < lanes; j++) begin
+            int pl_dw_idx;
+            int base_byte;
+            if (!dw_keep[j]) continue;
+            if (beat_idx == 0 && j < desc_dw) continue;   // skip descriptor DWs
+            pl_dw_idx = (beat_idx == 0) ? (j - desc_dw)
+                                        : ((lanes - desc_dw) + (beat_idx - 1)*lanes + j);
+            if (pl_dw_idx < 0) continue;
+            base_byte = pl_dw_idx * 4;                     // global payload byte index
+            for (int k = 0; k < 4; k++)
+                if (base_byte + k < num_bytes) be[4*j + k] = 1'b1;
+        end
+        return be;
     endfunction
 
     protected function bit [511:0] encode_tuser_for_beat(
@@ -404,30 +455,36 @@ class xilinx_pcie_if_adapter extends pcie_tl_if_adapter;
                 bit [3:0]   first_be, last_be;
                 bit [1:0]   tag_9_8;
                 bit [284:0] tuser_full;
+                bit [3:0]   eop_off;
                 extract_be_from_tlp(tlp, first_be, last_be);
                 tag_9_8 = tlp.tag[9:8];
+                eop_off = (is_last && straddle_eng.straddle_enable) ?
+                          straddle_eng.calc_eop_offset(dw_keep) : 4'h0;
                 tuser_full = tuser_codec.encode_rq_tuser(
                     .first_be(beat_idx == 0 ? first_be : 4'h0),
                     .last_be (beat_idx == 0 ? last_be  : 4'h0),
                     .addr_offset(3'h0), .discontinue(1'b0),
                     .tph_present(1'b0), .tph_type(2'h0), .tph_st_tag(8'h0),
                     .seq_num_0(6'h0), .seq_num_1(6'h0),
-                    .tag_9_8(beat_idx == 0 ? tag_9_8 : 2'h0), .tdata(tdata));
+                    .tag_9_8(beat_idx == 0 ? tag_9_8 : 2'h0),
+                    .sop(beat_idx == 0), .is_eop(is_last), .eop_ptr(eop_off),
+                    .tdata(tdata));
                 tuser_truncated = tuser_full;
             end
             XILINX_CH_RC: begin
                 bit [63:0]  byte_en;
                 bit [320:0] tuser_full;
-                int byte_lanes = DATA_WIDTH / 8;
-                bit [2:0]   eof_off;
-                byte_en = '0;
-                for (int b = 0; b < byte_lanes; b++) byte_en[b] = 1'b1;
+                bit [3:0]   eof_off;
+                // PG213: RC byte_en marks the contiguous valid completion payload
+                // bytes (0 for data-less Cpl); RC descriptor = 3 DW. Exact per-byte
+                // mask from the completion payload length (partial last DW handled).
+                byte_en = build_cpl_byte_en(beat_idx, dw_keep, 3, tlp.payload.size());
                 eof_off = (is_last && straddle_eng.straddle_enable) ?
-                          straddle_eng.calc_eop_offset(dw_keep) : 3'h0;
+                          straddle_eng.calc_eop_offset(dw_keep) : 4'h0;
                 tuser_full = tuser_codec.encode_rc_tuser(
                     .byte_en(byte_en), .is_sof_0(beat_idx == 0), .is_sof_1(1'b0),
                     .is_eof_0(is_last), .eof_offset_0(eof_off), .is_eof_1(1'b0),
-                    .eof_offset_1(3'h0), .discontinue(1'b0), .tdata(tdata));
+                    .eof_offset_1(4'h0), .discontinue(1'b0), .tdata(tdata));
                 tuser_truncated = tuser_full;
             end
             XILINX_CH_CQ: begin
@@ -435,27 +492,34 @@ class xilinx_pcie_if_adapter extends pcie_tl_if_adapter;
                 bit [63:0]  byte_en;
                 bit [1:0]   tag_9_8;
                 bit [374:0] tuser_full;
-                int byte_lanes = DATA_WIDTH / 8;
-                bit [2:0]   eop_off;
+                bit [3:0]   eop_off;
                 extract_be_from_tlp(tlp, first_be, last_be);
                 tag_9_8 = tlp.tag[9:8];
-                byte_en = '0;
-                for (int b = 0; b < byte_lanes; b++) byte_en[b] = 1'b1;
+                // PG213: byte_en marks valid payload bytes only (0 for MemRd);
+                // CQ descriptor = 4 DW.
+                byte_en = build_byte_en(beat_idx, dw_keep, tlp.has_data(),
+                                        4, first_be, last_be, tlp.length);
                 eop_off = (is_last && straddle_eng.straddle_enable) ?
-                          straddle_eng.calc_eop_offset(dw_keep) : 3'h0;
+                          straddle_eng.calc_eop_offset(dw_keep) : 4'h0;
                 tuser_full = tuser_codec.encode_cq_tuser(
                     .first_be(beat_idx == 0 ? first_be : 4'h0),
                     .last_be (beat_idx == 0 ? last_be  : 4'h0),
                     .byte_en(byte_en), .sop(beat_idx == 0), .sop_1(1'b0),
                     .discontinue(1'b0), .tph_present(1'b0), .tph_type(2'h0),
                     .tph_st_tag(8'h0), .is_eop(is_last), .eop_offset(eop_off),
-                    .is_eop_1(1'b0), .eop_offset_1(3'h0),
+                    .is_eop_1(1'b0), .eop_offset_1(4'h0),
                     .tag_9_8(beat_idx == 0 ? tag_9_8 : 2'h0), .tdata(tdata));
                 tuser_truncated = tuser_full;
             end
             XILINX_CH_CC: begin
                 bit [160:0] tuser_full;
-                tuser_full = tuser_codec.encode_cc_tuser(.discontinue(1'b0), .tdata(tdata));
+                bit [3:0]   eop_off;
+                eop_off = (is_last && straddle_eng.straddle_enable) ?
+                          straddle_eng.calc_eop_offset(dw_keep) : 4'h0;
+                tuser_full = tuser_codec.encode_cc_tuser(
+                    .discontinue(1'b0),
+                    .sop(beat_idx == 0), .is_eop(is_last), .eop_ptr(eop_off),
+                    .tdata(tdata));
                 tuser_truncated = tuser_full;
             end
             default: begin
@@ -501,7 +565,9 @@ class xilinx_pcie_if_adapter extends pcie_tl_if_adapter;
         first_tuser = pkt.beats[0].tuser;
         foreach (pkt.beats[i]) begin
             beats.push_back(pkt.beats[i].tdata);
-            keeps.push_back(compress_byte_keep_to_dw(pkt.beats[i].tkeep));
+            // PG213: tkeep 已为 per-DWORD，monitor 采样进 pkt.beats[i].tkeep 低位，
+            // 直接取低 16 位 (最多 16 DW) 作为 per-DW keep。
+            keeps.push_back(pkt.beats[i].tkeep[15:0]);
         end
 
         straddle_eng.unpack_single_tlp(beats, keeps, channel, descriptor, payload);
@@ -540,7 +606,7 @@ class xilinx_pcie_if_adapter extends pcie_tl_if_adapter;
             end
             XILINX_CH_CQ: begin
                 bit [3:0] fb, lb; bit [63:0] be; bit sop, sop1, dis, tp;
-                bit [1:0] tt; bit [7:0] tst; bit eop, eop1; bit [2:0] eo, eo1;
+                bit [1:0] tt; bit [7:0] tst; bit eop, eop1; bit [3:0] eo, eo1;
                 tuser_codec.decode_cq_tuser(.tuser(tuser[374:0]),
                     .first_be(fb), .last_be(lb), .byte_en(be), .sop(sop),
                     .sop_1(sop1), .discontinue(dis), .tph_present(tp),
@@ -551,6 +617,20 @@ class xilinx_pcie_if_adapter extends pcie_tl_if_adapter;
             default: tag_9_8 = 2'b00;
         endcase
         return tag_9_8;
+    endfunction
+
+    // be_to_byte_offset: byte offset (0..3) within the first DW = index of the
+    // lowest set bit of first_be. PG213/PCIe put the byte-level start of a
+    // request in first_be, not in the DW-aligned descriptor address; used to
+    // rebuild addr[1:0] on decode so downstream sees the exact byte address.
+    protected function bit [1:0] be_to_byte_offset(bit [3:0] fb);
+        casez (fb)
+            4'b???1: return 2'd0;
+            4'b??10: return 2'd1;
+            4'b?100: return 2'd2;
+            4'b1000: return 2'd3;
+            default: return 2'd0;   // fb == 0 (e.g. zero-length): offset 0
+        endcase
     endfunction
 
     protected function void apply_tuser_be(pcie_tl_tlp tlp, bit [511:0] tuser,
@@ -568,13 +648,17 @@ class xilinx_pcie_if_adapter extends pcie_tl_if_adapter;
                     .tag_9_8(t98));
                 if ($cast(mem_tlp, tlp)) begin
                     mem_tlp.first_be = fb; mem_tlp.last_be = lb;
+                    // restore byte offset lost by DW-aligned descriptor addr
+                    // (PG213: header addr is DW-aligned, byte offset in first_be)
+                    mem_tlp.addr[1:0] = be_to_byte_offset(fb);
                 end else if ($cast(io_tlp, tlp)) begin
                     io_tlp.first_be = fb;
+                    io_tlp.addr[1:0] = be_to_byte_offset(fb);
                 end
             end
             XILINX_CH_CQ: begin
                 bit [3:0] fb, lb; bit [63:0] be; bit sop, sop1, dis, tp;
-                bit [1:0] tt; bit [7:0] tst; bit eop, eop1; bit [2:0] eo, eo1;
+                bit [1:0] tt; bit [7:0] tst; bit eop, eop1; bit [3:0] eo, eo1;
                 bit [1:0] t98;
                 tuser_codec.decode_cq_tuser(.tuser(tuser[374:0]),
                     .first_be(fb), .last_be(lb), .byte_en(be), .sop(sop),
@@ -584,8 +668,12 @@ class xilinx_pcie_if_adapter extends pcie_tl_if_adapter;
                     .tag_9_8(t98));
                 if ($cast(mem_tlp, tlp)) begin
                     mem_tlp.first_be = fb; mem_tlp.last_be = lb;
+                    // restore byte offset lost by DW-aligned descriptor addr
+                    // (PG213: header addr is DW-aligned, byte offset in first_be)
+                    mem_tlp.addr[1:0] = be_to_byte_offset(fb);
                 end else if ($cast(io_tlp, tlp)) begin
                     io_tlp.first_be = fb;
+                    io_tlp.addr[1:0] = be_to_byte_offset(fb);
                 end
             end
             default: ;

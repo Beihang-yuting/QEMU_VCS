@@ -31,18 +31,38 @@ module tb_adapter_top;
   end
 
   // 4 shared channel buses (TUSER width per PG213 channel)
-  axis_if #(`XILINX_DATA_W,4,4,`XILINX_RQ_TUSER_W,0,1,1) rq_bus(.aclk(clk), .aresetn(rst_n));
-  axis_if #(`XILINX_DATA_W,4,4,`XILINX_RC_TUSER_W,0,1,1) rc_bus(.aclk(clk), .aresetn(rst_n));
-  axis_if #(`XILINX_DATA_W,4,4,`XILINX_CQ_TUSER_W,0,1,1) cq_bus(.aclk(clk), .aresetn(rst_n));
-  axis_if #(`XILINX_DATA_W,4,4,`XILINX_CC_TUSER_W,0,1,1) cc_bus(.aclk(clk), .aresetn(rst_n));
+  axis_if #(`XILINX_DATA_W,4,4,`XILINX_RQ_TUSER_W,0,1,1,`XILINX_KEEP_W) rq_bus(.aclk(clk), .aresetn(rst_n));
+  axis_if #(`XILINX_DATA_W,4,4,`XILINX_RC_TUSER_W,0,1,1,`XILINX_KEEP_W) rc_bus(.aclk(clk), .aresetn(rst_n));
+  axis_if #(`XILINX_DATA_W,4,4,`XILINX_CQ_TUSER_W,0,1,1,`XILINX_KEEP_W) cq_bus(.aclk(clk), .aresetn(rst_n));
+  axis_if #(`XILINX_DATA_W,4,4,`XILINX_CC_TUSER_W,0,1,1,`XILINX_KEEP_W) cc_bus(.aclk(clk), .aresetn(rst_n));
+
+  // cfg_interrupt sideband (PG213) for the interrupt agent + SVA checker
+  xilinx_pcie_cfg_if cfg_bus(.clk(clk), .rst_n(rst_n));
 
   initial begin
     `XILINX_ADAPTER_WIRE(rq, RQ, rq_bus)
     `XILINX_ADAPTER_WIRE(rc, RC, rc_bus)
     `XILINX_ADAPTER_WIRE(cq, CQ, cq_bus)
     `XILINX_ADAPTER_WIRE(cc, CC, cc_bus)
+    // Publish the cfg_interrupt vif for xilinx_pcie_interrupt_agent
+    uvm_config_db#(virtual xilinx_pcie_cfg_if)::set(null, "*", "cfg_vif", cfg_bus);
     run_test();
   end
+
+  // PG213 cfg_interrupt timing assertions (checker wired to the cfg sideband)
+  xilinx_pcie_cfg_sva u_cfg_sva (
+    .clk                        (clk),
+    .rst_n                      (rst_n),
+    .cfg_interrupt_int          (cfg_bus.cfg_interrupt_int),
+    .cfg_interrupt_sent         (cfg_bus.cfg_interrupt_sent),
+    .cfg_interrupt_msi_int      (cfg_bus.cfg_interrupt_msi_int),
+    .cfg_interrupt_msi_sent     (cfg_bus.cfg_interrupt_msi_sent),
+    .cfg_interrupt_msi_fail     (cfg_bus.cfg_interrupt_msi_fail),
+    .cfg_interrupt_msi_data     (cfg_bus.cfg_interrupt_msi_data),
+    .cfg_interrupt_msix_int     (cfg_bus.cfg_interrupt_msix_int),
+    .cfg_interrupt_msix_address (cfg_bus.cfg_interrupt_msix_address),
+    .cfg_interrupt_msix_data    (cfg_bus.cfg_interrupt_msix_data)
+  );
 
   // simulation timeout guard (bounds the run; the PoC flow completes ~2.3us)
   initial begin

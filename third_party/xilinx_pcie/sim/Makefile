@@ -39,7 +39,7 @@ VCS_COMPILE_OPTS += -full64                    # 64 位编译模式
 VCS_COMPILE_OPTS += -l $(LOG_DIR)/compile.log  # 编译日志文件
 VCS_COMPILE_OPTS += -o $(WORK_DIR)/simv        # 输出可执行文件
 VCS_COMPILE_OPTS += -f filelist.f              # 编译文件列表
-VCS_COMPILE_OPTS += +define+DATA_WIDTH=$(DATA_WIDTH)    # 数据位宽宏定义
+VCS_COMPILE_OPTS += +define+XILINX_DATA_W=$(DATA_WIDTH) # 数据位宽宏定义 (SV 宏名 XILINX_DATA_W)
 VCS_COMPILE_OPTS += +define+STRADDLE_EN=$(STRADDLE_EN)  # Straddle 使能宏定义
 
 #-----------------------------------------------------------------------------

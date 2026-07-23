@@ -12,12 +12,17 @@
 /tmp/xbuild/xilinx_pcie/src/adapter/xilinx_pcie_adapter_pkg.sv
 /tmp/xbuild/xilinx_pcie/src/interface/xilinx_pcie_if.sv
 /tmp/xbuild/xilinx_pcie/src/interface/xilinx_pcie_cfg_if.sv
+/tmp/xbuild/xilinx_pcie/src/interface/xilinx_pcie_cfg_sva.sv
 /tmp/xbuild/xilinx_pcie/tests/xilinx_pcie_adapter_base_test.sv
 /tmp/xbuild/xilinx_pcie/tests/xilinx_pcie_adapter_smoke_test.sv
+/tmp/xbuild/xilinx_pcie/tests/xilinx_pcie_adapter_codec_test.sv
 /tmp/xbuild/xilinx_pcie/tests/xilinx_pcie_adapter_cfg_test.sv
 /tmp/xbuild/xilinx_pcie/tests/xilinx_pcie_adapter_enum_dma_test.sv
 /tmp/xbuild/xilinx_pcie/tests/xilinx_pcie_adapter_rdwr_test.sv
 /tmp/xbuild/xilinx_pcie/tests/xilinx_pcie_adapter_backpressure_test.sv
 /tmp/xbuild/xilinx_pcie/tests/xilinx_pcie_adapter_err_poisoned_test.sv
 /tmp/xbuild/xilinx_pcie/tests/xilinx_pcie_adapter_no_rc_test.sv
+/tmp/xbuild/xilinx_pcie/tests/xilinx_pcie_adapter_rw_readback_test.sv
+/tmp/xbuild/xilinx_pcie/tests/xilinx_pcie_adapter_interrupt_test.sv
+/tmp/xbuild/xilinx_pcie/tests/xilinx_pcie_adapter_int_e2e_test.sv
 /tmp/xbuild/xilinx_pcie/tb/tb_adapter_top.sv

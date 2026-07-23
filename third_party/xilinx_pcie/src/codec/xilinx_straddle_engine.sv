@@ -296,12 +296,13 @@ class xilinx_straddle_engine;
     // TLP 在最后一个 beat 中结束于哪个 DW 位置。
     //
     // 返回值：最后一个 beat 中最高有效 DW 的索引（从 0 开始计数）。
-    // 例如：256-bit beat 有 8 个 DW (0~7)，若 TLP 数据填充到 DW5，则返回 5。
+    // 256-bit beat 有 8 个 DW (0~7, 3 位足够)；512-bit beat 有 16 个 DW (0~15)，
+    // 需 4 位 —— 故返回 [3:0] (对应 PG213 512 的 is_eop*_ptr[3:0])。
     //
     // 参数：
     //   last_keep - 最后一个 beat 的 tkeep（per-DW 掩码）
     //
-    function bit [2:0] calc_eop_offset(bit [15:0] last_keep);
+    function bit [3:0] calc_eop_offset(bit [15:0] last_keep);
         int beat_dws;
         int last_valid_dw;
 
@@ -314,7 +315,7 @@ class xilinx_straddle_engine;
                 last_valid_dw = i;
         end
 
-        return last_valid_dw[2:0];
+        return last_valid_dw[3:0];
     endfunction : calc_eop_offset
 
 endclass : xilinx_straddle_engine

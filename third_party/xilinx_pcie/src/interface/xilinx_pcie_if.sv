@@ -13,10 +13,10 @@
 
 interface xilinx_pcie_if #(
   parameter int DATA_WIDTH      = 256,   // AXI数据位宽, 典型值: 64/128/256/512
-  parameter int RQ_TUSER_WIDTH  = 137,   // RQ通道tuser位宽 (PG213 Table 2-35)
-  parameter int RC_TUSER_WIDTH  = 161,   // RC通道tuser位宽 (PG213 Table 2-48)
-  parameter int CQ_TUSER_WIDTH  = 183,   // CQ通道tuser位宽 (PG213 Table 2-52)
-  parameter int CC_TUSER_WIDTH  = 81     // CC通道tuser位宽 (PG213 Table 2-42)
+  parameter int RQ_TUSER_WIDTH  = 62,    // RQ通道tuser位宽 (PG213: 64/128/256=62, 512=137)
+  parameter int RC_TUSER_WIDTH  = 75,    // RC通道tuser位宽 (PG213: 64/128/256=75, 512=161)
+  parameter int CQ_TUSER_WIDTH  = 88,    // CQ通道tuser位宽 (PG213: 64/128/256=88, 512=183)
+  parameter int CC_TUSER_WIDTH  = 33     // CC通道tuser位宽 (PG213: 64/128/256=33, 512=81)
 )(
   input logic clk,   // PCIe用户时钟 (user_clk)
   input logic rst_n  // 低电平有效复位
