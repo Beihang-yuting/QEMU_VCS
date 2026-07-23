@@ -1359,11 +1359,10 @@ if [ "$NEED_QEMU" = true ]; then
                     fi
                 fi
 
-                # configure 参数：内网禁用 fdt（避免下载 dtc），外网保留全部功能
-                QEMU_EXTRA_OPTS=""
-                if [ "$HAS_INTERNET" = false ]; then
-                    QEMU_EXTRA_OPTS="--disable-fdt"
-                fi
+                # configure 参数：x86_64-softmmu 不需要 fdt(device tree)，一律禁用。
+                # 既省内网下载 dtc，也规避 gcc>=15 编 QEMU 9.2 自带 dtc/libfdt 的
+                # -Werror=discarded-qualifiers 报错(bundled dtc 与新 gcc 不兼容)。
+                QEMU_EXTRA_OPTS="--disable-fdt"
 
                 info "配置 QEMU (--target-list=x86_64-softmmu, CC=$QEMU_CC)..."
                 ./configure \
