@@ -3,7 +3,7 @@
 # CoSim Platform 安装脚本
 # 用法：
 #   ./setup.sh                          # 交互式菜单
-#   ./setup.sh --mode local --guest minimal --qemu-src download
+#   ./setup.sh --mode local --guest ubuntu --qemu-src download
 #   ./setup.sh --help
 # ============================================================
 set -euo pipefail
