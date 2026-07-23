@@ -501,6 +501,24 @@ ATS/PRI 最后一环：PASID cap 广告 + 携带 + gating + RC 归属。
 
 **Phase 1 计划（选定：Guest TX egress 端到端）**：链真 virtqueue+eth_mac→SV init eth MAC + 捕获 virtio COMMON_CFG queue GPA + notify→`vcs_vq_process_tx`→eth_shm→Role-B peer reader 验证收到 guest 发的包(ping/arp)。→ 真实 DUT 验证。
 
+## 8. 真实 DUT 接入 —— `+REAL_DUT` 开关（`cosim_xrc_driver.sv`）
+
+`cosim_xrc_driver` = **RC-bridge 半（复用）+ stand-in-DUT 半（须关）**。加 `+REAL_DUT` plusarg 一键切换：stand-in（回归测试）↔ 真实 RTL DUT。**QEMU 侧零改动**（config-bypass 设计初衷）。
+
+`bit real_dut = $test$plusargs("REAL_DUT")`（build 时读）。翻转 5 处：
+| # | 位置 | stand-in(real_dut=0) | 真实 DUT(real_dut=1) |
+|---|---|---|---|
+| ① config bypass | `config_proxy.bypass_enable = real_dut?0:1` | SV func_mgr 答假 config | **config 下到 DUT** |
+| ① VF 预启用 | `if(!real_dut && n_vfs>0) enable_vfs` | 预启用 | DUT 自驱 SR-IOV |
+| ② VF BAR MWr 拦截 | `if(!real_dut && BV_TLP_MWR...) ep_vf_mmio_write` | 吞进 stand-in EP doorbell | **透传 DUT**（build_mmio_tlp→send_tlp） |
+| ③ doorbell 合成 | bit4-7/0x14 → 合成 DMA/ATS/MSI-X | 活 | 随②死（DUT 自 RTL 产生） |
+| ④ Invalidation Completion 合成 | `if(!real_dut){flush ATC+注入合成 cpl}` | 合成喂 rx_loop | **DUT 回真 Completion**→rx_loop 匹配 pending ACK（不合成，避免 double-ACK） |
+| ⑤ enable gating | `ats/pri/pasid_enabled_for: if(real_dut) return 1` | RC 侧读 func_mgr cfg gate | DUT 自 gate（不 enable 就不发 ATS TLP） |
+
+**复用不变**：RC-bridge（request_loop config/MMIO 转发、rx_loop 桥 DUT completion/ATS TLP/Invalidation Completion 回 QEMU）、`handle_dut_ats_tlp`（DUT 的 ATS TLP 经 monitor→rx_loop→此函数桥到 QEMU 翻译+回 Completion 给 DUT）、per-VF IOMMU 窗口。
+
+**用法**：simv 命令加 `+REAL_DUT`。真实 DUT RTL 接 `pcie_tl_if`（SV_IF_MODE，非 TLM），monitor 解 wire TLP→rx_loop。默认无 `+REAL_DUT`=stand-in 零回归。**构建**：simv@53=12:04。改动：cosim_xrc_driver.sv。doc §8。
+
 ## 待办
 
 - [x] DMA `requester_id` 用真实 VF BDF（`_rc_rid` DPI 变体，见 §5.2）

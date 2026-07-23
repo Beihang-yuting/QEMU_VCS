@@ -35,6 +35,13 @@ class cosim_xrc_driver extends pcie_tl_rc_driver;
     // ---- Which RC this driver serves (its slot in the C-side g_rc[]) ----
     int rc_index = 0;
 
+    // ---- +REAL_DUT: attach a real RTL DUT instead of the stand-in EP model ----
+    // When set: config is answered by the DUT (config_proxy bypass off), VF-BAR
+    // MMIO flows through to the DUT (no ep_vf_mmio_write intercept), the doorbell
+    // synthesis / stand-in ATC are dead, and ATS Invalidation returns the DUT's
+    // real Completion (no synthesized one). The RC-bridge half is unchanged.
+    bit real_dut = 0;
+
     // ---- Config-space bypass proxy (answers enumeration in SV) ----
     pcie_tl_config_proxy config_proxy;
 
@@ -145,15 +152,20 @@ class cosim_xrc_driver extends pcie_tl_rc_driver;
             if (!$value$plusargs("VENDOR_ID=%h", ven))      ven     = 32'h1AF4;
             if (!$value$plusargs("DEVICE_ID=%h", dev))      dev     = 32'h1041;
             if (!$value$plusargs("VF_DEVICE_ID=%h", vfdev)) vfdev   = 32'h1041;
+            real_dut = $test$plusargs("REAL_DUT");
             func_mgr = pcie_tl_func_manager::type_id::create("func_mgr");
             func_mgr.build_topology(topo, n_pfs, max_vfs, ven[15:0], dev[15:0], vfdev[15:0]);
             config_proxy.func_mgr            = func_mgr;
             config_proxy.multi_function_mode = 1;
-            config_proxy.bypass_enable       = 1;   // SV 应答 config 枚举, 不下 DUT
-            // 可选预启用 VF(否则等 guest 写 sriov_numvfs 动态启用)
-            if (n_vfs > 0)
+            // Real DUT owns its config space -> don't let the SV stand-in answer.
+            config_proxy.bypass_enable       = real_dut ? 1'b0 : 1'b1;
+            // Pre-enable VFs only for the stand-in; a real DUT drives SR-IOV itself.
+            if (!real_dut && n_vfs > 0)
                 for (int pf = 0; pf < n_pfs; pf++)
                     func_mgr.enable_vfs(pf, n_vfs);
+            `uvm_info(get_name(), $sformatf("RC%0d mode: %s", rc_index,
+                real_dut ? "REAL_DUT (config+MMIO->DUT, stand-in EP off)"
+                         : "stand-in EP (config-bypass, synthesized DUT)"), UVM_LOW)
         end
 
         `uvm_info(get_name(), $sformatf("cosim_xrc_driver bound to RC index %0d", rc_index),
@@ -456,7 +468,7 @@ class cosim_xrc_driver extends pcie_tl_rc_driver;
         pcie_tl_func_context c;
         bit [11:0] off;
         bit [31:0] ctrl;
-        if (func_mgr == null) return 1'b1;         // no func_mgr -> don't gate
+        if (real_dut || func_mgr == null) return 1'b1;  // real DUT gates itself
         c = func_mgr.lookup_by_bdf(bdf);
         if (c == null) return 1'b0;
         off  = c.is_vf ? 12'h100 : 12'h350;
@@ -473,7 +485,7 @@ class cosim_xrc_driver extends pcie_tl_rc_driver;
         pcie_tl_func_context c;
         bit [11:0] off;
         bit [31:0] ctrl;
-        if (func_mgr == null) return 1'b1;         // no func_mgr -> don't gate
+        if (real_dut || func_mgr == null) return 1'b1;  // real DUT gates itself
         c = func_mgr.lookup_by_bdf(bdf);
         if (c == null) return 1'b0;
         off  = c.is_vf ? 12'h110 : 12'h360;
@@ -490,7 +502,7 @@ class cosim_xrc_driver extends pcie_tl_rc_driver;
         pcie_tl_func_context c;
         bit [11:0] off;
         bit [31:0] ctrl;
-        if (func_mgr == null) return 1'b1;
+        if (real_dut || func_mgr == null) return 1'b1;  // real DUT gates itself
         c = func_mgr.lookup_by_bdf(bdf);
         if (c == null) return 1'b0;
         off  = c.is_vf ? 12'h120 : 12'h370;
@@ -673,30 +685,34 @@ class cosim_xrc_driver extends pcie_tl_rc_driver;
                 // Defer the QEMU ACK until the DUT Invalidation Completion returns.
                 pend_inval_qtag[itag] = dpi_tag;
                 pend_inval_bdf[itag]  = itgt;
-                // Stand-in DUT: flush its model ATC, then emit the Invalidation
-                // Completion (a real RTL DUT emits this on its CC channel instead).
-                if (ep_atc_pa.exists(itgt)) begin
-                    ep_atc_pa.delete(itgt);
-                    ep_atc_iova.delete(itgt);
-                    `uvm_info(get_name(), $sformatf(
-                        "EP(stand-in) ATC bdf=0x%04h iova=0x%0h -> FLUSHED, returning Invalidation Completion",
-                        itgt, dpi_addr), UVM_LOW)
-                end else begin
-                    `uvm_info(get_name(), $sformatf(
-                        "EP(stand-in) ATC bdf=0x%04h iova=0x%0h -> clean, returning Invalidation Completion",
-                        itgt, dpi_addr), UVM_LOW)
-                end
-                begin
-                    pcie_tl_cpl_tlp icpl = pcie_tl_cpl_tlp::type_id::create("ats_inval_cpl");
-                    icpl.kind         = pcie_tl_pkg::TLP_CPL; // Invalidation Completion (no data)
-                    icpl.fmt          = FMT_3DW_NO_DATA;
-                    icpl.type_f       = TLP_TYPE_CPL;
-                    icpl.tag          = itag;
-                    icpl.requester_id = itgt;
-                    icpl.completer_id = itgt;                 // from the device
-                    icpl.cpl_status   = CPL_STATUS_SC;
-                    icpl.length       = 0;
-                    m_rx_fifo.analysis_export.write(icpl);    // feed rx_loop like a DUT cpl
+                // Stand-in only: flush the model ATC and synthesize the DUT's
+                // Invalidation Completion. A real RTL DUT flushes its own ATC and
+                // emits the real Completion on its CC channel -> rx_loop matches
+                // the pending tag and ACKs QEMU (no synthesis, no double-ACK).
+                if (!real_dut) begin
+                    if (ep_atc_pa.exists(itgt)) begin
+                        ep_atc_pa.delete(itgt);
+                        ep_atc_iova.delete(itgt);
+                        `uvm_info(get_name(), $sformatf(
+                            "EP(stand-in) ATC bdf=0x%04h iova=0x%0h -> FLUSHED, returning Invalidation Completion",
+                            itgt, dpi_addr), UVM_LOW)
+                    end else begin
+                        `uvm_info(get_name(), $sformatf(
+                            "EP(stand-in) ATC bdf=0x%04h iova=0x%0h -> clean, returning Invalidation Completion",
+                            itgt, dpi_addr), UVM_LOW)
+                    end
+                    begin
+                        pcie_tl_cpl_tlp icpl = pcie_tl_cpl_tlp::type_id::create("ats_inval_cpl");
+                        icpl.kind         = pcie_tl_pkg::TLP_CPL; // Invalidation Completion (no data)
+                        icpl.fmt          = FMT_3DW_NO_DATA;
+                        icpl.type_f       = TLP_TYPE_CPL;
+                        icpl.tag          = itag;
+                        icpl.requester_id = itgt;
+                        icpl.completer_id = itgt;                 // from the device
+                        icpl.cpl_status   = CPL_STATUS_SC;
+                        icpl.length       = 0;
+                        m_rx_fifo.analysis_export.write(icpl);    // feed rx_loop like a DUT cpl
+                    end
                 end
                 total_tlp_count++;
                 #1;
@@ -742,7 +758,9 @@ class cosim_xrc_driver extends pcie_tl_rc_driver;
             // ---- EP data-plane model: intercept VF BAR writes (doorbell) ----
             // A write to an enabled VF's BAR is handled by the stand-in EP model
             // (initiates VF-sourced DMA/MSI-X). Reads still flow to the VIP DUT.
-            if (dpi_type == BV_TLP_MWR && func_mgr != null) begin
+            // Stand-in only: intercept VF-BAR writes as the EP doorbell. With a
+            // real DUT the write must flow THROUGH to the DUT (fall to send_tlp).
+            if (!real_dut && dpi_type == BV_TLP_MWR && func_mgr != null) begin
                 bit [15:0] vf_tgt = bridge_vcs_get_tlp_target_bdf_rc(rc_index);
                 pcie_tl_func_context vf_ctx = func_mgr.lookup_by_bdf(vf_tgt);
                 if (vf_ctx != null && vf_ctx.is_vf) begin
