@@ -1236,15 +1236,9 @@ if [ "$NEED_QEMU" = true ]; then
         # ---- 注入自定义设备代码 ----
         info "注入 CoSim PCIe 设备到 QEMU 源码树..."
 
-        # RC 设备（单 Function 模式）
+        # RC 设备（config-bypass 单设备；SR-IOV PF/VF 已合并进 cosim_pcie_rc.c）
         cp "${PROJECT_DIR}/qemu-plugin/cosim_pcie_rc.c" "${QEMU_DIR}/hw/net/"
         cp "${PROJECT_DIR}/qemu-plugin/cosim_pcie_rc.h" "${QEMU_DIR}/include/hw/net/"
-
-        # PF/VF 设备（多 Function SR-IOV 模式）
-        cp "${PROJECT_DIR}/qemu-plugin/cosim_pcie_pf.c" "${QEMU_DIR}/hw/net/"
-        cp "${PROJECT_DIR}/qemu-plugin/cosim_pcie_pf.h" "${QEMU_DIR}/include/hw/net/"
-        cp "${PROJECT_DIR}/qemu-plugin/cosim_pcie_vf.c" "${QEMU_DIR}/hw/net/"
-        cp "${PROJECT_DIR}/qemu-plugin/cosim_pcie_vf.h" "${QEMU_DIR}/include/hw/net/"
 
         # 共享头文件（topology 等）
         cp "${PROJECT_DIR}/bridge/common/cosim_topology.h" "${QEMU_DIR}/include/hw/net/"
@@ -1253,22 +1247,12 @@ if [ "$NEED_QEMU" = true ]; then
         if ! grep -q "cosim_pcie_rc" "$MESON_FILE"; then
             {
                 echo ""
-                echo "# CoSim PCIe devices"
+                echo "# CoSim PCIe device"
                 echo "system_ss.add(files('cosim_pcie_rc.c'))"
-                echo "system_ss.add(files('cosim_pcie_pf.c'))"
-                echo "system_ss.add(files('cosim_pcie_vf.c'))"
             } >> "$MESON_FILE"
-            ok "已修补 meson.build (RC + PF + VF)"
-        elif ! grep -q "cosim_pcie_pf" "$MESON_FILE"; then
-            {
-                echo ""
-                echo "# CoSim PCIe PF/VF devices (SR-IOV)"
-                echo "system_ss.add(files('cosim_pcie_pf.c'))"
-                echo "system_ss.add(files('cosim_pcie_vf.c'))"
-            } >> "$MESON_FILE"
-            ok "已补充 meson.build (PF + VF)"
+            ok "已修补 meson.build (cosim_pcie_rc)"
         else
-            info "meson.build 已包含 cosim_pcie_pf/vf，无需修改"
+            info "meson.build 已包含 cosim_pcie_rc，无需修改"
         fi
 
         # ---- 应用 QEMU patch（SR-IOV VF hotplug 支持）----
