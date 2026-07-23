@@ -138,7 +138,8 @@ typedef enum bit [7:0] {
     MSG_SET_SLOT_PWR    = 8'h50,
     MSG_VENDOR_TYPE0    = 8'h7E,
     MSG_VENDOR_TYPE1    = 8'h7F,
-    MSG_LTR             = 8'h10
+    MSG_LTR             = 8'h10,
+    MSG_ATS_INVALIDATION = 8'h01   // ATS Invalidate Request (RC -> device)
 } msg_code_e;
 
 // Alias for duplicate message code value
@@ -208,7 +209,8 @@ typedef enum bit [15:0] {
     EXT_CAP_ID_LTR     = 16'h0018,
     EXT_CAP_ID_VENDOR  = 16'h000B,
     EXT_CAP_ID_PASID   = 16'h001B,
-    EXT_CAP_ID_TPH     = 16'h0017
+    EXT_CAP_ID_TPH     = 16'h0017,
+    EXT_CAP_ID_PRI     = 16'h0013
 } ext_cap_id_e;
 
 // TLP Prefix type (byte 0 of prefix DW: Fmt[2:0]=100 + Type[4:0])

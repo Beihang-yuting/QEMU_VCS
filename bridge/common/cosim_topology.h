@@ -75,7 +75,38 @@ typedef struct {
 
 _Static_assert(sizeof(vf_event_t) == 4, "vf_event_t must be 4 bytes");
 
+/* ========== VF config sync (per-PF VF activation layout) ==========
+ * Sent after a VF enable/disable so the peer can build matching VF state:
+ * per-VF BDF (gap: BDF<->function mapping), BAR base (gap: VF MMIO base),
+ * MSI-X vector count (gap: MSI-X sync). Authoritative source is whichever
+ * side models the SR-IOV capability (normally the VCS/DUT side); the channel
+ * is duplex so either side can push. Parametric (VF0 base + stride) so it
+ * scales to many VFs in one small message. */
+typedef struct {
+    uint8_t  pf_index;        /* PF this VF set belongs to */
+    uint8_t  valid;           /* 1 = enable/update, 0 = disable */
+    uint16_t num_vfs;         /* number of VFs enabled */
+    uint16_t first_vf_bdf;    /* RID of VF0 (ARI-correct) */
+    uint16_t vf_bdf_stride;   /* RID stride between consecutive VFs */
+    uint16_t vf_msix_vectors; /* per-VF MSI-X table size */
+    uint16_t pad;
+    uint64_t vf_bar_base[COSIM_MAX_BARS];   /* VF0 BAR base per BAR (0 = unused) */
+    uint64_t vf_bar_stride[COSIM_MAX_BARS]; /* BAR base stride per VF (= per-VF BAR size) */
+} __attribute__((packed)) vf_config_t;
+
+_Static_assert(sizeof(vf_config_t) == 12 + 8 * COSIM_MAX_BARS * 2,
+               "vf_config_t must be 108 bytes");
+
 /* ========== Inline helpers ========== */
+
+/* Per-VF derived values from a parametric vf_config_t (k = VF index). */
+static inline uint16_t vf_config_bdf(const vf_config_t *c, int k) {
+    return (uint16_t)(c->first_vf_bdf + (uint16_t)(k * c->vf_bdf_stride));
+}
+static inline uint64_t vf_config_bar_base(const vf_config_t *c, int k, int bar) {
+    if (bar < 0 || bar >= COSIM_MAX_BARS || c->vf_bar_base[bar] == 0) return 0;
+    return c->vf_bar_base[bar] + (uint64_t)k * c->vf_bar_stride[bar];
+}
 
 static inline uint16_t tag_width_to_mask(uint8_t width) {
     switch (width) {

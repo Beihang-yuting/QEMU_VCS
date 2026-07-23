@@ -30,6 +30,7 @@ class cosim_xrc_driver extends pcie_tl_rc_driver;
     localparam byte unsigned BV_TLP_CFGWR0 = 8'd2;
     localparam byte unsigned BV_TLP_CFGRD0 = 8'd3;
     localparam byte unsigned BV_TLP_CPL    = 8'd4;
+    localparam byte unsigned BV_TLP_ATS_INVAL = 8'd17;  // RC->device ATS Invalidation
 
     // ---- Which RC this driver serves (its slot in the C-side g_rc[]) ----
     int rc_index = 0;
@@ -39,6 +40,45 @@ class cosim_xrc_driver extends pcie_tl_rc_driver;
 
     // ---- 统一 config space: func_mgr(num_pfs=1 即单func, 多func/SR-IOV 同一套)----
     pcie_tl_func_manager func_mgr;
+
+    // ---- EP data-plane model (stand-in DUT) ------------------------------
+    // A minimal behavioral EP that exercises the VF DMA/MSI-X data plane. The
+    // guest programs a per-VF doorbell in the VF BAR0 register file; a write to
+    // the CTRL doorbell makes the EP initiate DMA (to/from guest memory) and/or
+    // an MSI-X (memory-write to the APIC), all sourced by that VF. Replaceable
+    // by a real DUT later — the RC/bridge path is unchanged.
+    //   BAR0 offset map (32-bit regs):
+    //     0x00 DMA_ADDR_LO   0x04 DMA_ADDR_HI   0x08 DMA_PATTERN
+    //     0x0C CTRL: bit0=DMA-write pattern, bit1=DMA-read, bit2=MSI-X
+    bit [63:0] ep_dma_addr    [bit [15:0]];   // per-VF DMA target guest addr
+    bit [31:0] ep_dma_pattern [bit [15:0]];   // per-VF DMA-write pattern
+    // ATS device-side ATC (Address Translation Cache): per-VF cached translation
+    // {iova -> translated PA}. Filled on ATS grant, used on ATC hit (no re-
+    // translate), flushed by an RC ATS-Invalidation. exists(vf_bdf) = valid.
+    bit [63:0] ep_atc_iova [bit [15:0]];
+    bit [63:0] ep_atc_pa   [bit [15:0]];
+    // Current PASID per VF (0 = none), set by the guest via a BAR0 doorbell reg
+    // (0x14). A PASID-tagged ATS translation carries this + requires PASID enable.
+    bit [15:0] ep_pasid    [bit [15:0]];
+    // Pending ATS Invalidations awaiting the DUT's Invalidation Completion.
+    // Keyed by the Invalidate Message tag; value = the QEMU tag to ACK once the
+    // DUT completion returns (bridged by rx_loop). Real DUT closes this loop by
+    // returning an Invalidation Completion; the stand-in synthesizes one.
+    int        pend_inval_qtag [bit [9:0]];
+    bit [15:0] pend_inval_bdf  [bit [9:0]];
+    localparam bit [63:0] EP_MSIX_APIC_ADDR = 64'h0000_0000_FEE0_0000;
+
+    // Per-VF MSI-X table entry 0 (captured from guest writes to VF BAR0+0x1000).
+    // The guest driver / VFIO programs msg addr/data + vector control; the EP
+    // fires the captured addr/data on a MSI-X doorbell so the interrupt lands on
+    // the guest-chosen vector route (vs the old hard-coded APIC poke).
+    localparam bit [63:0] EP_MSIX_TABLE_OFF = 64'h1000;  // matches cfg cap Table Offset
+    localparam int        EP_MSIX_NVEC      = 8;         // matches cfg cap table_size
+    // Per-(VF,vector) MSI-X table entries. Key = {vf_bdf[15:0], vector[2:0]}.
+    bit [63:0] ep_msix_addr [bit [18:0]];     // msg addr (hi<<32|lo)
+    bit [31:0] ep_msix_data [bit [18:0]];     // msg data
+    bit        ep_msix_mask [bit [18:0]];     // vector control bit0 (1=masked)
+    bit [2:0]  ep_msix_sel  [bit [15:0]];     // per-VF selected vector for doorbell
 
     // ---- Tag mapping: QEMU 8-bit tag <-> VIP tag ----
     bit [9:0] vip_tag_to_qemu_tag[int];        // 10-bit QEMU tag (extended tag)
@@ -196,7 +236,8 @@ class cosim_xrc_driver extends pcie_tl_rc_driver;
         join_none
 
         // ---- 阶段1: VIP 主导, 等 UCLI 触发 ----
-        if (!bridge_ready) begin
+        // +COSIM_AUTOSTART: 批量运行(无 UCLI)跳过阶段1, 直接连 QEMU。
+        if (!bridge_ready && !$test$plusargs("COSIM_AUTOSTART")) begin
             fork : vip_stage
                 super.run_phase(phase);   // 基类 forever get_next_item/send_tlp/item_done
             join_none
@@ -240,6 +281,346 @@ class cosim_xrc_driver extends pcie_tl_rc_driver;
     // request_loop: poll this RC's QEMU, forward MMIO to the DUT (via adapter
     // -> CQ), answer config-space reads/writes locally via the proxy.
     // -----------------------------------------------------------------------
+    // EP model: handle a VF BAR0 register write (doorbell protocol). A CTRL
+    // write drives DMA and/or MSI-X sourced by this VF, through the same cosim
+    // bridge the guest reached over MMIO.
+    task ep_vf_mmio_write(int rc, bit [15:0] vf_bdf, bit [63:0] addr, bit [31:0] val);
+        int off = int'(addr & 64'hFFFF);   // offset within the 64KB VF BAR
+        int unsigned dbuf[16];
+        int unsigned aops[4];
+        int unsigned aold[2];
+        int rr;
+        longint unsigned tpa;   // ATS translated PA (out of ats_translate_rc)
+        // MSI-X table region (BAR0 + 0x1000 .. +NVEC*16): capture each vector's
+        // msg addr/data/mask as the guest/VFIO programs it. Key = {vf_bdf,vec}.
+        if (off >= int'(EP_MSIX_TABLE_OFF) &&
+            off <  int'(EP_MSIX_TABLE_OFF) + EP_MSIX_NVEC*16) begin
+            int vec = (off - int'(EP_MSIX_TABLE_OFF)) / 16;
+            int fld = (off - int'(EP_MSIX_TABLE_OFF)) % 16;
+            bit [18:0] k = {vf_bdf, vec[2:0]};
+            case (fld)
+                0:  ep_msix_addr[k][31:0]  = val;
+                4:  ep_msix_addr[k][63:32] = val;
+                8:  ep_msix_data[k]        = val;
+                12: begin
+                    ep_msix_mask[k] = val[0];
+                    `uvm_info(get_name(), $sformatf(
+                        "EP VF bdf=0x%04h MSI-X table[%0d]: addr=0x%0h data=0x%08h mask=%0d",
+                        vf_bdf, vec, ep_msix_addr[k], ep_msix_data[k], val[0]), UVM_LOW)
+                end
+                default: ;
+            endcase
+            return;
+        end
+        case (off)
+            16'h0000: ep_dma_addr[vf_bdf][31:0]  = val;
+            16'h0004: ep_dma_addr[vf_bdf][63:32] = val;
+            16'h0008: ep_dma_pattern[vf_bdf]     = val;
+            16'h000C: begin   // CTRL doorbell
+                for (int i = 0; i < 16; i++) dbuf[i] = 0;
+                if (val & 32'h1) begin        // DMA-write pattern (4B) to guest RAM
+                    dbuf[0] = ep_dma_pattern[vf_bdf];
+                    rr = bridge_vcs_dma_write_rc_rid(rc, int'(vf_bdf), ep_dma_addr[vf_bdf], dbuf, 4);
+                    `uvm_info(get_name(), $sformatf(
+                        "EP VF bdf=0x%04h DMA-WRITE pattern=0x%08h -> gpa=0x%0h ret=%0d",
+                        vf_bdf, ep_dma_pattern[vf_bdf], ep_dma_addr[vf_bdf], rr), UVM_LOW)
+                end
+                if (val & 32'h2) begin        // DMA-read 4B from guest RAM
+                    rr = bridge_vcs_dma_read_rc_rid(rc, int'(vf_bdf), ep_dma_addr[vf_bdf], dbuf, 4);
+                    `uvm_info(get_name(), $sformatf(
+                        "EP VF bdf=0x%04h DMA-READ gpa=0x%0h -> 0x%08h ret=%0d",
+                        vf_bdf, ep_dma_addr[vf_bdf], dbuf[0], rr), UVM_LOW)
+                end
+                if (val & 32'h4) begin        // MSI-X: fire the selected vector
+                    bit [2:0]  vsel = ep_msix_sel.exists(vf_bdf) ? ep_msix_sel[vf_bdf] : 3'd0;
+                    bit [18:0] k    = {vf_bdf, vsel};
+                    if (ep_msix_addr.exists(k) && ep_msix_addr[k] != 0 &&
+                        !ep_msix_mask[k]) begin
+                        // Guest/VFIO programmed this vector — fire its exact addr/data.
+                        dbuf[0] = ep_msix_data[k];
+                        rr = bridge_vcs_dma_write_rc_rid(rc, int'(vf_bdf),
+                                                         ep_msix_addr[k], dbuf, 4);
+                        `uvm_info(get_name(), $sformatf(
+                            "EP VF bdf=0x%04h MSI-X(programmed) vec=%0d -> addr=0x%0h data=0x%08h ret=%0d",
+                            vf_bdf, vsel, ep_msix_addr[k], dbuf[0], rr), UVM_LOW)
+                    end else begin
+                        // No table programmed (or masked): legacy hard-coded APIC poke.
+                        dbuf[0] = 32'h0000_0021;
+                        rr = bridge_vcs_dma_write_rc_rid(rc, int'(vf_bdf), EP_MSIX_APIC_ADDR, dbuf, 4);
+                        `uvm_info(get_name(), $sformatf(
+                            "EP VF bdf=0x%04h MSI-X(fallback) vec=%0d -> apic=0x%0h data=0x%08h ret=%0d",
+                            vf_bdf, vsel, EP_MSIX_APIC_ADDR, dbuf[0], rr), UVM_LOW)
+                    end
+                end
+                if (val & 32'h8) begin        // AtomicOp FetchAdd += 1 on DMA target
+                    for (int i = 0; i < 4; i++) aops[i] = 0;
+                    aops[0] = 1;
+                    rr = bridge_vcs_dma_atomic_rc(rc, ep_dma_addr[vf_bdf], 2, 4, aops, aold);
+                    `uvm_info(get_name(), $sformatf(
+                        "EP VF bdf=0x%04h ATOMIC FetchAdd+1 gpa=0x%0h old=0x%08h ret=%0d",
+                        vf_bdf, ep_dma_addr[vf_bdf], aold[0], rr), UVM_LOW)
+                end
+                if (val & 32'h10) begin       // ATS: (ATC lookup ->) translate, AT=10 write
+                    bit atc_hit = (ep_atc_pa.exists(vf_bdf) &&
+                                   ep_atc_iova[vf_bdf] == ep_dma_addr[vf_bdf]);
+                    rr = -1;
+                    if (atc_hit) begin
+                        // ATC HIT — reuse the cached translation, no re-translate.
+                        tpa = ep_atc_pa[vf_bdf];
+                        rr = 0;
+                        `uvm_info(get_name(), $sformatf(
+                            "EP VF bdf=0x%04h ATS ATC HIT iova=0x%0h -> pa=0x%0h (cached, no re-translate)",
+                            vf_bdf, ep_dma_addr[vf_bdf], tpa), UVM_LOW)
+                    end else begin
+                        // ATC MISS — Translation Request to the RC.
+                        tpa = 0;
+                        rr = bridge_vcs_ats_translate_rc(rc, int'(vf_bdf), ep_dma_addr[vf_bdf], tpa);
+                        if (rr == 0) begin
+                            ep_atc_iova[vf_bdf] = ep_dma_addr[vf_bdf];
+                            ep_atc_pa[vf_bdf]   = tpa;   // fill ATC
+                            `uvm_info(get_name(), $sformatf(
+                                "EP VF bdf=0x%04h ATS ATC MISS -> GRANT iova=0x%0h pa=0x%0h (cached)",
+                                vf_bdf, ep_dma_addr[vf_bdf], tpa), UVM_LOW)
+                        end else begin
+                            `uvm_info(get_name(), $sformatf(
+                                "EP VF bdf=0x%04h ATS DENY iova=0x%0h (no translation, DMA skipped) ret=%0d",
+                                vf_bdf, ep_dma_addr[vf_bdf], rr), UVM_LOW)
+                        end
+                    end
+                    if (rr == 0) begin
+                        // AT=10 write with the (cached or freshly-granted) PA.
+                        dbuf[0] = ep_dma_pattern[vf_bdf];
+                        rr = bridge_vcs_dma_write_rc_rid_at(rc, int'(vf_bdf), tpa, dbuf, 4);
+                        `uvm_info(get_name(), $sformatf(
+                            "EP VF bdf=0x%04h AT-write pa=0x%0h pattern=0x%08h ret=%0d",
+                            vf_bdf, tpa, ep_dma_pattern[vf_bdf], rr), UVM_LOW)
+                    end
+                end
+                if (val & 32'h20) begin       // PRI: page request for the IOVA
+                    // Gate: the device may only issue Page Requests once PRI is
+                    // enabled (PRI Control.Enable, guest pci_enable_pri / setpci).
+                    if (!pri_enabled_for(vf_bdf)) begin
+                        `uvm_info(get_name(), $sformatf(
+                            "EP VF bdf=0x%04h PRI page-req BLOCKED — PRI not enabled (Control.Enable=0)",
+                            vf_bdf), UVM_LOW)
+                    end else begin
+                        rr = bridge_vcs_ats_page_req_rc(rc, int'(vf_bdf), ep_dma_addr[vf_bdf]);
+                        `uvm_info(get_name(), $sformatf(
+                            "EP VF bdf=0x%04h PRI page-req iova=0x%0h -> %s ret=%0d",
+                            vf_bdf, ep_dma_addr[vf_bdf], (rr == 0) ? "SUCCESS" : "FAIL", rr), UVM_LOW)
+                    end
+                end
+                if (val & 32'h40) begin       // TEST: emit a real DUT Translation Request
+                    // TLP through the VIP bridging path (handle_dut_ats_tlp), as a
+                    // real RTL DUT's hardware would on its RQ channel (AT=01).
+                    pcie_tl_mem_tlp treq = pcie_tl_mem_tlp::type_id::create("ats_treq");
+                    treq.kind         = TLP_MEM_RD;
+                    treq.at           = 2'b01;                 // Translation Request
+                    treq.addr         = ep_dma_addr[vf_bdf];
+                    treq.requester_id = vf_bdf;
+                    treq.length       = 2;                     // 8B translation
+                    treq.tag          = 10'h055;
+                    `uvm_info(get_name(), $sformatf(
+                        "EP VF bdf=0x%04h emit DUT Translation Request(AT=01) iova=0x%0h -> VIP handler",
+                        vf_bdf, ep_dma_addr[vf_bdf]), UVM_LOW)
+                    handle_dut_ats_tlp(treq);
+                end
+                if (val & 32'h80) begin       // TEST: DUT translated(AT=10) READ TLP
+                    // through the VIP path -> reads guest memory, returns CplD.
+                    pcie_tl_mem_tlp rreq = pcie_tl_mem_tlp::type_id::create("ats_rd");
+                    rreq.kind         = TLP_MEM_RD;
+                    rreq.at           = 2'b10;                 // translated (pre-authorized PA)
+                    rreq.addr         = ep_dma_addr[vf_bdf];
+                    rreq.requester_id = vf_bdf;
+                    rreq.length       = 1;                     // 4B
+                    rreq.tag          = 10'h056;
+                    `uvm_info(get_name(), $sformatf(
+                        "EP VF bdf=0x%04h emit DUT translated(AT=10) READ pa=0x%0h -> VIP handler",
+                        vf_bdf, ep_dma_addr[vf_bdf]), UVM_LOW)
+                    handle_dut_ats_tlp(rreq);
+                end
+            end
+            16'h0010: ep_msix_sel[vf_bdf] = val[2:0];  // select MSI-X vector for doorbell
+            16'h0014: ep_pasid[vf_bdf]    = val[15:0]; // set current PASID for ATS
+            default: ; // other offsets ignored by the EP model
+        endcase
+    endtask
+
+    // -----------------------------------------------------------------------
+    // ats_enabled_for: read the requester's ATS Control Register Enable bit
+    // (Control[15] = DW bit31 at ATS-cap-offset+4). The guest sets it via
+    // pci_enable_ats / setpci; config-bypass lands it in the func's cfg_mgr.
+    // ATS cap is @0x100 on a VF, @0x350 on a PF (see func_manager §6.15).
+    // -----------------------------------------------------------------------
+    protected function bit ats_enabled_for(bit [15:0] bdf);
+        pcie_tl_func_context c;
+        bit [11:0] off;
+        bit [31:0] ctrl;
+        if (func_mgr == null) return 1'b1;         // no func_mgr -> don't gate
+        c = func_mgr.lookup_by_bdf(bdf);
+        if (c == null) return 1'b0;
+        off  = c.is_vf ? 12'h100 : 12'h350;
+        ctrl = c.cfg_mgr.read(off + 4);            // [31:16] = ATS Control Register
+        return ctrl[31];                            // Enable = Control bit15
+    endfunction
+
+    // -----------------------------------------------------------------------
+    // pri_enabled_for: read the requester's PRI Control Register Enable bit
+    // (Control[0] = DW bit0 at PRI-cap-offset+4). Guest sets it via
+    // pci_enable_pri / setpci. PRI cap @0x110 on a VF, @0x360 on a PF (§6.15).
+    // -----------------------------------------------------------------------
+    protected function bit pri_enabled_for(bit [15:0] bdf);
+        pcie_tl_func_context c;
+        bit [11:0] off;
+        bit [31:0] ctrl;
+        if (func_mgr == null) return 1'b1;         // no func_mgr -> don't gate
+        c = func_mgr.lookup_by_bdf(bdf);
+        if (c == null) return 1'b0;
+        off  = c.is_vf ? 12'h110 : 12'h360;
+        ctrl = c.cfg_mgr.read(off + 4);            // [15:0] = PRI Control Register
+        return ctrl[0];                             // Enable = Control bit0
+    endfunction
+
+    // -----------------------------------------------------------------------
+    // pasid_enabled_for: read the requester's PASID Control Register Enable bit
+    // (Control[0] = DW bit16, since PASID Control is [31:16] at cap+4). Guest
+    // sets it via pci_enable_pasid / setpci. PASID cap @0x120 VF, @0x370 PF.
+    // -----------------------------------------------------------------------
+    protected function bit pasid_enabled_for(bit [15:0] bdf);
+        pcie_tl_func_context c;
+        bit [11:0] off;
+        bit [31:0] ctrl;
+        if (func_mgr == null) return 1'b1;
+        c = func_mgr.lookup_by_bdf(bdf);
+        if (c == null) return 1'b0;
+        off  = c.is_vf ? 12'h120 : 12'h370;
+        ctrl = c.cfg_mgr.read(off + 4);            // [31:16] = PASID Control Register
+        return ctrl[16];                            // PASID Enable = Control bit0
+    endfunction
+
+    // -----------------------------------------------------------------------
+    // handle_dut_ats_tlp: bridge a DUT-initiated ATS TLP (a real RTL DUT emits
+    // these on its RQ channel; the monitor decodes them into pcie_tl_mem_tlp
+    // with the AT field). This is the VIP-layer seam that makes real DUT ATS
+    // work — the functional bridge maps the TLP to QEMU's RC/IOMMU:
+    //   AT=01 Translation Request -> ask QEMU to translate, reply a Translation
+    //         Completion (CplD carrying the translated PA) back to the DUT.
+    //   AT=10 Translated write     -> bridge to QEMU DMA with the AT flag (the
+    //         RC bypasses the per-VF window, trusting the pre-authorized PA).
+    //   AT=00 Untranslated         -> ordinary DUT-initiated DMA (bridged
+    //         elsewhere; logged here).
+    // -----------------------------------------------------------------------
+    protected task handle_dut_ats_tlp(pcie_tl_mem_tlp mem);
+        bit [15:0]       rid = mem.requester_id;
+        longint unsigned pa;
+        int              trr, wr;
+        int unsigned     dbuf[16];
+        // ATS must be enabled in the requester's ATS Control Register before it
+        // may issue Translation Requests (AT=01) or use translated addresses
+        // (AT=10). Untranslated (AT=00) DMA is ungated.
+        bit ats_en = (mem.at == 2'b00) ? 1'b1 : ats_enabled_for(rid);
+        // Current PASID for this requester (0 = no PASID). A tagged translation
+        // additionally requires PASID Control.Enable.
+        bit [15:0] pasid    = ep_pasid.exists(rid) ? ep_pasid[rid] : 16'h0;
+        bit        pasid_ok = (pasid == 16'h0) || pasid_enabled_for(rid);
+        if (mem.at == 2'b01) begin
+            pa  = 0;
+            // Gate: ATS enabled, and (if PASID-tagged) PASID enabled.
+            if (!ats_en) begin
+                trr = -1;
+                `uvm_info(get_name(), $sformatf(
+                    "VIP ATS: bdf=0x%04h Translation Request BLOCKED — ATS not enabled (Control.Enable=0)",
+                    rid), UVM_LOW)
+            end else if (!pasid_ok) begin
+                trr = -1;
+                `uvm_info(get_name(), $sformatf(
+                    "VIP ATS: bdf=0x%04h pasid=0x%05h Translation Request BLOCKED — PASID not enabled",
+                    rid, pasid), UVM_LOW)
+            end else begin
+                trr = (pasid != 16'h0)
+                    ? bridge_vcs_ats_translate_rc_pasid(rc_index, int'(rid), int'(pasid), mem.addr, pa)
+                    : bridge_vcs_ats_translate_rc(rc_index, int'(rid), mem.addr, pa);
+            end
+            begin
+                pcie_tl_cpl_tlp cpl = pcie_tl_cpl_tlp::type_id::create("ats_xlate_cpl");
+                cpl.kind         = TLP_CPLD;
+                cpl.fmt          = FMT_3DW_WITH_DATA;
+                cpl.type_f       = TLP_TYPE_CPL;
+                cpl.attr         = mem.attr;
+                cpl.at           = 2'b10;              // completion carries translated addr
+                cpl.tc           = mem.tc;
+                cpl.requester_id = rid;
+                cpl.tag          = mem.tag;
+                cpl.completer_id = 16'h0000;           // RC
+                cpl.cpl_status   = (trr == 0) ? CPL_STATUS_SC : CPL_STATUS_UR;
+                cpl.length       = 2;                  // 8B translated PA
+                cpl.byte_count   = 8;
+                cpl.payload      = new[8];
+                for (int b = 0; b < 8; b++) cpl.payload[b] = pa[8*b +: 8];
+                send_tlp(cpl);
+                `uvm_info(get_name(), $sformatf(
+                    "VIP ATS: DUT Translation Request bdf=0x%04h pasid=0x%05h iova=0x%0h -> %s pa=0x%0h; sent Translation Completion tag=%0d",
+                    rid, pasid, mem.addr, (trr==0)?"GRANT":"DENY", pa, mem.tag), UVM_LOW)
+            end
+        end else begin
+            // AT=00 (untranslated) or AT=10 (translated, pre-authorized) memory
+            // access. Translated ops use the *_at DPI (RC bypasses the window).
+            bit translated = (mem.at == 2'b10);
+            int nbytes = mem.length * 4;
+            // Gate: AT=10 requires ATS enabled (a real RC rejects a Translated
+            // request from a function whose ATS Control.Enable=0 as UR).
+            if (translated && !ats_en) begin
+                `uvm_info(get_name(), $sformatf(
+                    "VIP ATS: bdf=0x%04h translated(AT=10) %s BLOCKED — ATS not enabled",
+                    rid, mem.kind.name()), UVM_LOW)
+                return;
+            end
+            if (nbytes <= 0) nbytes = 4;
+            for (int i = 0; i < 16; i++) dbuf[i] = 0;
+            if (mem.kind == TLP_MEM_RD) begin
+                // DUT read -> read guest memory, return a CplD with the data.
+                wr = translated
+                   ? bridge_vcs_dma_read_rc_rid_at(rc_index, int'(rid), mem.addr, dbuf, nbytes)
+                   : bridge_vcs_dma_read_rc_rid   (rc_index, int'(rid), mem.addr, dbuf, nbytes);
+                begin
+                    pcie_tl_cpl_tlp cpl = pcie_tl_cpl_tlp::type_id::create("dut_rd_cpl");
+                    cpl.kind         = TLP_CPLD;
+                    cpl.fmt          = FMT_3DW_WITH_DATA;
+                    cpl.type_f       = TLP_TYPE_CPL;
+                    cpl.attr         = mem.attr;
+                    cpl.at           = mem.at;
+                    cpl.tc           = mem.tc;
+                    cpl.requester_id = rid;
+                    cpl.tag          = mem.tag;
+                    cpl.completer_id = 16'h0000;
+                    cpl.cpl_status   = (wr == 0) ? CPL_STATUS_SC : CPL_STATUS_UR;
+                    cpl.length       = mem.length;
+                    cpl.byte_count   = nbytes[11:0];
+                    cpl.payload      = new[nbytes];
+                    for (int b = 0; b < nbytes; b++)
+                        cpl.payload[b] = dbuf[b/4][8*(b%4) +: 8];
+                    send_tlp(cpl);
+                    `uvm_info(get_name(), $sformatf(
+                        "VIP: DUT %s read bdf=0x%04h addr=0x%0h len=%0d ret=%0d -> CplD data[0]=0x%08h",
+                        translated?"translated(AT=10)":"untranslated(AT=00)",
+                        rid, mem.addr, nbytes, wr, dbuf[0]), UVM_LOW)
+                end
+            end else begin
+                // DUT write -> pack payload, write guest memory.
+                for (int i = 0; i < 16 && (i*4) < mem.payload.size(); i++)
+                    dbuf[i] = {mem.payload[i*4+3], mem.payload[i*4+2],
+                               mem.payload[i*4+1], mem.payload[i*4+0]};
+                wr = translated
+                   ? bridge_vcs_dma_write_rc_rid_at(rc_index, int'(rid), mem.addr, dbuf, nbytes)
+                   : bridge_vcs_dma_write_rc_rid   (rc_index, int'(rid), mem.addr, dbuf, nbytes);
+                `uvm_info(get_name(), $sformatf(
+                    "VIP: DUT %s write bdf=0x%04h addr=0x%0h len=%0d ret=%0d",
+                    translated?"translated(AT=10)":"untranslated(AT=00)",
+                    rid, mem.addr, nbytes, wr), UVM_LOW)
+            end
+        end
+    endtask
+
     protected task request_loop(uvm_phase phase);
         int         ret;
         pcie_tl_tlp vip_tlp;
@@ -266,6 +647,61 @@ class cosim_xrc_driver extends pcie_tl_rc_driver;
             dpi_tag  = bridge_vcs_get_poll_tag_rc(rc_index);
             for (int i = 0; i < 16; i++)
                 dpi_data[i] = bridge_vcs_get_poll_data_rc(rc_index, i);
+
+            // ---- ATS Invalidation (RC -> device): send an Invalidate Message,
+            //      then ACK QEMU ONLY after the DUT returns an Invalidation
+            //      Completion (bridged by rx_loop). A real RTL DUT emits that
+            //      completion on its CC channel; the stand-in synthesizes one. ----
+            if (dpi_type == BV_TLP_ATS_INVAL) begin
+                bit [15:0] itgt = bridge_vcs_get_tlp_target_bdf_rc(rc_index);
+                bit [9:0]  itag = dpi_tag[9:0];   // Invalidate Message tag (echoed by cpl)
+                begin
+                    pcie_tl_msg_tlp inv = pcie_tl_msg_tlp::type_id::create("ats_inval_msg");
+                    inv.kind         = TLP_MSG;
+                    inv.fmt          = FMT_4DW_NO_DATA;
+                    inv.type_f       = TLP_TYPE_MSG_ID;       // ID-routed to the device
+                    inv.msg_code     = MSG_ATS_INVALIDATION;
+                    inv.msg_addr     = dpi_addr;              // window base being invalidated
+                    inv.target_id    = itgt;
+                    inv.requester_id = 16'h0000;              // RC
+                    inv.tag          = itag;
+                    send_tlp(inv);
+                    `uvm_info(get_name(), $sformatf(
+                        "RC%0d sent ATS Invalidate Request Message -> DUT bdf=0x%04h iova=0x%0h tag=0x%03h (await Completion)",
+                        rc_index, itgt, dpi_addr, itag), UVM_LOW)
+                end
+                // Defer the QEMU ACK until the DUT Invalidation Completion returns.
+                pend_inval_qtag[itag] = dpi_tag;
+                pend_inval_bdf[itag]  = itgt;
+                // Stand-in DUT: flush its model ATC, then emit the Invalidation
+                // Completion (a real RTL DUT emits this on its CC channel instead).
+                if (ep_atc_pa.exists(itgt)) begin
+                    ep_atc_pa.delete(itgt);
+                    ep_atc_iova.delete(itgt);
+                    `uvm_info(get_name(), $sformatf(
+                        "EP(stand-in) ATC bdf=0x%04h iova=0x%0h -> FLUSHED, returning Invalidation Completion",
+                        itgt, dpi_addr), UVM_LOW)
+                end else begin
+                    `uvm_info(get_name(), $sformatf(
+                        "EP(stand-in) ATC bdf=0x%04h iova=0x%0h -> clean, returning Invalidation Completion",
+                        itgt, dpi_addr), UVM_LOW)
+                end
+                begin
+                    pcie_tl_cpl_tlp icpl = pcie_tl_cpl_tlp::type_id::create("ats_inval_cpl");
+                    icpl.kind         = pcie_tl_pkg::TLP_CPL; // Invalidation Completion (no data)
+                    icpl.fmt          = FMT_3DW_NO_DATA;
+                    icpl.type_f       = TLP_TYPE_CPL;
+                    icpl.tag          = itag;
+                    icpl.requester_id = itgt;
+                    icpl.completer_id = itgt;                 // from the device
+                    icpl.cpl_status   = CPL_STATUS_SC;
+                    icpl.length       = 0;
+                    m_rx_fifo.analysis_export.write(icpl);    // feed rx_loop like a DUT cpl
+                end
+                total_tlp_count++;
+                #1;
+                continue;
+            end
 
             // ---- Config-space bypass: func_mgr(_bdf) answers, never reaches DUT ----
             //   target BDF 从 TLP 取(QEMU 已填, DPI getter 现成), 路由到对应 PF/VF。
@@ -300,6 +736,20 @@ class cosim_xrc_driver extends pcie_tl_rc_driver;
                         #1;
                         continue;
                     end
+                end
+            end
+
+            // ---- EP data-plane model: intercept VF BAR writes (doorbell) ----
+            // A write to an enabled VF's BAR is handled by the stand-in EP model
+            // (initiates VF-sourced DMA/MSI-X). Reads still flow to the VIP DUT.
+            if (dpi_type == BV_TLP_MWR && func_mgr != null) begin
+                bit [15:0] vf_tgt = bridge_vcs_get_tlp_target_bdf_rc(rc_index);
+                pcie_tl_func_context vf_ctx = func_mgr.lookup_by_bdf(vf_tgt);
+                if (vf_ctx != null && vf_ctx.is_vf) begin
+                    ep_vf_mmio_write(rc_index, vf_tgt, dpi_addr, dpi_data[0]);
+                    total_tlp_count++;
+                    #1;
+                    continue;
                 end
             end
 
@@ -339,16 +789,34 @@ class cosim_xrc_driver extends pcie_tl_rc_driver;
             m_rx_fifo.get(rx_tlp);   // 阻塞: 有 TLP(CC/RX)才返回, 永不为 null
 
             if ($cast(cpl, rx_tlp)) begin
-                if (cosim_active)
+                if (pend_inval_qtag.exists(cpl.tag)) begin
+                    // DUT Invalidation Completion -> close the loop: ACK QEMU now.
+                    int        qtag = pend_inval_qtag[cpl.tag];
+                    bit [15:0] ibdf = pend_inval_bdf[cpl.tag];
+                    pend_inval_qtag.delete(cpl.tag);
+                    pend_inval_bdf.delete(cpl.tag);
+                    for (int i = 0; i < 16; i++) bridge_vcs_set_cpl_data_rc(rc_index, i, 0);
+                    void'(bridge_vcs_send_cpl_scalar_rc(rc_index, qtag, 1));
+                    `uvm_info(get_name(), $sformatf(
+                        "RC%0d ATS Invalidation Completion from DUT bdf=0x%04h tag=0x%03h -> ACK QEMU tag=0x%03h",
+                        rc_index, ibdf, cpl.tag, qtag), UVM_LOW)
+                end else if (cosim_active)
                     forward_completion_to_qemu(cpl);      // 阶段2: VIP tag→QEMU tag, 回 QEMU
                 else
                     void'(super.handle_completion(cpl));  // 阶段1: VIP tag_mgr 匹配+释放, 回 sequence
             end else begin
-                // DUT-initiated request (DMA MRd/MWr). MMIO-first scope: log only.
+                // DUT-initiated request (MRd/MWr on RQ). Real DUT ATS traffic
+                // (AT=01 Translation Request / AT=10 translated DMA) is bridged
+                // to QEMU here; other (AT=00) DMA is logged as TODO.
+                pcie_tl_mem_tlp mem;
                 inbound_req_count++;
-                `uvm_info(get_name(),
-                    $sformatf("RC%0d inbound DUT request %s (DMA path TODO, dropping)",
-                              rc_index, rx_tlp.kind.name()), UVM_MEDIUM)
+                if ($cast(mem, rx_tlp)) begin
+                    handle_dut_ats_tlp(mem);
+                end else begin
+                    `uvm_info(get_name(),
+                        $sformatf("RC%0d inbound DUT request %s (non-mem, dropping)",
+                                  rc_index, rx_tlp.kind.name()), UVM_MEDIUM)
+                end
             end
         end
     endtask

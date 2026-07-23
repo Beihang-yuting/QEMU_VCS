@@ -2,6 +2,7 @@
 #define BRIDGE_QEMU_H
 
 #include "cosim_types.h"
+#include "cosim_topology.h"
 #include "shm_layout.h"
 #include "sock_sync.h"
 #include "trace_log.h"
@@ -21,6 +22,13 @@ typedef struct {
     struct cosim_transport *transport;  /* NULL = legacy SHM mode */
     pthread_mutex_t tlp_mutex;         /* protects send_tlp + wait_completion */
     int             debug;             /* runtime debug print toggle */
+    /* VF config sync (VCS/DUT authoritative → QEMU applies). Received inline
+     * on the ctrl channel during a CfgWr completion wait; dispatched to the
+     * device via vf_config_cb if registered, else stashed for polling. */
+    vf_config_t     vf_config;         /* last received VF config */
+    int             vf_config_pending; /* set when a new vf_config arrived */
+    void          (*vf_config_cb)(const vf_config_t *cfg, void *user);
+    void           *vf_config_user;
 } bridge_ctx_t;
 
 bridge_ctx_t *bridge_init(const char *shm_name, const char *sock_path);
@@ -36,6 +44,9 @@ int bridge_wait_completion_timed(bridge_ctx_t *ctx, uint16_t tag,
 int bridge_send_tlp_and_wait_timed(bridge_ctx_t *ctx, tlp_entry_t *req,
                                    cpl_entry_t *cpl, int timeout_ms);
 int bridge_send_tlp_fire(bridge_ctx_t *ctx, tlp_entry_t *req);
+/* Bounded drain of VF_CONFIG/VF_EVENT pushed by VCS after a fire-and-forget
+ * SR-IOV VF-enable CfgWr; applies the VF layout before the guest probes VFs. */
+void bridge_drain_vf_pending(bridge_ctx_t *ctx, int timeout_ms);
 void bridge_destroy(bridge_ctx_t *ctx);
 
 /* P2: DMA completion (QEMU→VCS) */
@@ -68,6 +79,16 @@ int bridge_query_topology(bridge_ctx_t *ctx, topology_resp_t *topo);
 
 /* P3: Notify VCS of SR-IOV VF enable/disable */
 int bridge_send_vf_event(bridge_ctx_t *ctx, const vf_event_t *ev);
+
+/* VF config sync. bridge_send_vf_config: QEMU→VCS push (duplex, when QEMU owns
+ * SR-IOV). bridge_set_vf_config_cb: register device callback invoked when a
+ * VCS-pushed vf_config is received inline. bridge_poll_vf_config: pull the last
+ * received config (returns 1 if pending, clears the flag). */
+int  bridge_send_vf_config(bridge_ctx_t *ctx, const vf_config_t *cfg);
+void bridge_set_vf_config_cb(bridge_ctx_t *ctx,
+                             void (*cb)(const vf_config_t *cfg, void *user),
+                             void *user);
+int  bridge_poll_vf_config(bridge_ctx_t *ctx, vf_config_t *cfg);
 
 /* P3: BDF-aware TLP send — sets requester_id and target_bdf before sending */
 int bridge_send_tlp_bdf(bridge_ctx_t *ctx, tlp_entry_t *req,

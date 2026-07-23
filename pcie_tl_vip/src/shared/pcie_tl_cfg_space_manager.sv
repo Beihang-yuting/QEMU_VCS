@@ -156,6 +156,9 @@ class pcie_tl_cfg_space_manager extends uvm_object;
         if (cap_list.size() == 0) begin
             // First capability: update Capabilities Pointer (34h)
             cfg_space[52] = cap.offset;
+            // Set Status register (06h) bit4 = Capabilities List, else OS
+            // ignores the cap pointer and reports no capabilities.
+            cfg_space[6] = cfg_space[6] | 8'h10;
         end else begin
             // Link from previous capability
             prev_next_ptr_addr = cap_list[$].offset + 1;
@@ -423,6 +426,49 @@ class pcie_tl_cfg_space_manager extends uvm_object;
         pm_cap.data[2] = 8'h00;      // PMCSR: PowerState=D0
         pm_cap.data[3] = 8'h00;
         register_capability(pm_cap);
+    endfunction
+
+    //=========================================================================
+    // Initialize MSI-X Capability (cap id 0x11). Placed at 0x90 (after PM @0x80).
+    //   Message Control (cap+2): Table Size = table_size-1; Enable/Mask bits are
+    //   RW (default) so the guest driver / VFIO can enable MSI-X. Table & PBA
+    //   Offset/BIR point into a VF BAR (bir, byte offset). The MSI-X table itself
+    //   lives in that BAR region — for the cosim VF it is served by the PF BAR
+    //   aperture and the EP captures per-vector addr/data writes.
+    //=========================================================================
+    function void init_msix_capability(bit [7:0] cap_offset = 8'h90,
+                                       int table_size = 8, bit [2:0] bir = 3'd0,
+                                       bit [31:0] table_off = 32'h0000_1000,
+                                       bit [31:0] pba_off   = 32'h0000_1800);
+        pcie_capability msix_cap;
+        bit [10:0] ts;
+        bit [31:0] tbl, pba;
+        msix_cap = pcie_capability::type_id::create("msix_cap");
+        msix_cap.cap_id = CAP_ID_MSIX;   // 0x11
+        msix_cap.offset = cap_offset;
+        ts  = table_size - 1;
+        tbl = (table_off & 32'hFFFF_FFF8) | bir;
+        pba = (pba_off   & 32'hFFFF_FFF8) | bir;
+        msix_cap.data = new[10];
+        msix_cap.data[0] = ts[7:0];            // Message Control lo (table size)
+        msix_cap.data[1] = {5'b0, ts[10:8]};   // hi: Enable=0 Mask=0 at init
+        msix_cap.data[2] = tbl[7:0];
+        msix_cap.data[3] = tbl[15:8];
+        msix_cap.data[4] = tbl[23:16];
+        msix_cap.data[5] = tbl[31:24];
+        msix_cap.data[6] = pba[7:0];
+        msix_cap.data[7] = pba[15:8];
+        msix_cap.data[8] = pba[23:16];
+        msix_cap.data[9] = pba[31:24];
+        register_capability(msix_cap);
+        // Message Control low byte (cap+2 = Table Size[7:0]) is RO: it must NOT be
+        // clobbered when the guest writes MSI-X Enable/Function Mask (cap+3). In
+        // config-bypass a stray/bad read that returns 0 would otherwise be written
+        // back, zeroing Table Size -> kernel sees 1 vector (pci_msix_vec_count).
+        field_attrs[cap_offset + 2] = CFG_FIELD_RO;
+        // Table Offset/BIR (cap+4..+7) and PBA (cap+8..+11) are RO.
+        for (int i = 0; i < 8; i++)
+            field_attrs[cap_offset + 4 + i] = CFG_FIELD_RO;
     endfunction
 
     //=========================================================================

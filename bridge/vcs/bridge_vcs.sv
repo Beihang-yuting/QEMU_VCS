@@ -163,6 +163,15 @@ package cosim_bridge_pkg;
     import "DPI-C" function void bridge_vcs_finalize_topology(input int num_pfs, input int tag_width);
     import "DPI-C" function int bridge_vcs_send_vf_event(input int event_type, input int pf_index, input int num_vfs);
     import "DPI-C" function int bridge_vcs_poll_vf_event(output int event_type, output int pf_index, output int num_vfs);
+    // VF config sync (per-VF BAR base / BDF / MSI-X). VCS/DUT is authoritative source.
+    import "DPI-C" function int bridge_vcs_send_vf_config(
+        input int pf_index, input int num_vfs,
+        input int first_vf_bdf, input int vf_bdf_stride, input int vf_msix,
+        input longint unsigned bar_base[6], input longint unsigned bar_stride[6]);
+    import "DPI-C" function int bridge_vcs_poll_vf_config(
+        output int pf_index, output int num_vfs,
+        output int first_vf_bdf, output int vf_bdf_stride, output int vf_msix,
+        output longint unsigned bar_base[6], output longint unsigned bar_stride[6]);
     import "DPI-C" function int bridge_vcs_get_tlp_target_bdf();
     import "DPI-C" function int bridge_vcs_get_tlp_requester_id();
     import "DPI-C" function void bridge_vcs_set_bar_base_bdf(input int bdf, input int bar_idx, input longint unsigned bar_addr);
@@ -222,6 +231,36 @@ package cosim_bridge_pkg;
                                                        output int unsigned data[16], input int len);
     import "DPI-C" function int bridge_vcs_dma_write_rc(input int rc, input longint unsigned host_addr,
                                                         input int unsigned data[16], input int len);
+    /* requester_id-stamped variants: EP model passes the initiating VF's BDF so
+     * QEMU attributes/routes the DMA to the real requester. */
+    import "DPI-C" function int bridge_vcs_dma_read_rc_rid(input int rc, input int requester_id,
+                                                           input longint unsigned host_addr,
+                                                           output int unsigned data[16], input int len);
+    import "DPI-C" function int bridge_vcs_dma_write_rc_rid(input int rc, input int requester_id,
+                                                            input longint unsigned host_addr,
+                                                            input int unsigned data[16], input int len);
+
+    /* ATS/PRI device-side translation.
+     *  ats_translate_rc: EP asks RC/IOMMU to translate `iova`. ret 0=grant
+     *    (out_pa=translated PA), 1=deny (out-of-window), <0=err.
+     *  dma_write_rc_rid_at: DMA write with an already-translated addr (AT=10),
+     *    RC bypasses the per-VF window.
+     *  ats_page_req_rc: PRI page request. ret 0=success,1=fail,<0=err. */
+    import "DPI-C" function int bridge_vcs_ats_translate_rc(input int rc, input int requester_id,
+                                                            input longint unsigned iova,
+                                                            output longint unsigned out_pa);
+    import "DPI-C" function int bridge_vcs_ats_translate_rc_pasid(input int rc, input int requester_id,
+                                                                  input int pasid,
+                                                                  input longint unsigned iova,
+                                                                  output longint unsigned out_pa);
+    import "DPI-C" function int bridge_vcs_dma_write_rc_rid_at(input int rc, input int requester_id,
+                                                               input longint unsigned translated_addr,
+                                                               input int unsigned data[16], input int len);
+    import "DPI-C" function int bridge_vcs_dma_read_rc_rid_at(input int rc, input int requester_id,
+                                                              input longint unsigned translated_addr,
+                                                              output int unsigned data[16], input int len);
+    import "DPI-C" function int bridge_vcs_ats_page_req_rc(input int rc, input int requester_id,
+                                                           input longint unsigned iova);
 
     /* DUT 入向 AtomicOp：per-RC FetchAdd/Swap/CAS（DUT requester，host RMW 返旧值）。
      * op ∈ {2=FETCHADD,3=SWAP,4=CAS}；op_size ∈ {4,8}。

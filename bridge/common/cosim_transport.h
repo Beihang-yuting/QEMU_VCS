@@ -67,6 +67,8 @@ struct cosim_transport {
     int  (*recv_topology)(cosim_transport_t *t, topology_resp_t *topo);
     int  (*send_vf_event)(cosim_transport_t *t, const vf_event_t *ev);
     int  (*recv_vf_event)(cosim_transport_t *t, vf_event_t *ev);
+    int  (*send_vf_config)(cosim_transport_t *t, const vf_config_t *cfg);
+    int  (*recv_vf_config)(cosim_transport_t *t, vf_config_t *cfg);
 
     /* 状态查询 */
     int  (*peer_ready)(cosim_transport_t *t);

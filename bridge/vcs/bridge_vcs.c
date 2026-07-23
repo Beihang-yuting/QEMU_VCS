@@ -29,6 +29,8 @@ typedef struct {
     int                pending_tlp_ready;
     int                vf_event_pending;
     vf_event_t         vf_event;
+    int                vf_config_pending;
+    vf_config_t        vf_config;
     tlp_entry_t        tlp_cache[TLP_CACHE_SIZE];
     int                tlp_cache_head;
     int                tlp_cache_tail;
@@ -48,6 +50,8 @@ static int      g_num_rc = 1;          /* 默认单 RC */
 #define g_pending_tlp_ready g_rc[0].pending_tlp_ready
 #define g_vf_event_pending  g_rc[0].vf_event_pending
 #define g_vf_event          g_rc[0].vf_event
+#define g_vf_config_pending g_rc[0].vf_config_pending
+#define g_vf_config         g_rc[0].vf_config
 #define g_tlp_cache         g_rc[0].tlp_cache
 #define g_tlp_cache_head    g_rc[0].tlp_cache_head
 #define g_tlp_cache_tail    g_rc[0].tlp_cache_tail
@@ -198,9 +202,13 @@ int bridge_vcs_send_vf_event(int event_type, int pf_index, int num_vfs) {
     ev.num_vfs    = (uint16_t)num_vfs;
 
     if (g_transport) {
-        if (g_transport->send_vf_event(g_transport, &ev) < 0) return -1;
+        /* Sync trigger first, then payload — same frame order as vf_config/topology
+         * so the peer's recv_sync reads the sync header before recv_vf_event reads
+         * the payload (both on ctrl_fd). Reversed order desyncs the TCP stream and
+         * corrupts every subsequent ctrl_fd read (breaks VF enable). */
         sync_msg_t msg = { .type = SYNC_MSG_VF_EVENT, .payload = 0 };
-        return g_transport->send_sync(g_transport, &msg);
+        if (g_transport->send_sync(g_transport, &msg) < 0) return -1;
+        return g_transport->send_vf_event(g_transport, &ev);
     }
 
     /* SHM mode: just send sync with encoded payload */
@@ -209,6 +217,60 @@ int bridge_vcs_send_vf_event(int event_type, int pf_index, int num_vfs) {
                                   ((uint32_t)pf_index << 8) |
                                   ((uint32_t)num_vfs << 16) };
     return sock_sync_send(g_sock_fd, &msg);
+}
+
+/* DPI-C: Send VF config (per-VF BAR base / BDF / MSI-X) to QEMU after a VF
+ * enable. VCS/DUT is the authoritative source of the VF layout; QEMU applies
+ * these to its VF PCIDevices so enumeration, MMIO decode and MSI routing match.
+ * Parametric: VF0 base + stride, so a single message covers all VFs.
+ * bar_base/bar_stride point to COSIM_MAX_BARS uint64 (DPI fixed-size arrays). */
+int bridge_vcs_send_vf_config(int pf_index, int num_vfs,
+                              int first_vf_bdf, int vf_bdf_stride, int vf_msix,
+                              const unsigned long long *bar_base,
+                              const unsigned long long *bar_stride) {
+    if (!g_transport) {
+        fprintf(stderr, "[VCS Bridge] send_vf_config: no transport (SHM-legacy "
+                        "cannot carry vf_config), pf=%d\n", pf_index);
+        return -1;
+    }
+    vf_config_t cfg;
+    memset(&cfg, 0, sizeof(cfg));
+    cfg.pf_index        = (uint8_t)pf_index;
+    cfg.valid           = (num_vfs > 0) ? 1 : 0;
+    cfg.num_vfs         = (uint16_t)num_vfs;
+    cfg.first_vf_bdf    = (uint16_t)first_vf_bdf;
+    cfg.vf_bdf_stride   = (uint16_t)vf_bdf_stride;
+    cfg.vf_msix_vectors = (uint16_t)vf_msix;
+    for (int b = 0; b < COSIM_MAX_BARS; b++) {
+        cfg.vf_bar_base[b]   = (uint64_t)bar_base[b];
+        cfg.vf_bar_stride[b] = (uint64_t)bar_stride[b];
+    }
+    /* Send sync trigger first, then payload — same frame order as topology so
+     * the peer's recv_sync reads the sync header before recv_vf_config reads the
+     * payload (both on ctrl_fd). Reversed order desyncs the TCP stream. */
+    sync_msg_t msg = { .type = SYNC_MSG_VF_CONFIG, .payload = 0 };
+    if (g_transport->send_sync(g_transport, &msg) < 0) return -1;
+    return g_transport->send_vf_config(g_transport, &cfg);
+}
+
+/* DPI-C: Check for a peer-pushed VF config (duplex: when QEMU owns SR-IOV).
+ * Returns 1 with outputs filled if pending, 0 otherwise. */
+int bridge_vcs_poll_vf_config(int *pf_index, int *num_vfs,
+                              int *first_vf_bdf, int *vf_bdf_stride, int *vf_msix,
+                              unsigned long long *bar_base,
+                              unsigned long long *bar_stride) {
+    if (!g_vf_config_pending) return 0;
+    *pf_index      = g_vf_config.pf_index;
+    *num_vfs       = g_vf_config.num_vfs;
+    *first_vf_bdf  = g_vf_config.first_vf_bdf;
+    *vf_bdf_stride = g_vf_config.vf_bdf_stride;
+    *vf_msix       = g_vf_config.vf_msix_vectors;
+    for (int b = 0; b < COSIM_MAX_BARS; b++) {
+        bar_base[b]   = g_vf_config.vf_bar_base[b];
+        bar_stride[b] = g_vf_config.vf_bar_stride[b];
+    }
+    g_vf_config_pending = 0;
+    return 1;
 }
 
 /* DPI-C: Get target_bdf from most recently polled TLP */
@@ -280,6 +342,11 @@ static int poll_tlp_ctx(rc_ctx_t *ctx,
                 ctx->vf_event_pending = 1;
                 continue;
             }
+            if (msg.type == SYNC_MSG_VF_CONFIG) {
+                if (ctx->transport->recv_vf_config(ctx->transport, &ctx->vf_config) == 0)
+                    ctx->vf_config_pending = 1;
+                continue;
+            }
             /* 非 TLP_READY 消息在 poll 中不应出现，记录并跳过 */
             if (msg.type == SYNC_MSG_REALIZED) { ctx->realized = 1; continue; }
         fprintf(stderr, "[VCS poll] unexpected msg.type=%d in drain, discarding\n", msg.type);
@@ -314,6 +381,11 @@ static int poll_tlp_ctx(rc_ctx_t *ctx,
             ctx->vf_event.pf_index   = (uint8_t)((msg.payload >> 8) & 0xFF);
             ctx->vf_event.num_vfs    = (uint16_t)((msg.payload >> 16) & 0xFFFF);
             ctx->vf_event_pending = 1;
+            return 1;
+        }
+        if (msg.type == SYNC_MSG_VF_CONFIG) {
+            if (ctx->transport->recv_vf_config(ctx->transport, &ctx->vf_config) == 0)
+                ctx->vf_config_pending = 1;
             return 1;
         }
         if (msg.type == SYNC_MSG_TLP_READY) {
@@ -826,8 +898,10 @@ static int rc_ok(int rc);
  * through RC slot `rc`. Mirrors the TCP branch of bridge_vcs_dma_read_sync,
  * scoped to g_rc[rc].transport. Blocks until SYNC_MSG_DMA_CPL.
  * len 上限 64B（DPI data[16]）——超限拒绝，防 tmp_buf 溢出。 */
-int bridge_vcs_dma_read_rc(int rc, unsigned long long host_addr,
-                           unsigned int *data, int len) {
+static int dma_read_rc_impl_dir(int rc, uint16_t requester_id,
+                                unsigned long long host_addr,
+                                unsigned int *data, int len,
+                                uint32_t direction) {
     if (!rc_ok(rc) || len <= 0 || len > 64) return -1;
     cosim_transport_t *tr = g_rc[rc].transport;
     if (!tr) return -1;
@@ -835,8 +909,9 @@ int bridge_vcs_dma_read_rc(int rc, unsigned long long host_addr,
     static uint32_t next_tag = 4000;
     uint32_t tag = next_tag++;
     dma_req_t req = {
+        .requester_id = requester_id,
         .tag = tag,
-        .direction = DMA_DIR_READ,
+        .direction = direction,   /* DMA_DIR_READ, optionally | DMA_AT_TRANSLATED */
         .host_addr = host_addr,
         .len = (uint32_t)len,
         .dma_offset = 0,
@@ -888,12 +963,40 @@ int bridge_vcs_dma_read_rc(int rc, unsigned long long host_addr,
     return -1;
 }
 
+/* DPI-C: Per-RC DMA read, requester_id defaults to 0 (single-function / legacy). */
+int bridge_vcs_dma_read_rc(int rc, unsigned long long host_addr,
+                           unsigned int *data, int len) {
+    return dma_read_rc_impl_dir(rc, 0, host_addr, data, len, DMA_DIR_READ);
+}
+
+/* DPI-C: Per-RC DMA read stamped with the initiator's PCIe BDF (requester_id).
+ * Used by the EP model so QEMU can attribute/route the DMA to the real VF. */
+int bridge_vcs_dma_read_rc_rid(int rc, int requester_id,
+                               unsigned long long host_addr,
+                               unsigned int *data, int len) {
+    return dma_read_rc_impl_dir(rc, (uint16_t)requester_id, host_addr, data, len,
+                                DMA_DIR_READ);
+}
+
+/* DPI-C: Per-RC DMA read with an ALREADY-TRANSLATED address (PCIe AT=10). Used
+ * when the EP/DUT reads guest memory via a pre-authorized (ATS-translated) PA;
+ * the RC bypasses the per-VF IOMMU window. Mirrors bridge_vcs_dma_write_rc_rid_at
+ * for the read direction. */
+int bridge_vcs_dma_read_rc_rid_at(int rc, int requester_id,
+                                  unsigned long long translated_addr,
+                                  unsigned int *data, int len) {
+    return dma_read_rc_impl_dir(rc, (uint16_t)requester_id, translated_addr, data,
+                                len, DMA_DIR_READ | DMA_AT_TRANSLATED);
+}
+
 /* DPI-C: Per-RC synchronous DMA write — DUT (requester) writes Guest memory
  * through RC slot `rc`. Mirrors the TCP branch of bridge_vcs_dma_write_sync,
  * scoped to g_rc[rc].transport. send_dma_req MUST precede send_dma_data (see
  * bridge_vcs_dma_write_sync comment). Blocks until SYNC_MSG_DMA_CPL. */
-int bridge_vcs_dma_write_rc(int rc, unsigned long long host_addr,
-                            const unsigned int *data, int len) {
+static int dma_write_rc_impl_dir(int rc, uint16_t requester_id,
+                                 unsigned long long host_addr,
+                                 const unsigned int *data, int len,
+                                 uint32_t direction) {
     if (!rc_ok(rc) || len <= 0 || len > 64) return -1;  /* 64B = DPI data[16] 上限 */
     cosim_transport_t *tr = g_rc[rc].transport;
     if (!tr) return -1;
@@ -901,8 +1004,9 @@ int bridge_vcs_dma_write_rc(int rc, unsigned long long host_addr,
     static uint32_t next_tag = 4500;
     uint32_t tag = next_tag++;
     dma_req_t req = {
+        .requester_id = requester_id,
         .tag = tag,
-        .direction = DMA_DIR_WRITE,
+        .direction = direction,   /* DMA_DIR_WRITE, optionally | DMA_AT_TRANSLATED */
         .host_addr = host_addr,
         .len = (uint32_t)len,
         .dma_offset = 0,
@@ -943,6 +1047,145 @@ int bridge_vcs_dma_write_rc(int rc, unsigned long long host_addr,
         }
     }
     fprintf(stderr, "[VCS Bridge] DMA write rc%d: timeout\n", rc);
+    return -1;
+}
+
+/* DPI-C: Per-RC DMA write, requester_id defaults to 0 (single-function / legacy). */
+int bridge_vcs_dma_write_rc(int rc, unsigned long long host_addr,
+                            const unsigned int *data, int len) {
+    return dma_write_rc_impl_dir(rc, 0, host_addr, data, len, DMA_DIR_WRITE);
+}
+
+/* DPI-C: Per-RC DMA write stamped with the initiator's PCIe BDF (requester_id).
+ * Used by the EP model so QEMU can attribute/route the DMA to the real VF. */
+int bridge_vcs_dma_write_rc_rid(int rc, int requester_id,
+                                unsigned long long host_addr,
+                                const unsigned int *data, int len) {
+    return dma_write_rc_impl_dir(rc, (uint16_t)requester_id, host_addr, data, len,
+                                 DMA_DIR_WRITE);
+}
+
+/* DPI-C: Per-RC DMA write with an ALREADY-TRANSLATED address (PCIe AT=10). The
+ * EP calls this after a successful bridge_vcs_ats_translate_rc; the RC trusts
+ * the address and bypasses the per-VF IOMMU window. Proves the ATS translated-
+ * DMA path (translate once, then DMA with the cached PA). */
+int bridge_vcs_dma_write_rc_rid_at(int rc, int requester_id,
+                                   unsigned long long translated_addr,
+                                   const unsigned int *data, int len) {
+    return dma_write_rc_impl_dir(rc, (uint16_t)requester_id, translated_addr, data,
+                                 len, DMA_DIR_WRITE | DMA_AT_TRANSLATED);
+}
+
+/* PCIe ATS Translation Request impl. Translates `iova` for (requester_id, pasid).
+ * The PASID (0 = no PASID) rides in dma_req_t._pad_rid so the RC can attribute /
+ * isolate per address space. Returns 0 = granted (*out_pa = translated PA),
+ * 1 = denied, <0 = error. */
+static int ats_translate_impl(int rc, uint16_t requester_id, uint16_t pasid,
+                              unsigned long long iova, unsigned long long *out_pa) {
+    if (out_pa) *out_pa = 0;
+    if (!rc_ok(rc)) return -1;
+    cosim_transport_t *tr = g_rc[rc].transport;
+    if (!tr) return -1;
+
+    static uint32_t next_tag = 4200;
+    uint32_t tag = next_tag++;
+    dma_req_t req = {
+        .requester_id = requester_id,
+        ._pad_rid = pasid,          /* carries the PASID for this translation */
+        .tag = tag,
+        .direction = DMA_DIR_ATS_TRANSLATE,
+        .host_addr = iova,
+        .len = 8,
+        .dma_offset = 0,
+        .timestamp = 0,
+    };
+    if (tr->send_dma_req(tr, &req) < 0) {
+        fprintf(stderr, "[VCS Bridge] ATS translate rc%d: send_dma_req failed\n", rc);
+        return -1;
+    }
+    for (int i = 0; i < 1000; i++) {
+        sync_msg_t msg;
+        if (tr->recv_sync(tr, &msg) < 0) return -1;
+        if (msg.type == SYNC_MSG_SHUTDOWN) return -1;
+        if (msg.type == SYNC_MSG_TLP_READY) {
+            tlp_entry_t cached_tlp;
+            if (tr->recv_tlp(tr, &cached_tlp) == 0)
+                tlp_cache_push_ctx(&g_rc[rc], &cached_tlp);
+            continue;
+        }
+        if (msg.type == SYNC_MSG_DMA_CPL) {
+            uint32_t rx_tag, rx_dir, rx_len = 8;
+            uint64_t rx_addr;
+            uint8_t tmp_buf[8] = {0};
+            if (tr->recv_dma_data(tr, &rx_tag, &rx_dir, &rx_addr, tmp_buf, &rx_len) < 0)
+                return -1;
+            dma_cpl_t cpl;
+            if (tr->recv_dma_cpl(tr, &cpl) < 0) return -1;
+            if (out_pa) {
+                uint64_t pa = 0;
+                for (int b = 0; b < 8; b++) pa |= (uint64_t)tmp_buf[b] << (8 * b);
+                *out_pa = pa;
+            }
+            return (cpl.tag == tag && cpl.status == 0) ? 0 : 1;  /* 0 grant / 1 deny */
+        }
+    }
+    fprintf(stderr, "[VCS Bridge] ATS translate rc%d: timeout\n", rc);
+    return -1;
+}
+
+/* DPI-C: ATS Translation Request without PASID (PASID=0). */
+int bridge_vcs_ats_translate_rc(int rc, int requester_id,
+                                unsigned long long iova,
+                                unsigned long long *out_pa) {
+    return ats_translate_impl(rc, (uint16_t)requester_id, 0, iova, out_pa);
+}
+
+/* DPI-C: ATS Translation Request tagged with a PASID (Process Address Space ID).
+ * The guest enables PASID (PASID Control.Enable) and the device carries the
+ * PASID with each translation so the RC attributes it per address space. */
+int bridge_vcs_ats_translate_rc_pasid(int rc, int requester_id, int pasid,
+                                      unsigned long long iova,
+                                      unsigned long long *out_pa) {
+    return ats_translate_impl(rc, (uint16_t)requester_id, (uint16_t)pasid, iova, out_pa);
+}
+
+/* DPI-C: PCIe PRI Page Request. The EP asks the host to make `iova`'s page
+ * present. Returns 0 = PRG success (granted), 1 = failure (denied), <0 = error.
+ * No data phase — only the DMA_CPL status. */
+int bridge_vcs_ats_page_req_rc(int rc, int requester_id,
+                               unsigned long long iova) {
+    if (!rc_ok(rc)) return -1;
+    cosim_transport_t *tr = g_rc[rc].transport;
+    if (!tr) return -1;
+
+    static uint32_t next_tag = 4300;
+    uint32_t tag = next_tag++;
+    dma_req_t req = {
+        .requester_id = (uint16_t)requester_id,
+        .tag = tag,
+        .direction = DMA_DIR_ATS_PAGE_REQ,
+        .host_addr = iova,
+        .len = 0,
+        .dma_offset = 0,
+        .timestamp = 0,
+    };
+    if (tr->send_dma_req(tr, &req) < 0) return -1;
+    for (int i = 0; i < 1000; i++) {
+        sync_msg_t msg;
+        if (tr->recv_sync(tr, &msg) < 0) return -1;
+        if (msg.type == SYNC_MSG_SHUTDOWN) return -1;
+        if (msg.type == SYNC_MSG_TLP_READY) {
+            tlp_entry_t cached_tlp;
+            if (tr->recv_tlp(tr, &cached_tlp) == 0)
+                tlp_cache_push_ctx(&g_rc[rc], &cached_tlp);
+            continue;
+        }
+        if (msg.type == SYNC_MSG_DMA_CPL) {
+            dma_cpl_t cpl;
+            if (tr->recv_dma_cpl(tr, &cpl) < 0) return -1;
+            return (cpl.tag == tag && cpl.status == 0) ? 0 : 1;
+        }
+    }
     return -1;
 }
 

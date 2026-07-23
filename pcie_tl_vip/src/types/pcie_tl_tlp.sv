@@ -75,6 +75,7 @@ class pcie_tl_tlp extends uvm_sequence_item;
     rand bit                    td;
     rand bit                    ep_bit;       // Poisoned (avoid name clash with 'ep')
     rand bit [2:0]              attr;         // [0]=RO, [1]=IDO, [2]=NS
+    rand bit [1:0]              at = 2'b00;    // Address Type: 00=untranslated,01=xlate-req,10=translated (ATS)
     rand bit [9:0]              length;       // in DW, 0 means 1024
     rand bit [15:0]             requester_id;
     rand bit [9:0]              tag;          // 10-bit Extended Tag

@@ -117,6 +117,7 @@ class pcie_tl_codec extends uvm_object;
         tlp.td           = dw0[15];
         tlp.ep_bit       = dw0[14];
         tlp.attr         = {dw0[18], dw0[13:12]};
+        tlp.at           = dw0[11:10];   // Address Type (ATS)
         tlp.length       = dw0[9:0];
         tlp.requester_id = dw1[31:16];
         tlp.tag[7:0]     = dw1[15:8];
@@ -189,7 +190,7 @@ class pcie_tl_codec extends uvm_object;
 
         // DW0: Fmt[2:0] | Type[4:0] | R | TC[2:0] | R | Attr[2] | R | TH | TD | EP | Attr[1:0] | AT[1:0] | Length[9:0]
         dw0 = {tlp.fmt, tlp.type_f, 1'b0, tlp.tc, 1'b0, tlp.attr[2], 1'b0,
-                tlp.th, tlp.td, tlp.ep_bit, tlp.attr[1:0], 2'b00, tlp.length};
+                tlp.th, tlp.td, tlp.ep_bit, tlp.attr[1:0], tlp.at, tlp.length};
         hdr[0] = dw0;
 
         // DW1: Requester ID[15:0] | Tag[7:0] | (Last BE / First BE or other)

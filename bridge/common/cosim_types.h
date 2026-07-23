@@ -41,6 +41,12 @@ typedef enum {
     TLP_VENDOR_MSG      = 14,
     TLP_LTR             = 15,
     TLP_MRD_LK          = 16,
+    /* ATS Invalidation Request (RC→device). RC/IOMMU tells the device to flush
+     * its ATC (Address Translation Cache) for tlp.target_bdf covering tlp.addr;
+     * the device responds with a Completion (Invalidation ACK). Sent by QEMU via
+     * bridge_send_tlp_and_wait when a per-VF window is torn down. Value 17
+     * additive — tlp_entry_t layout/ABI unchanged. */
+    TLP_ATS_INVAL       = 17,
 } tlp_type_t;
 
 /* 向后兼容别名 */
@@ -68,6 +74,7 @@ typedef enum {
     SYNC_MSG_TOPOLOGY_RESP  = 0x11,
     SYNC_MSG_VF_EVENT       = 0x12,
     SYNC_MSG_REALIZED       = 0x13,
+    SYNC_MSG_VF_CONFIG      = 0x14,
 } sync_msg_type_t;
 
 typedef struct {
@@ -122,10 +129,29 @@ typedef enum {
     DMA_DIR_ATOMIC_FETCHADD = 2,
     DMA_DIR_ATOMIC_SWAP     = 3,
     DMA_DIR_ATOMIC_CAS      = 4,
+    /* ATS/PRI (device-side address translation). Requester = DUT/EP.
+     *  ATS_TRANSLATE: device asks the RC/IOMMU to translate an untranslated
+     *    address (host_addr = IOVA). RC replies via DMA_DATA+DMA_CPL: data = 8B
+     *    translated PA, cpl.status = 0 granted / non-0 no-translation (denied).
+     *    Models a PCIe ATS Translation Request/Completion round-trip.
+     *  ATS_PAGE_REQ (PRI): device requests the host make a page present;
+     *    cpl.status = 0 granted / non-0 denied (models a Page Request / PRG
+     *    Response). Values 5..6 additive — struct layout/ABI unchanged. */
+    DMA_DIR_ATS_TRANSLATE   = 5,
+    DMA_DIR_ATS_PAGE_REQ    = 6,
 } dma_direction_t;
 
 #define DMA_DIR_IS_ATOMIC(d) \
     ((d) >= DMA_DIR_ATOMIC_FETCHADD && (d) <= DMA_DIR_ATOMIC_CAS)
+
+/* AT=Translated flag OR'd into dma_req_t.direction: the host_addr is already
+ * IOMMU-translated (PCIe AT=10). The RC trusts it and bypasses the per-VF IOMMU
+ * window (the translation was pre-authorized via DMA_DIR_ATS_TRANSLATE). The
+ * low bits still carry DMA_DIR_READ/WRITE. High bit avoids colliding with the
+ * additive opcode values above. */
+#define DMA_AT_TRANSLATED   0x80000000u
+#define DMA_DIR_BASE(d)     ((d) & ~DMA_AT_TRANSLATED)
+#define DMA_DIR_IS_TRANSLATED(d) (((d) & DMA_AT_TRANSLATED) != 0)
 
 typedef struct {
     uint16_t requester_id;    /* PCIe BDF of DMA initiator (P3: multi-function) */

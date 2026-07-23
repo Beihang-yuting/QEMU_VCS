@@ -4,6 +4,11 @@
 #include <stdio.h>
 #include <unistd.h>
 
+/* Consume a VCS-pushed vf_config arriving inline on the ctrl channel and
+ * dispatch it to the device callback (or stash for polling). */
+static void bridge_consume_vf_config(bridge_ctx_t *ctx);
+static void bridge_consume_vf_event(bridge_ctx_t *ctx);
+
 bridge_ctx_t *bridge_init(const char *shm_name, const char *sock_path) {
     bridge_ctx_t *ctx = calloc(1, sizeof(*ctx));
     if (!ctx) return NULL;
@@ -88,6 +93,18 @@ int bridge_wait_completion(bridge_ctx_t *ctx, uint16_t tag, cpl_entry_t *cpl) {
         if (ctx->transport) {
             ret = ctx->transport->recv_sync(ctx->transport, &msg);
             if (ret < 0) return -1;
+            if (msg.type == SYNC_MSG_VF_CONFIG) {
+                /* VCS pushed a VF config (e.g. during a VF-enable CfgWr);
+                 * consume it and keep draining for our completion. */
+                bridge_consume_vf_config(ctx);
+                continue;
+            }
+            if (msg.type == SYNC_MSG_VF_EVENT) {
+                /* VF enable/disable notification — drain the event frame so it
+                 * doesn't desync ctrl_fd, then keep draining for our completion. */
+                bridge_consume_vf_event(ctx);
+                continue;
+            }
             if (msg.type != SYNC_MSG_CPL_READY) {
                 fprintf(stderr, "bridge_wait_completion: unexpected msg type %d (expected %d)\n",
                         msg.type, SYNC_MSG_CPL_READY);
@@ -155,6 +172,14 @@ int bridge_wait_completion_timed(bridge_ctx_t *ctx, uint16_t tag,
         ret = ctx->transport->recv_sync_timed(ctx->transport, &msg, timeout_ms);
         if (ret == 1) return -2;   /* poll timeout: VCS did not answer within timeout_ms */
         if (ret != 0) return -1;
+        if (msg.type == SYNC_MSG_VF_CONFIG) {
+            bridge_consume_vf_config(ctx);
+            continue;
+        }
+        if (msg.type == SYNC_MSG_VF_EVENT) {
+            bridge_consume_vf_event(ctx);
+            continue;
+        }
         if (msg.type != SYNC_MSG_CPL_READY) {
             fprintf(stderr, "bridge_wait_completion_timed: unexpected msg type %d\n", msg.type);
             return -1;
@@ -377,6 +402,74 @@ int bridge_send_vf_event(bridge_ctx_t *ctx, const vf_event_t *ev) {
     }
 
     return sock_sync_send(ctx->client_fd, &msg);
+}
+
+static void bridge_consume_vf_config(bridge_ctx_t *ctx) {
+    if (!ctx || !ctx->transport) return;
+    if (ctx->transport->recv_vf_config(ctx->transport, &ctx->vf_config) < 0) return;
+    if (ctx->vf_config_cb)
+        ctx->vf_config_cb(&ctx->vf_config, ctx->vf_config_user);
+    else
+        ctx->vf_config_pending = 1;
+}
+
+/* Drain a VF enable/disable event frame off ctrl_fd. QEMU applies the VF layout
+ * from vf_config (not the event); the event is a notification, so we just read
+ * and discard it here to keep the ctrl_fd stream aligned. */
+static void bridge_consume_vf_event(bridge_ctx_t *ctx) {
+    if (!ctx || !ctx->transport) return;
+    vf_event_t ev;
+    ctx->transport->recv_vf_event(ctx->transport, &ev);
+}
+
+/* Bounded drain of VF_CONFIG/VF_EVENT that VCS pushes on ctrl_fd after an
+ * SR-IOV VF-enable CfgWr (which is fire-and-forget, so those messages have no
+ * waiter). Called synchronously after an extended-config write so the VF
+ * apertures/config stubs are applied before the guest probes the VFs. Returns
+ * once nothing more arrives within timeout_ms. Safe: config writes run on the
+ * vCPU thread (BQL) and the irq_poller never reads ctrl_fd, so no other reader
+ * competes here. */
+void bridge_drain_vf_pending(bridge_ctx_t *ctx, int timeout_ms) {
+    if (!ctx || !ctx->transport || !ctx->transport->recv_sync_timed) return;
+    int guard = 64;
+    while (guard-- > 0) {
+        sync_msg_t msg;
+        int ret = ctx->transport->recv_sync_timed(ctx->transport, &msg, timeout_ms);
+        if (ret != 0) return;   /* timeout (1) or error (-1): nothing pending */
+        if (msg.type == SYNC_MSG_VF_CONFIG) { bridge_consume_vf_config(ctx); continue; }
+        if (msg.type == SYNC_MSG_VF_EVENT)  { bridge_consume_vf_event(ctx);  continue; }
+        if (msg.type == SYNC_MSG_CPL_READY) {
+            /* stray completion (unmatched Cpl) — discard to stay aligned */
+            cpl_entry_t cpl;
+            ctx->transport->recv_cpl(ctx->transport, &cpl);
+            continue;
+        }
+        return;  /* unknown type — stop rather than mis-parse */
+    }
+}
+
+int bridge_send_vf_config(bridge_ctx_t *ctx, const vf_config_t *cfg) {
+    if (!ctx || !cfg) return -1;
+    if (!ctx->transport) return -1;   /* SHM-legacy cannot carry vf_config */
+    /* Sync trigger first, then payload (same frame order as topology). */
+    sync_msg_t msg = { .type = SYNC_MSG_VF_CONFIG, .payload = 0 };
+    if (ctx->transport->send_sync(ctx->transport, &msg) < 0) return -1;
+    return ctx->transport->send_vf_config(ctx->transport, cfg);
+}
+
+void bridge_set_vf_config_cb(bridge_ctx_t *ctx,
+                             void (*cb)(const vf_config_t *cfg, void *user),
+                             void *user) {
+    if (!ctx) return;
+    ctx->vf_config_cb   = cb;
+    ctx->vf_config_user = user;
+}
+
+int bridge_poll_vf_config(bridge_ctx_t *ctx, vf_config_t *cfg) {
+    if (!ctx || !ctx->vf_config_pending) return 0;
+    if (cfg) *cfg = ctx->vf_config;
+    ctx->vf_config_pending = 0;
+    return 1;
 }
 
 int bridge_send_tlp_bdf(bridge_ctx_t *ctx, tlp_entry_t *req,

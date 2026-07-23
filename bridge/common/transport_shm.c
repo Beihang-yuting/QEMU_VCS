@@ -175,6 +175,26 @@ static int shm_recv_vf_event(cosim_transport_t *t, vf_event_t *ev) {
     return 0;
 }
 
+/* vf_config lives in the ctrl region right after the topology block.
+ * ctrl region is 4KB: cosim_ctrl_t (~112B) + topology_resp_t (900B) +
+ * vf_config_t (108B) = ~1.1KB, well within budget. The accompanying
+ * SYNC_MSG_VF_CONFIG sync message tells the peer to read this slot. */
+#define SHM_VFCONFIG_OFFSET  (SHM_TOPOLOGY_OFFSET + sizeof(topology_resp_t))
+
+static int shm_send_vf_config(cosim_transport_t *t, const vf_config_t *cfg) {
+    transport_shm_priv_t *p = (transport_shm_priv_t *)t->priv;
+    uint8_t *dst = (uint8_t *)p->shm.ctrl + SHM_VFCONFIG_OFFSET;
+    memcpy(dst, cfg, sizeof(*cfg));
+    return 0;
+}
+
+static int shm_recv_vf_config(cosim_transport_t *t, vf_config_t *cfg) {
+    transport_shm_priv_t *p = (transport_shm_priv_t *)t->priv;
+    const uint8_t *src = (const uint8_t *)p->shm.ctrl + SHM_VFCONFIG_OFFSET;
+    memcpy(cfg, src, sizeof(*cfg));
+    return 0;
+}
+
 /* ========== 状态查询 ========== */
 
 static int shm_peer_ready(cosim_transport_t *t) {
@@ -298,6 +318,8 @@ cosim_transport_t *transport_shm_create(const transport_cfg_t *cfg) {
     t->recv_topology   = shm_recv_topology;
     t->send_vf_event   = shm_send_vf_event;
     t->recv_vf_event   = shm_recv_vf_event;
+    t->send_vf_config  = shm_send_vf_config;
+    t->recv_vf_config  = shm_recv_vf_config;
     t->peer_ready      = shm_peer_ready;
     t->set_ready       = shm_set_ready;
     t->get_shm_base    = shm_get_shm_base;

@@ -30,6 +30,7 @@
 #include <netinet/tcp.h>
 #include <arpa/inet.h>
 #include <poll.h>
+#include <pthread.h>
 
 typedef struct {
     int  ctrl_fd;        /* 控制通道 socket */
@@ -47,6 +48,9 @@ typedef struct {
     uint32_t negotiated_version; /* 协商后的协议版本 */
     char remote_host[256];
     char listen_addr[64];
+    pthread_mutex_t ctrl_tx_lock; /* 串行化 ctrl_fd 写：主线程 TLP-notify 与
+                                   * irq_poller 线程 DMA-cpl 并发写会字节交错
+                                   * 导致帧 desync（config read 失败）*/
 } transport_tcp_priv_t;
 
 /* 选择 DMA/MSI/ETH 消息应该走的 fd：v2 用 aux_fd，v1 回退到 data_fd */
@@ -119,6 +123,16 @@ static int tcp_send_msg(int fd, tcp_msg_type_t type, const void *payload, uint32
 
 static int tcp_recv_hdr(int fd, tcp_msg_hdr_t *hdr) {
     return tcp_recv_all(fd, hdr, sizeof(*hdr));
+}
+
+/* 串行化 ctrl_fd 上的一条消息发送（hdr+payload 原子写），防止多线程交错。
+ * 只在写突发期间持锁，不跨阻塞 recv，无死锁风险。 */
+static int tcp_send_ctrl(transport_tcp_priv_t *p, tcp_msg_type_t type,
+                         const void *payload, uint32_t payload_len) {
+    pthread_mutex_lock(&p->ctrl_tx_lock);
+    int ret = tcp_send_msg(p->ctrl_fd, type, payload, payload_len);
+    pthread_mutex_unlock(&p->ctrl_tx_lock);
+    return ret;
 }
 
 static void tcp_set_opts(int fd) {
@@ -247,7 +261,7 @@ static int tcp_connect_host_once(const char *host, int port) {
 
 static int tcp_send_sync(cosim_transport_t *t, const sync_msg_t *msg) {
     transport_tcp_priv_t *p = (transport_tcp_priv_t *)t->priv;
-    return tcp_send_msg(p->ctrl_fd, TCP_MSG_SYNC, msg, sizeof(*msg));
+    return tcp_send_ctrl(p, TCP_MSG_SYNC, msg, sizeof(*msg));
 }
 
 static int tcp_recv_sync(cosim_transport_t *t, sync_msg_t *msg) {
@@ -514,7 +528,7 @@ static int tcp_recv_eth(cosim_transport_t *t, eth_frame_t *frame, uint64_t timeo
 
 static int tcp_send_topology(cosim_transport_t *t, const topology_resp_t *topo) {
     transport_tcp_priv_t *p = (transport_tcp_priv_t *)t->priv;
-    return tcp_send_msg(p->ctrl_fd, TCP_MSG_TOPOLOGY_RESP, topo, sizeof(*topo));
+    return tcp_send_ctrl(p, TCP_MSG_TOPOLOGY_RESP, topo, sizeof(*topo));
 }
 
 static int tcp_recv_topology(cosim_transport_t *t, topology_resp_t *topo) {
@@ -533,9 +547,30 @@ static int tcp_recv_topology(cosim_transport_t *t, topology_resp_t *topo) {
     return tcp_recv_all(p->ctrl_fd, topo, sizeof(*topo));
 }
 
+static int tcp_send_vf_config(cosim_transport_t *t, const vf_config_t *cfg) {
+    transport_tcp_priv_t *p = (transport_tcp_priv_t *)t->priv;
+    return tcp_send_ctrl(p, TCP_MSG_VF_CONFIG, cfg, sizeof(*cfg));
+}
+
+static int tcp_recv_vf_config(cosim_transport_t *t, vf_config_t *cfg) {
+    transport_tcp_priv_t *p = (transport_tcp_priv_t *)t->priv;
+    tcp_msg_hdr_t hdr;
+    if (tcp_recv_hdr(p->ctrl_fd, &hdr) < 0) return -1;
+    if (hdr.msg_type != TCP_MSG_VF_CONFIG) {
+        fprintf(stderr, "[tcp] expected VF_CONFIG, got type=%u\n", hdr.msg_type);
+        return -1;
+    }
+    if (hdr.payload_len != sizeof(*cfg)) {
+        fprintf(stderr, "[tcp] vf_config payload size mismatch: %u vs %zu\n",
+                hdr.payload_len, sizeof(*cfg));
+        return -1;
+    }
+    return tcp_recv_all(p->ctrl_fd, cfg, sizeof(*cfg));
+}
+
 static int tcp_send_vf_event(cosim_transport_t *t, const vf_event_t *ev) {
     transport_tcp_priv_t *p = (transport_tcp_priv_t *)t->priv;
-    return tcp_send_msg(p->ctrl_fd, TCP_MSG_VF_EVENT, ev, sizeof(*ev));
+    return tcp_send_ctrl(p, TCP_MSG_VF_EVENT, ev, sizeof(*ev));
 }
 
 static int tcp_recv_vf_event(cosim_transport_t *t, vf_event_t *ev) {
@@ -586,6 +621,7 @@ static void tcp_close(cosim_transport_t *t) {
     if (p->data_listen_fd >= 0) close(p->data_listen_fd);
     if (p->aux_listen_fd >= 0) close(p->aux_listen_fd);
 
+    pthread_mutex_destroy(&p->ctrl_tx_lock);
     free(p);
     free(t);
 }
@@ -612,7 +648,7 @@ static int tcp_do_handshake_server(transport_tcp_priv_t *p) {
     hs.conn_count = conn_count;
 
     /* 发送 v2 格式握手 (16 字节) */
-    if (tcp_send_msg(p->ctrl_fd, TCP_MSG_HANDSHAKE, &hs, sizeof(hs)) < 0) return -1;
+    if (tcp_send_ctrl(p, TCP_MSG_HANDSHAKE, &hs, sizeof(hs)) < 0) return -1;
 
     /* 接收 client 回复 */
     tcp_msg_hdr_t hdr;
@@ -715,7 +751,7 @@ static int tcp_do_handshake_client(transport_tcp_priv_t *p) {
     ack.conn_count = (p->aux_fd >= 0 && agreed >= TCP_HANDSHAKE_V2
                       && hs.conn_count >= 3) ? 3 : 2;
 
-    if (tcp_send_msg(p->ctrl_fd, TCP_MSG_HANDSHAKE, &ack, sizeof(ack)) < 0) return -1;
+    if (tcp_send_ctrl(p, TCP_MSG_HANDSHAKE, &ack, sizeof(ack)) < 0) return -1;
 
     /* 协商到 v1, 或 server 的 conn_count<3 (server 侧 aux 竞态丢失) → 关 aux */
     if ((agreed < TCP_HANDSHAKE_V2 || hs.conn_count < 3) && p->aux_fd >= 0) {
@@ -739,6 +775,7 @@ cosim_transport_t *transport_tcp_create(const transport_cfg_t *cfg) {
     transport_tcp_priv_t *p = (transport_tcp_priv_t *)calloc(1, sizeof(*p));
     if (!p) { free(t); return NULL; }
 
+    pthread_mutex_init(&p->ctrl_tx_lock, NULL);
     p->ctrl_fd = -1;
     p->data_fd = -1;
     p->aux_fd = -1;
@@ -868,6 +905,8 @@ cosim_transport_t *transport_tcp_create(const transport_cfg_t *cfg) {
     t->recv_eth        = tcp_recv_eth;
     t->send_topology   = tcp_send_topology;
     t->recv_topology   = tcp_recv_topology;
+    t->send_vf_config  = tcp_send_vf_config;
+    t->recv_vf_config  = tcp_recv_vf_config;
     t->send_vf_event   = tcp_send_vf_event;
     t->recv_vf_event   = tcp_recv_vf_event;
     t->peer_ready      = tcp_peer_ready;

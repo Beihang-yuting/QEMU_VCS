@@ -19,6 +19,10 @@
 `ifdef PCIE_COSIM_ENABLE
 import "DPI-C" function int bridge_vcs_send_vf_event(input int event_type, input int pf_index, input int num_vfs);
 import "DPI-C" function void bridge_vcs_set_bar_base_bdf(input int bdf, input int bar_idx, input longint unsigned bar_addr);
+import "DPI-C" function int bridge_vcs_send_vf_config(
+    input int pf_index, input int num_vfs,
+    input int first_vf_bdf, input int vf_bdf_stride, input int vf_msix,
+    input longint unsigned bar_base[6], input longint unsigned bar_stride[6]);
 `endif
 
 class pcie_tl_config_proxy extends uvm_component;
@@ -279,6 +283,12 @@ class pcie_tl_config_proxy extends uvm_component;
                 `uvm_info("CFG_PROXY", $sformatf("BAR%0d sizing read BDF=0x%04h: mask=0x%08h",
                     bar_idx, target_bdf, data), UVM_MEDIUM)
                 return 1;
+            end else if (ctx.bar_size[bar_idx] != 0) begin
+                // Implemented BAR (not sizing): return the assigned base. The
+                // base is stored in ctx.bar_base on write, not in cfg_space, so
+                // the normal cfg_read would return 0 -> kernel "error updating".
+                data = ctx.bar_base[bar_idx][31:0];
+                return 1;
             end
         end
 
@@ -290,6 +300,11 @@ class pcie_tl_config_proxy extends uvm_component;
                     data = ~(func_mgr.sriov_caps[ctx.pf_index].vf_bar_size[vbar][31:0] - 1);
                 else
                     data = 32'h0;
+                return 1;
+            end else if (func_mgr.sriov_caps[ctx.pf_index].vf_bar_size[vbar] != 0) begin
+                // Implemented VF BAR (not sizing): return assigned aperture base
+                // (stored in sriov_cap.vf_bar on write, not cfg_space).
+                data = func_mgr.sriov_caps[ctx.pf_index].vf_bar[vbar];
                 return 1;
             end
         end
@@ -352,11 +367,40 @@ class pcie_tl_config_proxy extends uvm_component;
                     target_bdf, n), UVM_MEDIUM)
                 `ifdef PCIE_COSIM_ENABLE
                 void'(bridge_vcs_send_vf_event(1, ctx.pf_index, n));
+                // VCS/DUT is authoritative for the VF layout — push per-VF BDF /
+                // BAR base / MSI-X to QEMU so it can build matching VF PCIDevices.
+                begin
+                    pcie_tl_sriov_cap sc = func_mgr.sriov_caps[ctx.pf_index];
+                    longint unsigned bbase[6];
+                    longint unsigned bstride[6];
+                    int fvf  = int'(sc.get_vf_rid(0));
+                    int vstr = (n > 1) ? (int'(sc.get_vf_rid(1)) - fvf) : int'(sc.vf_stride);
+                    for (int b = 0; b < 6; b++) begin
+                        bbase[b]   = longint'(sc.vf_bar[b]);
+                        bstride[b] = sc.vf_bar_size[b];
+                    end
+                    // Also record each VF's BAR base in the VCS-side BDF map (for MMIO decode).
+                    for (int vf = 0; vf < n; vf++)
+                        for (int b = 0; b < 6; b++)
+                            if (sc.vf_bar[b] != 0)
+                                bridge_vcs_set_bar_base_bdf(int'(sc.get_vf_rid(vf)), b,
+                                    longint'(sc.vf_bar[b]) + vf * sc.vf_bar_size[b]);
+                    void'(bridge_vcs_send_vf_config(ctx.pf_index, n, fvf, vstr,
+                        func_mgr.vf_msix_vectors, bbase, bstride));
+                end
                 `endif
-            end else if (!vf_en) begin
+            end else if (!vf_en && func_mgr.sriov_caps[ctx.pf_index].vf_enable) begin
+                // Only fire the disable path on a real enabled->disabled edge.
+                // The kernel writes SR-IOV Control (VFE=0) many times during
+                // enumeration (ARIHierarchy/MSE setup); firing VF_EVENT/VF_CONFIG
+                // on those spurious writes desyncs the ctrl_fd stream.
                 func_mgr.disable_vfs(ctx.pf_index);
                 `ifdef PCIE_COSIM_ENABLE
                 void'(bridge_vcs_send_vf_event(0, ctx.pf_index, 0));
+                begin
+                    longint unsigned z6[6] = '{default:0};
+                    void'(bridge_vcs_send_vf_config(ctx.pf_index, 0, 0, 0, 0, z6, z6));
+                end
                 `endif
             end
         end

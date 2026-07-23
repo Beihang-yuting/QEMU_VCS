@@ -34,6 +34,7 @@ typedef enum {
     TCP_MSG_QUERY_TOPOLOGY = 0x10,
     TCP_MSG_TOPOLOGY_RESP  = 0x11,
     TCP_MSG_VF_EVENT       = 0x12,
+    TCP_MSG_VF_CONFIG      = 0x14,
 } tcp_msg_type_t;
 
 /* 消息头 */
