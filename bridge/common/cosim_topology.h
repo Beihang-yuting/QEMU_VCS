@@ -21,7 +21,7 @@
 
 /* ========== Constants ========== */
 
-#define COSIM_MAX_PFS       8
+#define COSIM_MAX_PFS       16
 #define COSIM_MAX_BARS      6
 
 /* PCIe tag width constants (Capability bit encodings) */
@@ -48,19 +48,22 @@ typedef struct {
     uint16_t msix_vectors;    /* PF MSI-X table size */
     uint16_t vf_msix_vectors; /* Per-VF MSI-X table size */
     uint16_t pad;
+    /* PCI_BASE_ADDRESS_* registration flags, one entry per PF BAR.  For a
+     * 64-bit BAR pair only the low BAR owns both flags and size. */
+    uint32_t pf_bar_flags[COSIM_MAX_BARS];
     uint64_t pf_bar_size[COSIM_MAX_BARS];  /* PF BAR sizes in bytes */
     uint64_t vf_bar_size[COSIM_MAX_BARS];  /* Per-VF BAR sizes (from SR-IOV cap) */
 } __attribute__((packed)) pf_topology_t;
 
-_Static_assert(sizeof(pf_topology_t) == 112, "pf_topology_t must be 112 bytes");
+_Static_assert(sizeof(pf_topology_t) == 136, "pf_topology_t must be 136 bytes");
 
 typedef struct {
     topology_header_t header;
     pf_topology_t     pfs[COSIM_MAX_PFS];
 } __attribute__((packed)) topology_resp_t;
 
-_Static_assert(sizeof(topology_resp_t) == 4 + 112 * COSIM_MAX_PFS,
-               "topology_resp_t size mismatch");
+_Static_assert(sizeof(topology_resp_t) == 2180,
+               "topology_resp_t must be the fixed 2180-byte ABI");
 
 /* ========== VF event (enable / disable) ========== */
 
@@ -106,6 +109,31 @@ static inline uint16_t vf_config_bdf(const vf_config_t *c, int k) {
 static inline uint64_t vf_config_bar_base(const vf_config_t *c, int k, int bar) {
     if (bar < 0 || bar >= COSIM_MAX_BARS || c->vf_bar_base[bar] == 0) return 0;
     return c->vf_bar_base[bar] + (uint64_t)k * c->vf_bar_stride[bar];
+}
+
+/* Single-bus ARI routing-ID helpers. A PCI bus has one 8-bit devfn/RID
+ * namespace. The interleaved layout uses all PF RIDs first, then one RID from
+ * every PF for each VF index. */
+static inline uint16_t cosim_pf_rid(uint16_t pf0_rid, unsigned pf_index) {
+    return (uint16_t)(pf0_rid + pf_index);
+}
+
+static inline uint16_t cosim_vf_rid(uint16_t pf_rid,
+                                    unsigned first_vf_offset,
+                                    unsigned vf_stride,
+                                    unsigned vf_index) {
+    return (uint16_t)(pf_rid + first_vf_offset + vf_index * vf_stride);
+}
+
+static inline int cosim_single_bus_profile_fits(unsigned pf0_devfn,
+                                                unsigned num_pfs,
+                                                unsigned vfs_per_pf) {
+    uint64_t last_devfn;
+
+    if (num_pfs == 0 || num_pfs > COSIM_MAX_PFS || pf0_devfn > 0xFFu) return 0;
+    last_devfn = (uint64_t)pf0_devfn + num_pfs - 1;
+    if (vfs_per_pf > 0) last_devfn += (uint64_t)num_pfs * vfs_per_pf;
+    return last_devfn <= 0xFFu;
 }
 
 static inline uint16_t tag_width_to_mask(uint8_t width) {

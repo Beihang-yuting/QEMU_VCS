@@ -25,15 +25,22 @@ class pcie_tl_sriov_cap extends pcie_ext_capability;
     bit [15:0] initial_vfs     = 16'h0000;
     bit [15:0] total_vfs       = 16'd256;
     bit [15:0] num_vfs         = 16'h0000;
+    bit [15:0] function_dependency_link = 16'h0000;
     bit [15:0] first_vf_offset = 16'h0001;
     bit [15:0] vf_stride       = 16'h0001;
     bit [15:0] vf_device_id    = 16'h1235;
 
     //--- VF BAR registers ---
-    bit [31:0] vf_bar[6];
+    bit [63:0] vf_bar[6];
 
     //--- VF BAR sizes (actual size in bytes, for topology export) ---
     bit [63:0] vf_bar_size[6];
+
+    //--- VF BAR descriptor metadata ---
+    // vf_bar_owner resolves high DWORDs to their low-owner state. Only the
+    // owner carries a non-zero aperture size and low-DWORD attributes.
+    bit [31:0] vf_bar_flags[6];
+    int        vf_bar_owner[6];
 
     //--- VF BAR sizing state (per VF BAR register) ---
     bit        vf_bar_sizing[6];
@@ -46,7 +53,31 @@ class pcie_tl_sriov_cap extends pcie_ext_capability;
         super.new(name);
         cap_id  = EXT_CAP_ID_SRIOV;
         cap_ver = 4'h1;
-        foreach (vf_bar[i]) vf_bar[i] = 32'h0;
+        foreach (vf_bar[i]) begin
+            vf_bar[i]         = 64'h0;
+            vf_bar_size[i]    = 64'h0;
+            vf_bar_flags[i]   = 32'h0;
+            vf_bar_owner[i]   = i;
+            vf_bar_sizing[i]  = 0;
+        end
+    endfunction
+
+    //=========================================================================
+    // DPU VF apertures are three 64-bit prefetchable BAR pairs. The metadata
+    // lives on the SR-IOV descriptors because these are the VF BAR registers
+    // in the owning PF's extended capability.
+    //=========================================================================
+    function void init_dpu_vf_bar_descriptors();
+        for (int bar = 0; bar < 6; bar++) begin
+            vf_bar[bar]        = 64'h0;
+            vf_bar_size[bar]   = 64'h0;
+            vf_bar_sizing[bar] = 0;
+            vf_bar_owner[bar]  = (bar / 2) * 2;
+            vf_bar_flags[bar]  = pcie_dpu_bar_flags(bar);
+        end
+        for (int bar = 0; bar < 6; bar++)
+            if (vf_bar_owner[bar] == bar)
+                vf_bar_size[bar] = pcie_dpu_bar_size(1'b1, bar);
     endfunction
 
     //=========================================================================
@@ -67,7 +98,7 @@ class pcie_tl_sriov_cap extends pcie_ext_capability;
     //   [8..9]   InitialVFs
     //   [10..11] TotalVFs
     //   [12..13] NumVFs
-    //   [14..15] FuncDepLink (zeros)
+    //   [14..15] Function Dependency Link
     //   [16..17] First VF Offset
     //   [18..19] VF Stride
     //   [20..21] Reserved
@@ -120,9 +151,9 @@ class pcie_tl_sriov_cap extends pcie_ext_capability;
         data[12] = num_vfs[7:0];
         data[13] = num_vfs[15:8];
 
-        // FuncDepLink (reserved/zero)
-        data[14] = 8'h00;
-        data[15] = 8'h00;
+        // Function Dependency Link
+        data[14] = function_dependency_link[7:0];
+        data[15] = function_dependency_link[15:8];
 
         // First VF Offset
         data[16] = first_vf_offset[7:0];
@@ -152,13 +183,22 @@ class pcie_tl_sriov_cap extends pcie_ext_capability;
         data[30] = system_page_size[23:16];
         data[31] = system_page_size[31:24];
 
-        // VF BAR[0..5]
+        // VF BAR[0..5]. A 64-bit BAR pair uses the low owner's base/flags;
+        // legacy descriptors retain their one-register-per-BAR ownership.
         for (int i = 0; i < 6; i++) begin
+            int owner = vf_bar_owner[i];
+            bit [31:0] vf_bar_dw;
             int base = 32 + i * 4;
-            data[base]     = vf_bar[i][7:0];
-            data[base + 1] = vf_bar[i][15:8];
-            data[base + 2] = vf_bar[i][23:16];
-            data[base + 3] = vf_bar[i][31:24];
+            if (owner < 0 || owner >= 6)
+                owner = i;
+            if (i == owner)
+                vf_bar_dw = vf_bar[owner][31:0] | vf_bar_flags[owner];
+            else
+                vf_bar_dw = vf_bar[owner][63:32];
+            data[base]     = vf_bar_dw[7:0];
+            data[base + 1] = vf_bar_dw[15:8];
+            data[base + 2] = vf_bar_dw[23:16];
+            data[base + 3] = vf_bar_dw[31:24];
         end
 
         // VF Migration State Array Offset (zeros)

@@ -146,7 +146,8 @@ static int shm_recv_eth(cosim_transport_t *t, eth_frame_t *frame, uint64_t timeo
 /* ========== P3: Topology / VF event (SHM: ctrl region + sync socket) ========== */
 
 /* Topology data lives in the ctrl region right after cosim_ctrl_t.
- * The ctrl region is 4KB, cosim_ctrl_t is ~112 bytes, topology_resp_t is ~900 bytes. */
+ * The ctrl region is 4KB, cosim_ctrl_t is ~112 bytes, and the 16-PF
+ * topology_resp_t is 2180 bytes. */
 #define SHM_TOPOLOGY_OFFSET  sizeof(cosim_ctrl_t)
 
 static int shm_send_topology(cosim_transport_t *t, const topology_resp_t *topo) {
@@ -176,10 +177,13 @@ static int shm_recv_vf_event(cosim_transport_t *t, vf_event_t *ev) {
 }
 
 /* vf_config lives in the ctrl region right after the topology block.
- * ctrl region is 4KB: cosim_ctrl_t (~112B) + topology_resp_t (900B) +
- * vf_config_t (108B) = ~1.1KB, well within budget. The accompanying
+ * ctrl region is 4KB: cosim_ctrl_t (~112B) + topology_resp_t (2180B) +
+ * vf_config_t (108B) = <2.5KB, well within budget. The accompanying
  * SYNC_MSG_VF_CONFIG sync message tells the peer to read this slot. */
 #define SHM_VFCONFIG_OFFSET  (SHM_TOPOLOGY_OFFSET + sizeof(topology_resp_t))
+
+_Static_assert(SHM_VFCONFIG_OFFSET + sizeof(vf_config_t) <= COSIM_SHM_CTRL_SIZE,
+               "topology and VF config must fit in the SHM control region");
 
 static int shm_send_vf_config(cosim_transport_t *t, const vf_config_t *cfg) {
     transport_shm_priv_t *p = (transport_shm_priv_t *)t->priv;

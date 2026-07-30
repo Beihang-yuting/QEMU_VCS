@@ -9,13 +9,12 @@
 #include "hw/pci/pci_device.h"
 #include "hw/pci/msi.h"
 #include "qom/object.h"
+#include "hw/net/cosim_topology.h"
 
 /* Virtio PCI ID (modern virtio-net) */
 #define COSIM_PCI_VENDOR_ID    0x1AF4
 #define COSIM_PCI_DEVICE_ID    0x1041
 #define COSIM_PCI_REVISION     0x01
-
-#define COSIM_MAX_BARS         6
 
 /* BDF 动态缓存: 首次 CfgRd 探测 vendor ID，缓存结果
  * 无效 BDF 后续访问直接返回 0xFFFFFFFF，不转发 VCS */
@@ -82,13 +81,21 @@ struct CosimPCIeRC {
     /* 运行时 debug 开关 -- -device cosim-pcie-rc,...,debug=on */
     bool debug;
 
-    /* Multi-PF SR-IOV: the primary device (function 0) owns the transport and
-     * auto-creates PF1..num_pfs-1 as sibling functions on the same slot, all
-     * sharing the primary's bridge_ctx/irq_poller. pf_index = PCI_FUNC(devfn).
+    /* Multi-PF SR-IOV: the primary device owns the transport and auto-creates
+     * PF1..num_pfs-1 at consecutive raw ARI devfns on the same bus. All share
+     * the primary's bridge_ctx/irq_poller. pf_index is explicit because
+     * PCI_FUNC(devfn) contains only three bits and aliases PF8 back to PF0.
      * Config space forwards each PF's own BDF to VCS (config-bypass). Default
      * num_pfs=1 keeps the single-PF path unchanged. */
     uint32_t pf_index;     /* this device's PF number (0 = primary) */
     uint32_t num_pfs;      /* total PFs (only meaningful on primary) */
+
+    /* PF0 owns the VCS topology response that defines every PF BAR.  Sibling
+     * PFs use PF0's entries while retaining their own MemoryRegions.  A zero
+     * PF count is the explicit legacy response which keeps BAR0 probing only
+     * for the old non-topology single-PF flow. */
+    topology_resp_t topology;
+    bool            topology_valid;
 
     /* BDF 动态缓存 — config space 访问过滤 */
     CosimBdfCacheEntry bdf_cache[COSIM_MAX_BUS][COSIM_MAX_DEV][COSIM_MAX_FUNC];

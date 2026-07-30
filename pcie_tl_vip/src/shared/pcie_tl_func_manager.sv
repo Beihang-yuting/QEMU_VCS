@@ -14,6 +14,20 @@ import "DPI-C" function void bridge_vcs_set_pf_topology(
     input longint unsigned vf_bar0, input longint unsigned vf_bar1, input longint unsigned vf_bar2,
     input longint unsigned vf_bar3, input longint unsigned vf_bar4, input longint unsigned vf_bar5);
 import "DPI-C" function void bridge_vcs_finalize_topology(input int num_pfs, input int tag_width);
+import "DPI-C" function void bridge_vcs_set_pf_topology_rc(
+    input int rc, input int pf_idx, input int bdf, input int num_vfs,
+    input int vf_device_id, input int vendor_id, input int device_id,
+    input int msix_vectors, input int vf_msix_vectors,
+    input int pf_bar_flags0, input int pf_bar_flags1, input int pf_bar_flags2,
+    input int pf_bar_flags3, input int pf_bar_flags4, input int pf_bar_flags5,
+    input longint unsigned pf_bar0, input longint unsigned pf_bar1,
+    input longint unsigned pf_bar2, input longint unsigned pf_bar3,
+    input longint unsigned pf_bar4, input longint unsigned pf_bar5,
+    input longint unsigned vf_bar0, input longint unsigned vf_bar1,
+    input longint unsigned vf_bar2, input longint unsigned vf_bar3,
+    input longint unsigned vf_bar4, input longint unsigned vf_bar5);
+import "DPI-C" function void bridge_vcs_finalize_topology_rc(
+    input int rc, input int num_pfs, input int tag_width);
 `endif
 
 //=============================================================================
@@ -26,6 +40,8 @@ class pcie_tl_func_context extends uvm_object;
     int        pf_index;
     int        vf_index;      // -1 means this entry is a PF
     bit [15:0] bdf;
+    bit [15:0] vendor_id;
+    bit [15:0] device_id;
     bit        is_vf;
     bit        enabled;
 
@@ -36,6 +52,12 @@ class pcie_tl_func_context extends uvm_object;
     bit [63:0] bar_base[6];
     bit [63:0] bar_size[6];
     bit        bar_enable[6];
+
+    //--- BAR descriptor metadata ---
+    // A 64-bit BAR occupies two configuration DWORDs. bar_owner resolves
+    // either word to the low DWORD which owns the size/base/flags state.
+    bit [31:0] bar_flags[6];
+    int        bar_owner[6];
 
     //--- BAR sizing state per BAR register ---
     bit        bar_sizing[6];
@@ -58,6 +80,33 @@ class pcie_tl_func_context extends uvm_object;
         foreach (bar_base[i])   bar_base[i]   = 64'h0;
         foreach (bar_size[i])   bar_size[i]   = 64'h0;
         foreach (bar_enable[i]) bar_enable[i] = 0;
+        foreach (bar_sizing[i]) bar_sizing[i] = 0;
+        foreach (bar_flags[i]) begin
+            bar_flags[i] = 32'h0;
+            bar_owner[i] = i;
+        end
+    endfunction
+
+    //=========================================================================
+    // Initialize the DPU's three 64-bit prefetchable PF/VF BAR descriptors.
+    // Only BAR0/BAR2/BAR4 are owners; BAR1/BAR3/BAR5 are their upper words.
+    //=========================================================================
+    function void init_dpu_bar_descriptors();
+        for (int bar = 0; bar < 6; bar++) begin
+            bar_base[bar]  = 64'h0;
+            bar_size[bar]  = 64'h0;
+            bar_sizing[bar] = 0;
+            bar_owner[bar] = (bar / 2) * 2;
+            bar_flags[bar] = pcie_dpu_bar_flags(bar);
+        end
+        for (int bar = 0; bar < 6; bar++) begin
+            if (bar_owner[bar] == bar) begin
+                bar_size[bar] = pcie_dpu_bar_size(is_vf, bar);
+                // The raw image must advertise the low-word type/prefetch
+                // bits even before a configuration proxy handles a BAR read.
+                cfg_mgr.write(12'h010 + bar * 4, bar_flags[bar], 4'hf);
+            end
+        end
     endfunction
 
     //=========================================================================
@@ -66,8 +115,11 @@ class pcie_tl_func_context extends uvm_object;
     function void init_cfg_space(
         bit [15:0] vendor_id,
         bit [15:0] device_id,
-        bit [7:0]  header_type = 8'h00
+        bit [7:0]  header_type = 8'h00,
+        pcie_cfg_profile_e profile = PCIE_CFG_PROFILE_LEGACY
     );
+        this.vendor_id = vendor_id;
+        this.device_id = device_id;
         cfg_mgr = pcie_tl_cfg_space_manager::type_id::create(
             $sformatf("cfg_mgr_bdf%04h", bdf));
         if (is_bridge) begin
@@ -78,9 +130,23 @@ class pcie_tl_func_context extends uvm_object;
             cfg_mgr.init_pcie_capability();  // TODO: bridge 的 PCIe cap port type(switch/root)细化
         end else begin
             // Type 0 (endpoint)
-            cfg_mgr.init_type0_header(vendor_id, device_id, .header_type(header_type));
-            cfg_mgr.init_pcie_capability();
-            cfg_mgr.init_pm_capability();
+            if (profile == PCIE_CFG_PROFILE_DPU_20F9_501X) begin
+                cfg_mgr.init_type0_header(vendor_id, device_id,
+                    .revision_id(8'h00), .class_code(24'h020000),
+                    .header_type(header_type),
+                    .subsystem_vendor_id(16'h20f9),
+                    .subsystem_device_id(16'h0000));
+                cfg_mgr.init_pm_capability(.cap_offset(8'h40),
+                                           .static_fields_ro(1'b1));
+                cfg_mgr.init_msix_capability(.cap_offset(8'h60), .table_size(16),
+                    .bir(3'd4), .table_off(32'h0000_0000),
+                    .pba_off(32'h0000_4000));
+                cfg_mgr.init_dpu_501x_pcie_capability(.cap_offset(8'h70));
+            end else begin
+                cfg_mgr.init_type0_header(vendor_id, device_id, .header_type(header_type));
+                cfg_mgr.init_pcie_capability();
+                cfg_mgr.init_pm_capability();
+            end
         end
     endfunction
 
@@ -99,8 +165,11 @@ class pcie_tl_func_manager extends uvm_object;
     bit [15:0] vendor_id      = 16'hABCD;
     bit [15:0] device_id      = 16'h1234;
     bit [15:0] vf_device_id   = 16'h1235;
+    pcie_cfg_profile_e cfg_profile = PCIE_CFG_PROFILE_LEGACY;
     bit [7:0]  pf_base_bus    = 8'h01;   // cosim EP behind pcie-root-port -> 01:00.0
     bit [4:0]  pf_base_dev    = 5'h00;
+    bit        runtime_bdf_bound = 0;
+    bit [15:0] runtime_pf_base_bdf = 16'h0000;
 
     //--- MSI-X and tag configuration (CoSim topology export) ---
     int        pf_msix_vectors = 64;
@@ -134,6 +203,10 @@ class pcie_tl_func_manager extends uvm_object;
         vendor_id      = v_id;
         device_id      = d_id;
         vf_device_id   = vf_dev_id;
+        if (cfg_profile == PCIE_CFG_PROFILE_DPU_20F9_501X) begin
+            vendor_id = 16'h20f9;
+            device_id = 16'h5011;
+        end
 
         pf_ctx     = new[num_pfs];
         vf_ctx     = new[num_pfs];
@@ -141,9 +214,13 @@ class pcie_tl_func_manager extends uvm_object;
 
         for (int pf = 0; pf < num_pfs; pf++) begin
             bit [15:0] pf_bdf;
+            bit [15:0] pf_vendor_id;
+            bit [15:0] pf_device_id;
 
-            // Construct PF BDF: bus=pf_base_bus, dev=pf_base_dev, func=pf[2:0]
-            pf_bdf = {pf_base_bus, pf_base_dev, pf[2:0]};
+            // Preserve the complete eight-bit ARI function number. For PF8+
+            // the conventional BDF rendering advances the device field; using
+            // pf[2:0] here would alias PF8 back onto PF0.
+            pf_bdf = pcie_pf_bdf({pf_base_bus, pf_base_dev, 3'b000}, pf);
 
             // Create and initialise PF context
             pf_ctx[pf] = pcie_tl_func_context::type_id::create(
@@ -157,12 +234,123 @@ class pcie_tl_func_manager extends uvm_object;
             // window and SR-IOV init bails (no VF resources). 64KB memory BAR.
             pf_ctx[pf].bar_size[0] = 64 * 1024;
             // 多 PF 时置 Header Type multi-function bit(0x80), 否则 OS 只扫 function 0
-            pf_ctx[pf].init_cfg_space(vendor_id, device_id,
-                                      .header_type((num_pfs > 1) ? 8'h80 : 8'h00));
+            if (cfg_profile == PCIE_CFG_PROFILE_DPU_20F9_501X) begin
+                pf_vendor_id = 16'h20f9;
+                pf_device_id = pcie_dpu_pf_device_id(pf);
+            end else begin
+                pf_vendor_id = vendor_id;
+                pf_device_id = device_id;
+            end
+            pf_ctx[pf].init_cfg_space(pf_vendor_id, pf_device_id,
+                                      .header_type((num_pfs > 1) ? 8'h80 : 8'h00),
+                                      .profile(cfg_profile));
+            if (cfg_profile == PCIE_CFG_PROFILE_DPU_20F9_501X)
+                pf_ctx[pf].init_dpu_bar_descriptors();
 
             // Register PF in BDF lookup table
             bdf_lut[pf_bdf] = pf_ctx[pf];
 
+            if (cfg_profile == PCIE_CFG_PROFILE_DPU_20F9_501X) begin
+                // Captured DPU PF extended-capability chain. Unlike the legacy
+                // PF chain, DPU PFs intentionally do not advertise ATS, PRI,
+                // or PASID.
+                begin
+                    pcie_ext_capability aer_cap = pcie_ext_capability::type_id::create(
+                        $sformatf("dpu_aer_cap_%0d", pf));
+                    aer_cap.cap_id  = EXT_CAP_ID_AER;
+                    aer_cap.cap_ver = 4'h1;
+                    aer_cap.offset  = 12'h100;
+                    // The next capability begins at 0x140, so AER owns
+                    // exactly bytes 0x104..0x13f (60 bytes of payload).
+                    aer_cap.data    = new[60];
+                    foreach (aer_cap.data[i]) aer_cap.data[i] = 8'h00;
+                    // UE Mask = 0x00400000; UE Severity = 0x00462030.
+                    aer_cap.data[6]  = 8'h40;
+                    aer_cap.data[8]  = 8'h30;
+                    aer_cap.data[9]  = 8'h20;
+                    aer_cap.data[10] = 8'h46;
+                    // CE Mask = 0x0000e000.
+                    aer_cap.data[17] = 8'he0;
+                    pf_ctx[pf].cfg_mgr.register_ext_capability(aer_cap);
+                    // UE Status (+0x04) and CE Status (+0x10) are RW1C;
+                    // masks and severity retain their normal RW permissions.
+                    for (int byte_idx = 0; byte_idx < 4; byte_idx++) begin
+                        pf_ctx[pf].cfg_mgr.field_attrs[12'h104 + byte_idx] = CFG_FIELD_RW1C;
+                        pf_ctx[pf].cfg_mgr.field_attrs[12'h110 + byte_idx] = CFG_FIELD_RW1C;
+                    end
+                end
+
+                sriov_caps[pf] = pcie_tl_sriov_cap::type_id::create(
+                    $sformatf("dpu_sriov_cap_%0d", pf));
+                sriov_caps[pf].pf_bdf                   = pf_bdf;
+                sriov_caps[pf].initial_vfs              = 16;
+                sriov_caps[pf].total_vfs                = 16;
+                sriov_caps[pf].vf_device_id             = 16'h8689;
+                sriov_caps[pf].function_dependency_link = pf;
+                sriov_caps[pf].first_vf_offset = pcie_dpu_first_vf_offset(num_pfs, pf);
+                sriov_caps[pf].vf_stride                = 1;
+                sriov_caps[pf].ari_capable_hierarchy    = 1;
+                sriov_caps[pf].init_dpu_vf_bar_descriptors();
+                sriov_caps[pf].offset                   = 12'h140;
+                sriov_caps[pf].build_data();
+                pf_ctx[pf].cfg_mgr.register_ext_capability(sriov_caps[pf]);
+                // Static SR-IOV discovery fields are read-only. NumVFs,
+                // Control, System Page Size, and VF BAR state remain dynamic.
+                for (int byte_idx = 0; byte_idx < 4; byte_idx++) begin
+                    pf_ctx[pf].cfg_mgr.field_attrs[12'h144 + byte_idx] = CFG_FIELD_RO;
+                    pf_ctx[pf].cfg_mgr.field_attrs[12'h14c + byte_idx] = CFG_FIELD_RO;
+                    pf_ctx[pf].cfg_mgr.field_attrs[12'h154 + byte_idx] = CFG_FIELD_RO;
+                    pf_ctx[pf].cfg_mgr.field_attrs[12'h158 + byte_idx] = CFG_FIELD_RO;
+                    pf_ctx[pf].cfg_mgr.field_attrs[12'h15c + byte_idx] = CFG_FIELD_RO;
+                end
+                pf_ctx[pf].cfg_mgr.field_attrs[12'h152] = CFG_FIELD_RO;
+                pf_ctx[pf].cfg_mgr.field_attrs[12'h153] = CFG_FIELD_RO;
+                pf_ctx[pf].cfg_mgr.field_attrs[12'h14a] = CFG_FIELD_RW1C;
+                pf_ctx[pf].cfg_mgr.field_attrs[12'h14b] = CFG_FIELD_RW1C;
+
+                begin
+                    pcie_ext_capability ari_cap = pcie_ext_capability::type_id::create(
+                        $sformatf("dpu_ari_cap_%0d", pf));
+                    ari_cap.cap_id  = EXT_CAP_ID_ARI;
+                    ari_cap.cap_ver = 4'h1;
+                    ari_cap.offset  = 12'h180;
+                    ari_cap.data    = new[4];
+                    foreach (ari_cap.data[i]) ari_cap.data[i] = 8'h00;
+                    // Next Function Number is ARI Capability bits [15:8].
+                    ari_cap.data[1] = (pf + 1 < num_pfs) ? 8'(pf + 1) : 8'h00;
+                    pf_ctx[pf].cfg_mgr.register_ext_capability(ari_cap);
+                    pf_ctx[pf].cfg_mgr.field_attrs[12'h184] = CFG_FIELD_RO;
+                    pf_ctx[pf].cfg_mgr.field_attrs[12'h185] = CFG_FIELD_RO;
+                end
+
+                begin
+                    pcie_ext_capability sec_pcie_cap = pcie_ext_capability::type_id::create(
+                        $sformatf("dpu_secondary_pcie_cap_%0d", pf));
+                    sec_pcie_cap.cap_id  = 16'h0019;
+                    sec_pcie_cap.cap_ver = 4'h1;
+                    sec_pcie_cap.offset  = 12'h1c0;
+                    sec_pcie_cap.data    = new[4];
+                    foreach (sec_pcie_cap.data[i]) sec_pcie_cap.data[i] = 8'h00;
+                    pf_ctx[pf].cfg_mgr.register_ext_capability(sec_pcie_cap);
+                    for (int byte_idx = 0; byte_idx < 4; byte_idx++)
+                        pf_ctx[pf].cfg_mgr.field_attrs[12'h1c4 + byte_idx] = CFG_FIELD_RO;
+                end
+
+                begin
+                    pcie_ext_capability acs_cap = pcie_ext_capability::type_id::create(
+                        $sformatf("dpu_acs_cap_%0d", pf));
+                    acs_cap.cap_id  = EXT_CAP_ID_ACS;
+                    acs_cap.cap_ver = 4'h1;
+                    acs_cap.offset  = 12'h400;
+                    acs_cap.data    = new[4];
+                    foreach (acs_cap.data[i]) acs_cap.data[i] = 8'h00;
+                    acs_cap.data[0] = 8'h20;
+                    acs_cap.data[1] = 8'h20;
+                    pf_ctx[pf].cfg_mgr.register_ext_capability(acs_cap);
+                    for (int byte_idx = 0; byte_idx < 4; byte_idx++)
+                        pf_ctx[pf].cfg_mgr.field_attrs[12'h404 + byte_idx] = CFG_FIELD_RO;
+                end
+            end else begin
             // ARI Extended Capability (0x000E): extended cap 链头必须在 0x100,
             // 否则 OS 从 0x100 见空即止, SR-IOV(@0x200)永远发现不了。
             // 且多 VF(function# > 7)路由依赖 ARI。先注册 ARI(占 0x100)再链到 SR-IOV。
@@ -256,6 +444,7 @@ class pcie_tl_func_manager extends uvm_object;
                 // Control Reg (data[2..3]) = 0: PASID Enable(bit0)=0 (guest sets)
                 pf_ctx[pf].cfg_mgr.register_ext_capability(pasid_cap);
             end
+            end
 
             // Pre-allocate VF contexts (disabled by default)
             vf_ctx[pf] = new[max_vfs_per_pf];
@@ -270,6 +459,8 @@ class pcie_tl_func_manager extends uvm_object;
                 vf_ctx[pf][vf].is_vf    = 1;
                 vf_ctx[pf][vf].enabled  = 0;
                 vf_ctx[pf][vf].init_cfg_space(vendor_id, vf_dev_id);
+                if (cfg_profile == PCIE_CFG_PROFILE_DPU_20F9_501X)
+                    vf_ctx[pf][vf].init_dpu_bar_descriptors();
                 // MSI-X capability so guest/VFIO can enable per-VF interrupts.
                 // Table @ VF BAR0 + 0x1000, PBA @ +0x1800 (doorbell regs are at
                 // 0x00..0x0C, no overlap). EP captures the table addr/data writes.
@@ -337,6 +528,75 @@ class pcie_tl_func_manager extends uvm_object;
                 "build_topology: topo=%0d not yet modeled, using flat ep_direct", topo),
                 UVM_LOW)
         build(n_pfs, max_vfs, v_id, d_id, vf_dev_id);
+    endfunction
+
+    //=========================================================================
+    // Bind the bootstrap PF/VF model to the BDF assigned by firmware.
+    // Called synchronously on the first PF0 Vendor ID read, before lookup, so
+    // enumeration never observes an intermediate 0xFFFF_FFFF response.
+    //=========================================================================
+    function bit bind_runtime_pf_base(bit [15:0] observed_pf0_bdf);
+        bit [15:0] old_base;
+        bit [15:0] new_base;
+
+        if (num_pfs < 1 || pf_ctx.size() < num_pfs) begin
+            `uvm_error("FUNC_MGR", "runtime BDF bind requested before PF contexts exist")
+            return 0;
+        end
+        if (observed_pf0_bdf[2:0] != 3'b000) begin
+            `uvm_warning("FUNC_MGR", $sformatf(
+                "runtime BDF bind rejected: observed PF0 has non-zero function 0x%04h",
+                observed_pf0_bdf))
+            return 0;
+        end
+        if (num_pfs == 16 && observed_pf0_bdf[7:0] != 8'h00) begin
+            `uvm_fatal("FUNC_MGR", $sformatf(
+                "16-PF single-bus profile requires PF0 devfn 0, observed 0x%04h",
+                observed_pf0_bdf))
+            return 0;
+        end
+
+        old_base = pcie_pf_base_bdf(pf_ctx[0].bdf);
+        new_base = pcie_pf_base_bdf(observed_pf0_bdf);
+        if (runtime_bdf_bound)
+            return runtime_pf_base_bdf == new_base;
+
+        // Remove all old keys before changing any context. Enabled VFs are
+        // uncommon during boot, but handling them keeps a rekey atomic.
+        for (int pf = 0; pf < num_pfs; pf++) begin
+            bdf_lut.delete(pf_ctx[pf].bdf);
+            for (int vf = 0; vf < max_vfs_per_pf; vf++)
+                if (vf_ctx[pf][vf].enabled)
+                    bdf_lut.delete(vf_ctx[pf][vf].bdf);
+        end
+
+        pf_base_bus = new_base[15:8];
+        pf_base_dev = new_base[7:3];
+        for (int pf = 0; pf < num_pfs; pf++) begin
+            bit [15:0] new_pf_bdf = pcie_pf_bdf(new_base, pf);
+
+            pf_ctx[pf].bdf       = new_pf_bdf;
+            sriov_caps[pf].pf_bdf = new_pf_bdf;
+            bdf_lut[new_pf_bdf]  = pf_ctx[pf];
+
+            for (int vf = 0; vf < max_vfs_per_pf; vf++) begin
+                bit [15:0] new_vf_bdf = pcie_vf_bdf(
+                    new_pf_bdf,
+                    sriov_caps[pf].first_vf_offset,
+                    sriov_caps[pf].vf_stride,
+                    vf);
+                vf_ctx[pf][vf].bdf = new_vf_bdf;
+                if (vf_ctx[pf][vf].enabled)
+                    bdf_lut[new_vf_bdf] = vf_ctx[pf][vf];
+            end
+        end
+
+        runtime_pf_base_bdf = new_base;
+        runtime_bdf_bound   = 1;
+        `uvm_info("FUNC_MGR", $sformatf(
+            "runtime BDF bind: PF base 0x%04h -> 0x%04h (%0d PFs)",
+            old_base, new_base, num_pfs), UVM_LOW)
+        return 1;
     endfunction
 
     //=========================================================================
@@ -435,21 +695,34 @@ class pcie_tl_func_manager extends uvm_object;
 
     `ifdef PCIE_COSIM_ENABLE
     //=========================================================================
-    // Export topology to C bridge via DPI-C (called once after build)
+    // Export topology to C bridge via DPI-C for one initialized RC.
+    // A paired 64-bit BAR contributes flags and size only at its low owner;
+    // its upper configuration DWORD is not an independently registered BAR.
     //=========================================================================
-    function void export_topology_to_bridge();
+    function void export_topology_to_bridge(int rc_index);
+        longint unsigned pf_bar_size[6];
+        longint unsigned vf_bar_size[6];
+
         for (int pf = 0; pf < num_pfs; pf++) begin
-            bridge_vcs_set_pf_topology(
-                pf, pf_ctx[pf].bdf, max_vfs_per_pf, vf_device_id,
-                vendor_id, device_id, pf_msix_vectors, vf_msix_vectors,
-                pf_ctx[pf].bar_size[0], pf_ctx[pf].bar_size[1],
-                pf_ctx[pf].bar_size[2], pf_ctx[pf].bar_size[3],
-                pf_ctx[pf].bar_size[4], pf_ctx[pf].bar_size[5],
-                sriov_caps[pf].vf_bar_size[0], sriov_caps[pf].vf_bar_size[1],
-                sriov_caps[pf].vf_bar_size[2], sriov_caps[pf].vf_bar_size[3],
-                sriov_caps[pf].vf_bar_size[4], sriov_caps[pf].vf_bar_size[5]);
+            for (int bar = 0; bar < 6; bar++) begin
+                pf_bar_size[bar] = (pf_ctx[pf].bar_owner[bar] == bar)
+                    ? pf_ctx[pf].bar_size[bar] : 64'h0;
+                vf_bar_size[bar] = (sriov_caps[pf].vf_bar_owner[bar] == bar)
+                    ? sriov_caps[pf].vf_bar_size[bar] : 64'h0;
+            end
+            bridge_vcs_set_pf_topology_rc(
+                rc_index, pf, pf_ctx[pf].bdf, max_vfs_per_pf,
+                sriov_caps[pf].vf_device_id, pf_ctx[pf].vendor_id,
+                pf_ctx[pf].device_id, pf_msix_vectors, vf_msix_vectors,
+                int'(pf_ctx[pf].bar_flags[0]), int'(pf_ctx[pf].bar_flags[1]),
+                int'(pf_ctx[pf].bar_flags[2]), int'(pf_ctx[pf].bar_flags[3]),
+                int'(pf_ctx[pf].bar_flags[4]), int'(pf_ctx[pf].bar_flags[5]),
+                pf_bar_size[0], pf_bar_size[1], pf_bar_size[2],
+                pf_bar_size[3], pf_bar_size[4], pf_bar_size[5],
+                vf_bar_size[0], vf_bar_size[1], vf_bar_size[2],
+                vf_bar_size[3], vf_bar_size[4], vf_bar_size[5]);
         end
-        bridge_vcs_finalize_topology(num_pfs, tag_width);
+        bridge_vcs_finalize_topology_rc(rc_index, num_pfs, tag_width);
     endfunction
     `endif
 

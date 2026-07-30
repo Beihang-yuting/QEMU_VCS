@@ -111,22 +111,31 @@ int bridge_vcs_init(const char *shm_name, const char *sock_path) {
 
 /* ========== P3: Topology DPI-C functions ========== */
 
-/* DPI-C: Set topology for one PF (called from SV testbench during init) */
-void bridge_vcs_set_pf_topology(int pf_idx,
-                                 int bdf, int num_vfs, int vf_device_id,
-                                 int vendor_id, int device_id,
-                                 int msix_vectors, int vf_msix_vectors,
-                                 unsigned long long pf_bar0, unsigned long long pf_bar1,
-                                 unsigned long long pf_bar2, unsigned long long pf_bar3,
-                                 unsigned long long pf_bar4, unsigned long long pf_bar5,
-                                 unsigned long long vf_bar0, unsigned long long vf_bar1,
-                                 unsigned long long vf_bar2, unsigned long long vf_bar3,
-                                 unsigned long long vf_bar4, unsigned long long vf_bar5) {
-    if (pf_idx < 0 || pf_idx >= COSIM_MAX_PFS) {
-        fprintf(stderr, "[VCS Bridge] set_pf_topology: invalid pf_idx=%d\n", pf_idx);
+/* DPI-C: Set topology for one PF in a specific RC slot. The scalar ABI keeps
+ * VCS DPI declarations portable; flags appear before BAR sizes in both C and
+ * SV declarations. */
+void bridge_vcs_set_pf_topology_rc(
+    int rc, int pf_idx,
+    int bdf, int num_vfs, int vf_device_id,
+    int vendor_id, int device_id,
+    int msix_vectors, int vf_msix_vectors,
+    int pf_bar_flags0, int pf_bar_flags1, int pf_bar_flags2,
+    int pf_bar_flags3, int pf_bar_flags4, int pf_bar_flags5,
+    unsigned long long pf_bar0, unsigned long long pf_bar1,
+    unsigned long long pf_bar2, unsigned long long pf_bar3,
+    unsigned long long pf_bar4, unsigned long long pf_bar5,
+    unsigned long long vf_bar0, unsigned long long vf_bar1,
+    unsigned long long vf_bar2, unsigned long long vf_bar3,
+    unsigned long long vf_bar4, unsigned long long vf_bar5) {
+    if (rc < 0 || rc >= COSIM_MAX_RCS) {
+        fprintf(stderr, "[VCS Bridge] set_pf_topology_rc: invalid rc=%d\n", rc);
         return;
     }
-    pf_topology_t *pf = &g_topology.pfs[pf_idx];
+    if (pf_idx < 0 || pf_idx >= COSIM_MAX_PFS) {
+        fprintf(stderr, "[VCS Bridge] set_pf_topology_rc: invalid pf_idx=%d\n", pf_idx);
+        return;
+    }
+    pf_topology_t *pf = &g_rc[rc].topology.pfs[pf_idx];
     memset(pf, 0, sizeof(*pf));
     pf->bdf             = (uint16_t)bdf;
     pf->num_vfs         = (uint16_t)num_vfs;
@@ -135,6 +144,12 @@ void bridge_vcs_set_pf_topology(int pf_idx,
     pf->device_id       = (uint16_t)device_id;
     pf->msix_vectors    = (uint16_t)msix_vectors;
     pf->vf_msix_vectors = (uint16_t)vf_msix_vectors;
+    pf->pf_bar_flags[0] = (uint32_t)pf_bar_flags0;
+    pf->pf_bar_flags[1] = (uint32_t)pf_bar_flags1;
+    pf->pf_bar_flags[2] = (uint32_t)pf_bar_flags2;
+    pf->pf_bar_flags[3] = (uint32_t)pf_bar_flags3;
+    pf->pf_bar_flags[4] = (uint32_t)pf_bar_flags4;
+    pf->pf_bar_flags[5] = (uint32_t)pf_bar_flags5;
     pf->pf_bar_size[0]  = pf_bar0;
     pf->pf_bar_size[1]  = pf_bar1;
     pf->pf_bar_size[2]  = pf_bar2;
@@ -147,18 +162,44 @@ void bridge_vcs_set_pf_topology(int pf_idx,
     pf->vf_bar_size[3]  = vf_bar3;
     pf->vf_bar_size[4]  = vf_bar4;
     pf->vf_bar_size[5]  = vf_bar5;
-    fprintf(stderr, "[VCS Bridge] set_pf_topology: pf[%d] bdf=0x%04x vfs=%d\n",
-            pf_idx, bdf, num_vfs);
+    fprintf(stderr, "[VCS Bridge] set_pf_topology_rc: rc=%d pf[%d] bdf=0x%04x vfs=%d\n",
+            rc, pf_idx, bdf, num_vfs);
 }
 
-/* DPI-C: Finalize topology (marks it ready for queries) */
+/* DPI-C: Finalize a per-RC topology (marks its query response ready). */
+void bridge_vcs_finalize_topology_rc(int rc, int num_pfs, int tag_width) {
+    if (rc < 0 || rc >= COSIM_MAX_RCS) {
+        fprintf(stderr, "[VCS Bridge] finalize_topology_rc: invalid rc=%d\n", rc);
+        return;
+    }
+    g_rc[rc].topology.header.num_pfs  = (uint8_t)num_pfs;
+    g_rc[rc].topology.header.tag_width = (uint8_t)tag_width;
+    memset(g_rc[rc].topology.header.pad, 0, sizeof(g_rc[rc].topology.header.pad));
+    g_rc[rc].topology_ready = 1;
+    fprintf(stderr, "[VCS Bridge] finalize_topology_rc: rc=%d num_pfs=%d tag_width=%d\n",
+            rc, num_pfs, tag_width);
+}
+
+/* Legacy single-RC wrappers retain their existing ABI and default BAR flags. */
+void bridge_vcs_set_pf_topology(int pf_idx,
+                                 int bdf, int num_vfs, int vf_device_id,
+                                 int vendor_id, int device_id,
+                                 int msix_vectors, int vf_msix_vectors,
+                                 unsigned long long pf_bar0, unsigned long long pf_bar1,
+                                 unsigned long long pf_bar2, unsigned long long pf_bar3,
+                                 unsigned long long pf_bar4, unsigned long long pf_bar5,
+                                 unsigned long long vf_bar0, unsigned long long vf_bar1,
+                                 unsigned long long vf_bar2, unsigned long long vf_bar3,
+                                 unsigned long long vf_bar4, unsigned long long vf_bar5) {
+    bridge_vcs_set_pf_topology_rc(
+        0, pf_idx, bdf, num_vfs, vf_device_id, vendor_id, device_id,
+        msix_vectors, vf_msix_vectors, 0, 0, 0, 0, 0, 0,
+        pf_bar0, pf_bar1, pf_bar2, pf_bar3, pf_bar4, pf_bar5,
+        vf_bar0, vf_bar1, vf_bar2, vf_bar3, vf_bar4, vf_bar5);
+}
+
 void bridge_vcs_finalize_topology(int num_pfs, int tag_width) {
-    g_topology.header.num_pfs  = (uint8_t)num_pfs;
-    g_topology.header.tag_width = (uint8_t)tag_width;
-    memset(g_topology.header.pad, 0, sizeof(g_topology.header.pad));
-    g_topology_ready = 1;
-    fprintf(stderr, "[VCS Bridge] finalize_topology: num_pfs=%d tag_width=%d\n",
-            num_pfs, tag_width);
+    bridge_vcs_finalize_topology_rc(0, num_pfs, tag_width);
 }
 
 /* Internal: Handle a QUERY_TOPOLOGY request from QEMU (per-RC ctx).

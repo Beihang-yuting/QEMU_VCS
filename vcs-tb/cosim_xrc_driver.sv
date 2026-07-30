@@ -6,8 +6,9 @@
  * per-RC QEMU host (over a cosim transport, DPI _rc(rc_index)) to a real
  * xilinx-pcie EP DUT reached through this RC's xilinx_pcie_if_adapter:
  *
- *   QEMU MMIO/Cfg  --poll_tlp_scalar_rc--> build TLP --send_tlp--> adapter
+ *   QEMU MMIO      --poll_tlp_scalar_rc--> build TLP --send_tlp--> adapter
  *                    --> CQ channel --> DUT
+ *   QEMU Config    --poll_tlp_scalar_rc--> VIP config proxy (bypass mode)
  *   DUT CplD       --> CC channel --> adapter.rx_queue --adapter.receive-->
  *                    handle + send_cpl_scalar_rc --> QEMU
  *
@@ -36,10 +37,11 @@ class cosim_xrc_driver extends pcie_tl_rc_driver;
     int rc_index = 0;
 
     // ---- +REAL_DUT: attach a real RTL DUT instead of the stand-in EP model ----
-    // When set: config is answered by the DUT (config_proxy bypass off), VF-BAR
-    // MMIO flows through to the DUT (no ep_vf_mmio_write intercept), the doorbell
-    // synthesis / stand-in ATC are dead, and ATS Invalidation returns the DUT's
-    // real Completion (no synthesized one). The RC-bridge half is unchanged.
+    // Supported use is +REAL_DUT +BYPASS_CONFIG=1: the VIP answers config while
+    // VF-BAR MMIO flows through to the DUT (no ep_vf_mmio_write intercept), the
+    // doorbell synthesis / stand-in ATC are dead, and ATS Invalidation returns
+    // the DUT's real Completion (no synthesized one). Config passthrough is
+    // rejected until the request adapter can construct CfgRd/CfgWr TLPs.
     bit real_dut = 0;
 
     // ---- Config-space bypass proxy (answers enumeration in SV) ----
@@ -142,30 +144,99 @@ class cosim_xrc_driver extends pcie_tl_rc_driver;
         m_rx_fifo = new("m_rx_fifo", this);
 
         // 统一 config space: 建 func_mgr(num_pfs=1 即单func), 走 _bdf 应答 QEMU 枚举。
-        // plusarg 可配: +NUM_PFS +MAX_VFS +NUM_VFS +VENDOR_ID +DEVICE_ID +VF_DEVICE_ID
+        // plusarg 可配: +CFG_PROFILE +NUM_PFS +MAX_VFS +NUM_VFS +VENDOR_ID
+        //              +DEVICE_ID +VF_DEVICE_ID
         begin
-            int n_pfs, max_vfs, n_vfs, ven, dev, vfdev, topo;
+            int n_pfs, max_vfs, n_vfs, ven, dev, vfdev, topo, bypass_cfg;
+            bit bypass_explicit;
+            bit max_vfs_explicit;
+            bit vendor_id_explicit, device_id_explicit, vf_device_id_explicit;
+            string cfg_profile_name;
+            pcie_tl_device_profile_pkg::pcie_cfg_profile_e cfg_profile;
+            string mode_name;
             if (!$value$plusargs("NUM_PFS=%d", n_pfs))      n_pfs   = 1;
-            if (!$value$plusargs("MAX_VFS=%d", max_vfs))    max_vfs = 0;
+            max_vfs_explicit = $value$plusargs("MAX_VFS=%d", max_vfs);
+            if (!max_vfs_explicit)                           max_vfs = 0;
             if (!$value$plusargs("NUM_VFS=%d", n_vfs))      n_vfs   = 0;
             if (!$value$plusargs("TOPO=%d", topo))          topo    = 0;  // 0=ep_direct 1=switch 2=multi_layer
-            if (!$value$plusargs("VENDOR_ID=%h", ven))      ven     = 32'h1AF4;
-            if (!$value$plusargs("DEVICE_ID=%h", dev))      dev     = 32'h1041;
-            if (!$value$plusargs("VF_DEVICE_ID=%h", vfdev)) vfdev   = 32'h1041;
+            vendor_id_explicit = $value$plusargs("VENDOR_ID=%h", ven);
+            if (!vendor_id_explicit)                          ven     = 32'h1AF4;
+            device_id_explicit = $value$plusargs("DEVICE_ID=%h", dev);
+            if (!device_id_explicit)                          dev     = 32'h1041;
+            vf_device_id_explicit = $value$plusargs("VF_DEVICE_ID=%h", vfdev);
+            if (!vf_device_id_explicit)                       vfdev   = 32'h1041;
+            if (!$value$plusargs("CFG_PROFILE=%s", cfg_profile_name))
+                cfg_profile_name = "LEGACY";
+            if (!pcie_tl_device_profile_pkg::pcie_cfg_profile_parse(cfg_profile_name))
+                `uvm_fatal(get_name(), $sformatf(
+                    "unknown CFG_PROFILE=%s", cfg_profile_name))
+            cfg_profile =
+                pcie_tl_device_profile_pkg::pcie_cfg_profile_value(cfg_profile_name);
+            if (cfg_profile ==
+                pcie_tl_device_profile_pkg::PCIE_CFG_PROFILE_DPU_20F9_501X) begin
+                if (!max_vfs_explicit)
+                    max_vfs = 16;
+                if (n_pfs < 1 || n_pfs > 4)
+                    `uvm_fatal(get_name(), $sformatf(
+                        "DPU_20F9_501X requires NUM_PFS in range 1..4, got %0d",
+                        n_pfs))
+                if (max_vfs != 16)
+                    `uvm_fatal(get_name(), $sformatf(
+                        "DPU_20F9_501X requires MAX_VFS=16 when explicitly set, got %0d",
+                        max_vfs))
+                if (vendor_id_explicit || device_id_explicit || vf_device_id_explicit)
+                    `uvm_warning(get_name(),
+                        "DPU_20F9_501X ignores VENDOR_ID, DEVICE_ID, and VF_DEVICE_ID overrides")
+                ven   = 16'h20f9;
+                dev   = 16'h5011;
+                vfdev = 16'h8689;
+            end
             real_dut = $test$plusargs("REAL_DUT");
+            bypass_explicit = $value$plusargs("BYPASS_CONFIG=%d", bypass_cfg);
+            if (!cosim_runtime_policy_pkg::cosim_valid_num_pfs(n_pfs))
+                `uvm_fatal(get_name(), $sformatf(
+                    "NUM_PFS must be in range 1..16, got %0d", n_pfs))
+            if (n_pfs == 16 &&
+                !cosim_runtime_policy_pkg::cosim_single_bus_profile_fits(
+                    n_pfs, max_vfs))
+                `uvm_fatal(get_name(), $sformatf(
+                    "single-bus NUM_PFS=16 supports MAX_VFS=0..15, got %0d",
+                    max_vfs))
             func_mgr = pcie_tl_func_manager::type_id::create("func_mgr");
+            func_mgr.cfg_profile = cfg_profile;
             func_mgr.build_topology(topo, n_pfs, max_vfs, ven[15:0], dev[15:0], vfdev[15:0]);
             config_proxy.func_mgr            = func_mgr;
             config_proxy.multi_function_mode = 1;
-            // Real DUT owns its config space -> don't let the SV stand-in answer.
-            config_proxy.bypass_enable       = real_dut ? 1'b0 : 1'b1;
+            // An explicit +BYPASS_CONFIG value always wins. This permits the
+            // intended split mode: real DUT data plane with VIP-owned config.
+            config_proxy.bypass_enable =
+                cosim_runtime_policy_pkg::cosim_effective_config_bypass(
+                    real_dut, bypass_explicit, bypass_cfg);
+            // The QEMU request adapter currently constructs only MRd/MWr TLPs.
+            // Refuse config passthrough instead of advertising it and then
+            // dropping CfgRd/CfgWr as unsupported transactions.
+            if (!config_proxy.bypass_enable) begin
+                if (real_dut)
+                    `uvm_fatal(get_name(),
+                        "REAL_DUT config passthrough is not implemented; use +BYPASS_CONFIG=1")
+                else
+                    `uvm_fatal(get_name(),
+                        "config passthrough is not implemented; use +BYPASS_CONFIG=1")
+            end
             // Pre-enable VFs only for the stand-in; a real DUT drives SR-IOV itself.
             if (!real_dut && n_vfs > 0)
                 for (int pf = 0; pf < n_pfs; pf++)
                     func_mgr.enable_vfs(pf, n_vfs);
-            `uvm_info(get_name(), $sformatf("RC%0d mode: %s", rc_index,
-                real_dut ? "REAL_DUT (config+MMIO->DUT, stand-in EP off)"
-                         : "stand-in EP (config-bypass, synthesized DUT)"), UVM_LOW)
+            if (real_dut && config_proxy.bypass_enable)
+                mode_name = "REAL_DUT + VIP_CONFIG_BYPASS";
+            else if (real_dut)
+                mode_name = "REAL_DUT_CONFIG_UNSUPPORTED";
+            else
+                mode_name = "STAND_IN";
+            `uvm_info(get_name(), $sformatf(
+                "RC%0d mode: %s (bypass=%0d%s)", rc_index, mode_name,
+                config_proxy.bypass_enable,
+                bypass_explicit ? ", explicit" : ", default"), UVM_LOW)
         end
 
         `uvm_info(get_name(), $sformatf("cosim_xrc_driver bound to RC index %0d", rc_index),
@@ -283,8 +354,10 @@ class cosim_xrc_driver extends pcie_tl_rc_driver;
             `uvm_fatal(get_name(), $sformatf(
                 "RC%0d bridge_vcs_init_ex_rc(tcp %s:%0d inst=%0d) failed",
                 rc_index, remote_host, port_base, rc_index))
+        func_mgr.export_topology_to_bridge(rc_index);
         `uvm_info(get_name(), $sformatf(
-            "RC%0d bridge up: tcp %s:%0d inst=%0d", rc_index, remote_host, port_base, rc_index),
+            "RC%0d bridge up and topology exported: tcp %s:%0d inst=%0d",
+            rc_index, remote_host, port_base, rc_index),
             UVM_LOW)
         bridge_ready = 1;
     endtask

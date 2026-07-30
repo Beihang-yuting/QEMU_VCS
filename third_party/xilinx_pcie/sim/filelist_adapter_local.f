@@ -4,7 +4,7 @@
 //       -f third_party/xilinx_pcie/sim/filelist_adapter_local.f \
 //       +define+DATA_WIDTH=256 +define+STRADDLE_EN=0 -o work/simv_ad -l logs/compile_ad.log
 // NO PCIE_COSIM_ENABLE: pure VIP build, CoSim DPI stays gated out.
-// Order: axis lib -> host_mem -> pcie_tl_if -> pcie_tl_pkg -> xilinx -> tests -> tb.
+// Order: axis lib -> host_mem -> pcie_tl_if -> helpers -> pcie_tl_pkg -> xilinx -> tests -> tb.
 
 // ---- axis_vip (lib only: if + pkg; SVA excluded, matches upstream filelist_lib.f) ----
 +incdir+third_party/axis_vip/src
@@ -19,6 +19,8 @@ third_party/host_mem/src/host_mem_manager.sv
 // ---- pcie_tl_vip (protocol layer, delegated) ----
 +incdir+pcie_tl_vip/src
 pcie_tl_vip/src/pcie_tl_if.sv
+pcie_tl_vip/src/shared/pcie_tl_bdf_utils_pkg.sv
+pcie_tl_vip/src/shared/pcie_tl_device_profile_pkg.sv
 pcie_tl_vip/src/pcie_tl_pkg.sv
 
 // ---- xilinx adapter ----

@@ -13,6 +13,7 @@
 #include "qemu/main-loop.h"   /* qemu_bh_new / qemu_bh_schedule */
 #include "exec/address-spaces.h" /* address_space_memory */
 #include "exec/cpu-common.h"     /* cpu_physical_memory_read/write */
+#include "hw/pci/pcie.h"        /* pcie_ari_init */
 #include "hw/qdev-properties.h"
 #include "qapi/error.h"
 
@@ -107,7 +108,7 @@ static uint64_t cosim_mmio_read(void *opaque, hwaddr addr, unsigned size)
     }
     uint64_t bar_base  = bc->explicit_base
                          ? bc->explicit_base
-                         : pci_get_bar_addr(&s->parent_obj, bc->bar_index);
+                         : pci_get_bar_addr(&bc->dev->parent_obj, bc->bar_index);
     uint64_t pcie_addr = bar_base + addr;
     uint64_t val = cosim_mmio_do_read(s, pcie_addr, bc->target_bdf, size);
     COSIM_DPRINTF(s, "MRd bar%d off=0x%04lx pcie=0x%lx val=0x%lx\n",
@@ -127,7 +128,7 @@ static void cosim_mmio_write(void *opaque, hwaddr addr, uint64_t val,
     }
     uint64_t bar_base  = bc->explicit_base
                          ? bc->explicit_base
-                         : pci_get_bar_addr(&s->parent_obj, bc->bar_index);
+                         : pci_get_bar_addr(&bc->dev->parent_obj, bc->bar_index);
     uint64_t pcie_addr = bar_base + addr;
     cosim_mmio_do_write(s, pcie_addr, bc->target_bdf, val, size);
     COSIM_DPRINTF(s, "MWr bar%d off=0x%04lx pcie=0x%lx val=0x%lx\n",
@@ -238,7 +239,7 @@ DECLARE_INSTANCE_CHECKER(CosimRcVF, COSIM_RC_VF, TYPE_COSIM_RC_VF)
 /* Registry of PF devices sharing one transport, indexed by pf_index. Populated
  * at realize; used to route VF-config events (which carry pf_index) to the
  * right PF and to resolve DMA requester BDFs across PFs. */
-#define COSIM_RC_MAX_PF 8
+#define COSIM_RC_MAX_PF COSIM_MAX_PFS
 static CosimPCIeRC *g_rc_pfs[COSIM_RC_MAX_PF];
 
 /* ---- Per-VF DMA isolation IOMMU (opt-in vf_iommu=on) --------------------
@@ -860,6 +861,106 @@ static void cosim_discover_caps(CosimPCIeRC *s, bridge_ctx_t *ctx,
     }
 }
 
+/* Register the BARs owned by one PF topology entry.  A 64-bit BAR consumes
+ * its following config DWORD, so that upper slot must have neither a size nor
+ * flags and must never be registered as an independent QEMU BAR. */
+static bool cosim_register_pf_bars(CosimPCIeRC *s, PCIDevice *dev,
+                                   const pf_topology_t *pf, Error **errp)
+{
+    const uint32_t allowed_flags = PCI_BASE_ADDRESS_MEM_TYPE_MASK |
+                                   PCI_BASE_ADDRESS_MEM_PREFETCH;
+    const uint32_t mem64_prefetch_flags =
+        PCI_BASE_ADDRESS_MEM_TYPE_64 | PCI_BASE_ADDRESS_MEM_PREFETCH;
+    int bus_num = pci_bus_num(pci_get_bus(dev));
+    uint16_t target_bdf = (uint16_t)((bus_num << 8) | dev->devfn);
+
+    s->num_bars = 0;
+    for (int bar = 0; bar < COSIM_MAX_BARS; bar++) {
+        uint64_t size = pf->pf_bar_size[bar];
+        uint32_t raw_flags = pf->pf_bar_flags[bar];
+
+        if (size == 0) {
+            if (raw_flags != 0) {
+                error_setg(errp, "cosim: PF%u BAR%d has flags without a size",
+                           s->pf_index, bar);
+                return false;
+            }
+            continue;
+        }
+        if (!is_power_of_2(size)) {
+            error_setg(errp,
+                       "cosim: PF%u BAR%d has non-power-of-two size 0x%" PRIx64,
+                       s->pf_index, bar, size);
+            return false;
+        }
+        if (raw_flags & PCI_BASE_ADDRESS_SPACE_IO) {
+            error_setg(errp, "cosim: PF%u BAR%d I/O space is unsupported",
+                       s->pf_index, bar);
+            return false;
+        }
+        if (raw_flags & ~allowed_flags) {
+            error_setg(errp, "cosim: PF%u BAR%d has unsupported flags 0x%x",
+                       s->pf_index, bar, raw_flags);
+            return false;
+        }
+
+        uint32_t memory_type = raw_flags & PCI_BASE_ADDRESS_MEM_TYPE_MASK;
+        if (memory_type != 0 &&
+            memory_type != PCI_BASE_ADDRESS_MEM_TYPE_64) {
+            error_setg(errp,
+                       "cosim: PF%u BAR%d has reserved memory type 0x%x",
+                       s->pf_index, bar, memory_type);
+            return false;
+        }
+        uint32_t flags = raw_flags & allowed_flags;
+        bool is_64bit = memory_type == PCI_BASE_ADDRESS_MEM_TYPE_64;
+        if (is_64bit) {
+            if ((flags & mem64_prefetch_flags) != mem64_prefetch_flags) {
+                error_setg(errp,
+                           "cosim: PF%u BAR%d 64-bit owner must be prefetchable",
+                           s->pf_index, bar);
+                return false;
+            }
+            if (bar + 1 >= COSIM_MAX_BARS) {
+                error_setg(errp, "cosim: PF%u BAR%d is a 64-bit BAR without an upper DWORD",
+                           s->pf_index, bar);
+                return false;
+            }
+            if (pf->pf_bar_size[bar + 1] != 0 ||
+                pf->pf_bar_flags[bar + 1] != 0) {
+                error_setg(errp,
+                           "cosim: PF%u BAR%d 64-bit upper DWORD owns BAR data",
+                           s->pf_index, bar);
+                return false;
+            }
+            flags = mem64_prefetch_flags;
+        }
+
+        CosimBarContext *bc = &s->bar_ctx[bar];
+        bc->dev = s;
+        bc->bar_index = bar;
+        bc->explicit_base = 0;
+        bc->target_bdf = target_bdf;
+
+        char name[48];
+        snprintf(name, sizeof(name), "cosim-pf%u-bar%d", s->pf_index, bar);
+        memory_region_init_io(&s->bars[bar], OBJECT(dev), &cosim_mmio_ops,
+                              bc, name, size);
+        pci_register_bar(dev, bar, flags, &s->bars[bar]);
+        s->num_bars++;
+
+        if (is_64bit)
+            bar++;  /* upper DWORD is owned by this registration */
+    }
+
+    if (s->num_bars == 0) {
+        error_setg(errp, "cosim: PF%u topology has no owner BAR", s->pf_index);
+        return false;
+    }
+
+    return true;
+}
+
 /* ========== 设备生命周期 ========== */
 
 /* ========== VF config apply (VCS/DUT → QEMU) ========== */
@@ -928,8 +1029,10 @@ static void cosim_rc_vf_config_write(PCIDevice *pci_dev, uint32_t address,
 
 static void cosim_rc_vf_realize(PCIDevice *dev, Error **errp)
 {
-    /* Config space is forwarded to VCS; nothing to set up locally. */
-    (void)dev; (void)errp;
+    /* Guest config is forwarded to VCS.  The local ARI marker is still needed
+     * by QEMU's post-realize link check for raw devfn values above 7. */
+    pcie_ari_init(dev, 0x100);
+    (void)errp;
 }
 
 static void cosim_rc_vf_class_init(ObjectClass *klass, void *data)
@@ -1034,8 +1137,12 @@ static void cosim_vf_config_apply(const vf_config_t *cfg, void *user)
 
     /* The primary PF registers a single VF-config callback for the shared
      * transport; route each event to the PF the VCS addressed by pf_index. */
-    if (cfg->pf_index < COSIM_RC_MAX_PF && g_rc_pfs[cfg->pf_index])
-        s = g_rc_pfs[cfg->pf_index];
+    if (cfg->pf_index >= COSIM_RC_MAX_PF || !g_rc_pfs[cfg->pf_index]) {
+        qemu_log("cosim-vf: reject config for unavailable PF index %u\n",
+                 cfg->pf_index);
+        return;
+    }
+    s = g_rc_pfs[cfg->pf_index];
 
     /* Re-apply is idempotent; invalidate the device ATC for the outgoing windows
      * (transport is live on this config-write path — closed-loop ACK). */
@@ -1173,6 +1280,8 @@ static void cosim_vf_config_apply(const vf_config_t *cfg, void *user)
     qemu_log("cosim-vf: pf%d created %d VF config stub(s)\n", cfg->pf_index, nd);
 }
 
+static void cosim_pcie_rc_exit(PCIDevice *pci_dev);
+
 static void cosim_pcie_rc_realize(PCIDevice *pci_dev, Error **errp)
 {
     CosimPCIeRC *s = COSIM_PCIE_RC(pci_dev);
@@ -1186,29 +1295,35 @@ static void cosim_pcie_rc_realize(PCIDevice *pci_dev, Error **errp)
     pci_dev->cap_present |= QEMU_PCI_CAP_MULTIFUNCTION;
     pci_dev->config[PCI_HEADER_TYPE] |= PCI_HEADER_TYPE_MULTI_FUNCTION;
 
+    /* QEMU's post-realize PCIe link check consults the local shadow config,
+     * while guest config reads are forwarded to the VIP. Mark every local PF
+     * ARI-capable as well so raw devfn 8..15 are recognized as ARI functions
+     * rather than invalid device numbers behind a Downstream Port. */
+    pcie_ari_init(pci_dev, 0x100);
+
     /* 清零 BDF 缓存 */
     memset(s->bdf_cache, 0, sizeof(s->bdf_cache));
-
-    s->pf_index = PCI_FUNC(pci_dev->devfn);
 
     /* Sibling PFs (function 1..num_pfs-1): share the primary PF0's transport and
      * irq_poller. Config space is forwarded to VCS by this device's own BDF
      * (cosim_config_read/write derive it from devfn), so no local discovery,
-     * MSI, or poller is needed here — only a BAR window + bus mastering. */
+     * MSI, or poller is needed here — only topology-driven BARs + bus
+     * mastering. */
     if (s->pf_index != 0) {
         CosimPCIeRC *pf0 = g_rc_pfs[0];
-        if (!pf0 || !pf0->bridge_ctx) {
+        if (!pf0 || !pf0->bridge_ctx || !pf0->topology_valid ||
+            s->pf_index >= pf0->topology.header.num_pfs) {
             error_setg(errp, "cosim: PF%u realized before primary PF0",
                        s->pf_index);
             return;
         }
         s->bridge_ctx = pf0->bridge_ctx;   /* shared, not owned */
-        s->bar_ctx[0].dev = s;
-        s->bar_ctx[0].bar_index = 0;
-        memory_region_init_io(&s->bars[0], OBJECT(s), &cosim_mmio_ops,
-                              &s->bar_ctx[0], "cosim-bar0", 64 * 1024);
-        pci_register_bar(pci_dev, 0, PCI_BASE_ADDRESS_SPACE_MEMORY, &s->bars[0]);
-        s->num_bars = 1;
+        if (!cosim_register_pf_bars(s, pci_dev,
+                                    &g_rc_pfs[0]->topology.pfs[s->pf_index],
+                                    errp)) {
+            s->bridge_ctx = NULL;
+            return;
+        }
         pci_set_word(pci_dev->config + PCI_COMMAND,
                      PCI_COMMAND_MEMORY | PCI_COMMAND_MASTER);
         memory_region_set_enabled(&pci_dev->bus_master_enable_region, true);
@@ -1217,6 +1332,22 @@ static void cosim_pcie_rc_realize(PCIDevice *pci_dev, Error **errp)
         qemu_log("cosim: PF%u sibling realized at %02x:%02x.%x (shares PF0 transport)\n",
                  s->pf_index, pci_bus_num(pci_get_bus(pci_dev)),
                  PCI_SLOT(pci_dev->devfn), PCI_FUNC(pci_dev->devfn));
+        return;
+    }
+
+    if (s->num_pfs < 1 || s->num_pfs > COSIM_RC_MAX_PF) {
+        error_setg(errp, "cosim: num_pfs must be in range 1..%d, got %u",
+                   COSIM_RC_MAX_PF, s->num_pfs);
+        return;
+    }
+    if (!cosim_single_bus_profile_fits(pci_dev->devfn, s->num_pfs, 0)) {
+        error_setg(errp, "cosim: %u PFs starting at devfn 0x%02x overflow one bus",
+                   s->num_pfs, pci_dev->devfn);
+        return;
+    }
+    if (s->num_pfs == COSIM_RC_MAX_PF && pci_dev->devfn != 0) {
+        error_setg(errp,
+                   "cosim: 16-PF single-bus profile requires PF0 at devfn 0");
         return;
     }
 
@@ -1268,27 +1399,71 @@ static void cosim_pcie_rc_realize(PCIDevice *pci_dev, Error **errp)
     bridge_ctx_t *ctx = (bridge_ctx_t *)s->bridge_ctx;
     ctx->debug = s->debug;  /* propagate runtime debug flag to bridge */
 
-    /* ======== 第二步: 从 VCS EP 发现设备配置 (标准 PCIe 枚举) ======== */
+    /* ======== 第二步: 查询 VCS 拓扑并建立 PF BAR profile ======== */
+    memset(&s->topology, 0, sizeof(s->topology));
+    s->topology_valid = false;
+    if (bridge_query_topology(ctx, &s->topology) < 0) {
+        error_setg(errp, "cosim: bridge_query_topology failed");
+        bridge_destroy(ctx);
+        s->bridge_ctx = NULL;
+        return;
+    }
+    s->topology_valid = s->topology.header.num_pfs != 0;
+    if (!s->topology_valid && s->num_pfs != 1) {
+        error_setg(errp,
+                   "cosim: VCS returned no topology for QEMU num_pfs=%u",
+                   s->num_pfs);
+        bridge_destroy(ctx);
+        s->bridge_ctx = NULL;
+        return;
+    }
+    if (s->topology_valid) {
+        if (s->topology.header.num_pfs > COSIM_MAX_PFS) {
+            error_setg(errp, "cosim: VCS topology has invalid num_pfs=%u",
+                       s->topology.header.num_pfs);
+            bridge_destroy(ctx);
+            s->bridge_ctx = NULL;
+            return;
+        }
+        if (s->topology.header.num_pfs != s->num_pfs) {
+            error_setg(errp,
+                       "cosim: QEMU num_pfs=%u differs from VCS topology=%u",
+                       s->num_pfs, s->topology.header.num_pfs);
+            bridge_destroy(ctx);
+            s->bridge_ctx = NULL;
+            return;
+        }
+        if (!cosim_register_pf_bars(s, pci_dev, &s->topology.pfs[0], errp)) {
+            bridge_destroy(ctx);
+            s->bridge_ctx = NULL;
+            return;
+        }
+    }
 
-    /* BAR sizing — 查询 BAR0 大小 */
-    uint32_t bar0_size = cosim_query_bar_size(ctx, 0);
-    if (bar0_size == 0) bar0_size = 64 * 1024;  /* fallback 64KB */
-    COSIM_DPRINTF(s, "realize BAR0 size: %u bytes (0x%x)\n",
-            bar0_size, bar0_size);
+    /* ======== 第三步: 从 VCS EP 发现剩余设备配置 ======== */
+
+    /* A successful zero-PF reply identifies the legacy non-topology flow.
+     * It remains single-PF BAR0 discovery only; cosim topology profiles never
+     * enter this compatibility path. */
+    if (!s->topology_valid) {
+        uint32_t bar0_size = cosim_query_bar_size(ctx, 0);
+        if (bar0_size == 0) bar0_size = 64 * 1024;
+        COSIM_DPRINTF(s, "legacy realize BAR0 size: %u bytes (0x%x)\n",
+                bar0_size, bar0_size);
+        s->bar_ctx[0].dev = s;
+        s->bar_ctx[0].bar_index = 0;
+        s->bar_ctx[0].explicit_base = 0;
+        s->bar_ctx[0].target_bdf = (uint16_t)(
+            (pci_bus_num(pci_get_bus(pci_dev)) << 8) | pci_dev->devfn);
+        memory_region_init_io(&s->bars[0], OBJECT(pci_dev), &cosim_mmio_ops,
+                              &s->bar_ctx[0], "cosim-legacy-bar0", bar0_size);
+        pci_register_bar(pci_dev, 0, PCI_BASE_ADDRESS_SPACE_MEMORY, &s->bars[0]);
+        s->num_bars = 1;
+    }
 
     /* Capability 链遍历 — 找 MSI cap */
     int msi_offset = -1, msi_vectors = 0;
     cosim_discover_caps(s, ctx, &msi_offset, &msi_vectors);
-
-    /* ======== 第三步: 基于发现结果初始化 QEMU 框架 ======== */
-
-    /* 注册 BAR0 — opaque 指向 CosimBarContext（携带 bar_index） */
-    s->bar_ctx[0].dev = s;
-    s->bar_ctx[0].bar_index = 0;
-    memory_region_init_io(&s->bars[0], OBJECT(s), &cosim_mmio_ops,
-                          &s->bar_ctx[0], "cosim-bar0", bar0_size);
-    pci_register_bar(pci_dev, 0, PCI_BASE_ADDRESS_SPACE_MEMORY, &s->bars[0]);
-    s->num_bars = 1;
 
     /* Enable bus mastering. In config-bypass mode the guest's PCI_COMMAND
      * writes go to VCS, so QEMU's shadow command never gets MASTER set and the
@@ -1383,31 +1558,40 @@ static void cosim_pcie_rc_realize(PCIDevice *pci_dev, Error **errp)
     qemu_log("cosim: PCIe RC device realized (%s mode)\n",
              (s->transport && strcmp(s->transport, "tcp") == 0) ? "TCP" : "SHM");
 
-    /* Register PF0 and auto-create PF1..num_pfs-1 as sibling functions on the
-     * same slot. They share this bridge_ctx/irq_poller and forward their own
-     * BDF's config to VCS (VCS func_manager answers for all PF BDFs when built
+    /* Register PF0 and auto-create PF1..num_pfs-1 as consecutive raw ARI
+     * functions on the same bus. They share this bridge_ctx/irq_poller and
+     * forward their own BDF's config to VCS (VCS func_manager answers for all PF BDFs when built
      * with +NUM_PFS=N). Default num_pfs=1 skips this (single-PF unchanged). */
     g_rc_pfs[0] = s;
     if (s->num_pfs > 1) {
         PCIBus *bus = pci_get_bus(pci_dev);
-        int slot = PCI_SLOT(pci_dev->devfn);
         for (uint32_t i = 1; i < s->num_pfs && i < COSIM_RC_MAX_PF; i++) {
-            PCIDevice *d = pci_new(PCI_DEVFN(slot, i), TYPE_COSIM_PCIE_RC);
+            uint8_t sibling_devfn = (uint8_t)(pci_dev->devfn + i);
+            PCIDevice *d = pci_new(sibling_devfn, TYPE_COSIM_PCIE_RC);
             DEVICE(d)->hotplugged = false;   /* programmatic, not user hotplug */
             d->cap_present |= QEMU_PCI_CAP_MULTIFUNCTION;
             /* Sibling PFs inherit the isolation policy so each builds its own
              * per-VF IOMMU AS on VF-enable (props only reach the primary). */
             {
                 CosimPCIeRC *sib = COSIM_PCIE_RC(d);
+                sib->pf_index    = i;
                 sib->vf_iommu    = s->vf_iommu;
                 sib->vf_dma_base = s->vf_dma_base;
                 sib->vf_dma_size = s->vf_dma_size;
             }
             Error *e = NULL;
             if (!pci_realize_and_unref(d, bus, &e)) {
-                qemu_log("cosim: PF%u create failed: %s\n", i,
-                         e ? error_get_pretty(e) : "?");
-                error_free(e);
+                /* A partial PF set cannot match the VCS topology. Remove any
+                 * siblings already realized, then fail PF0 realize so no
+                 * SYNC_MSG_REALIZED is emitted for an incomplete endpoint. */
+                for (uint32_t j = 1; j < i; j++) {
+                    if (g_rc_pfs[j])
+                        object_unparent(OBJECT(g_rc_pfs[j]));
+                }
+                cosim_pcie_rc_exit(pci_dev);
+                error_prepend(&e, "cosim: PF%u create failed: ", i);
+                error_propagate(errp, e);
+                return;
             }
         }
         qemu_log("cosim: primary PF0 realized, %u PF(s) total\n", s->num_pfs);
@@ -1436,6 +1620,18 @@ static void cosim_pcie_rc_exit(PCIDevice *pci_dev)
         msi_uninit(pci_dev);
         return;
     }
+
+    /* PF0 owns the auto-created PF siblings.  Their bridge_ctx borrows PF0's
+     * transport, so detach them before stopping the poller or freeing that
+     * transport.  Clear the registry slot first: each sibling's exit then sees
+     * no ownership entry, which prevents recursive or duplicate teardown. */
+    for (uint32_t i = 1; i < COSIM_RC_MAX_PF; i++) {
+        CosimPCIeRC *sibling = g_rc_pfs[i];
+        g_rc_pfs[i] = NULL;
+        if (sibling)
+            object_unparent(OBJECT(sibling));
+    }
+
     if (s->irq_poller) {
         irq_poller_stop((irq_poller_t *)s->irq_poller);
         s->irq_poller = NULL;

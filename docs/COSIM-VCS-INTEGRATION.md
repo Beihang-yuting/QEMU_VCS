@@ -135,3 +135,23 @@ your_xilinx_ep_dut u_dut0 (
 | **DUT-DMA 入向(RQ)+ MSI** | ⬜ 占位,下一增量 |
 | **device.* → config_proxy 对齐**(你 DUT 身份 ≠ 默认 1af4:1041 时) | ⬜ 描述符已透传 plusarg,proxy 未消费 |
 | **DUT AXIS 接线** | ⬜ 你来接(见 §6) |
+
+---
+
+## 8. DPU_20F9_501X 多 PF 启动
+
+DPU profile 有三组 64-bit prefetchable PF BAR。启动 QEMU 时，为每个 cosim
+Root Port 保留足够的 64-bit prefetchable MMIO；默认值是 `256M`，可按平台布局覆盖：
+
+```bash
+make run-qemu NUM_PFS=4 PCIE_PREF64_RESERVE=256M
+```
+
+与该 QEMU 对接的 VCS 仿真应使用相同的 PF 数，并带上 DPU profile plusargs：
+
+```text
++REAL_DUT +BYPASS_CONFIG=1 +CFG_PROFILE=DPU_20F9_501X +NUM_PFS=4 +MAX_VFS=16
+```
+
+`CFG_PROFILE` 是 **VCS-only** plusarg，由 VCS 测试平台解析；QEMU 不解析它。
+`NUM_PFS` 则需要在 `make run-qemu` 和 VCS plusarg 中保持一致。

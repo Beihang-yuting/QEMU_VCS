@@ -52,6 +52,19 @@ add_test(NAME test_launch_smoke
          COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/test_launch_smoke.sh)
 set_tests_properties(test_launch_smoke PROPERTIES TIMEOUT 15)
 
+# QEMU PCIe topology and REAL_DUT config-bypass source policy.
+add_test(NAME test_pcie_launch_topology
+         COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/test_pcie_launch_topology.sh)
+set_tests_properties(test_pcie_launch_topology PROPERTIES TIMEOUT 10)
+
+add_test(NAME test_runtime_bdf_utils
+         COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/../sv/run_test_runtime_bdf_utils.sh)
+set_tests_properties(test_runtime_bdf_utils PROPERTIES TIMEOUT 10)
+
+add_test(NAME test_dpu_501x_profile
+         COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/../sv/run_test_dpu_501x_profile.sh)
+set_tests_properties(test_dpu_501x_profile PROPERTIES TIMEOUT 10)
+
 # TCP transport roundtrip integration test
 add_executable(test_tcp_roundtrip test_tcp_roundtrip.c)
 target_link_libraries(test_tcp_roundtrip cosim_bridge_common cosim_bridge pthread)

@@ -42,6 +42,10 @@ third_party/axis_vip/src/axis_pkg.sv
 // ---- interface (must precede package) ----
 pcie_tl_vip/src/pcie_tl_if.sv
 
+// ---- standalone helpers imported by pcie_tl_pkg ----
+pcie_tl_vip/src/shared/pcie_tl_bdf_utils_pkg.sv
+pcie_tl_vip/src/shared/pcie_tl_device_profile_pkg.sv
+
 // ---- top package ----
 pcie_tl_vip/src/pcie_tl_pkg.sv
 
@@ -53,11 +57,13 @@ third_party/xilinx_pcie/src/interface/xilinx_pcie_cfg_if.sv
 
 // ---- cosim bridge DPI package + xrc adapter package ----
 bridge/vcs/bridge_vcs.sv
+vcs-tb/cosim_runtime_policy_pkg.sv
 vcs-tb/cosim_xrc_pkg.sv
 
 // ---- test files ----
 pcie_tl_vip/tests/pcie_tl_base_test.sv
 pcie_tl_vip/tests/pcie_tl_cosim_test.sv
+pcie_tl_vip/tests/pcie_tl_dpu_501x_profile_test.sv
 
 // ---- testbench top ----
 pcie_tl_vip/tests/pcie_tl_tb_top.sv

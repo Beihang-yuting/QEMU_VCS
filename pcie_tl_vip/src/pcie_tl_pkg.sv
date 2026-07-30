@@ -6,6 +6,8 @@ package pcie_tl_pkg;
 
     import uvm_pkg::*;
     import host_mem_pkg::*;
+    import pcie_tl_bdf_utils_pkg::*;
+    import pcie_tl_device_profile_pkg::*;
     `include "uvm_macros.svh"
 
     //--- Types ---
@@ -53,6 +55,7 @@ package pcie_tl_pkg;
     //--- Sequences: Base ---
     `include "seq/base/pcie_tl_mem_rd_seq.sv"
     `include "seq/base/pcie_tl_mem_wr_seq.sv"
+    `include "seq/base/pcie_tl_rw_seq.sv"
     `include "seq/base/pcie_tl_io_rd_seq.sv"
     `include "seq/base/pcie_tl_io_wr_seq.sv"
     `include "seq/base/pcie_tl_cfg_rd_seq.sv"

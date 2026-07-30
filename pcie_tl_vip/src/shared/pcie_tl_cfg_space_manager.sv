@@ -11,6 +11,9 @@ class pcie_tl_cfg_space_manager extends uvm_object;
     //--- Field attributes ---
     cfg_field_attr_e field_attrs[4096];  // per-byte attribute
 
+    //--- Writable bits within otherwise writable bytes ---
+    bit [7:0] write_masks[4096];
+
     //--- Capability lists ---
     pcie_capability    cap_list[$];
     pcie_ext_capability ext_cap_list[$];
@@ -20,22 +23,28 @@ class pcie_tl_cfg_space_manager extends uvm_object;
 
     function new(string name = "pcie_tl_cfg_space_manager");
         super.new(name);
-        // Initialize all to RW by default
-        foreach (field_attrs[i]) field_attrs[i] = CFG_FIELD_RW;
+        // Initialize all bytes to fully writable by default.
+        foreach (field_attrs[i]) begin
+            field_attrs[i] = CFG_FIELD_RW;
+            write_masks[i] = 8'hff;
+        end
     endfunction
 
     //=========================================================================
     // Initialize standard Type 0 Configuration Header
     //=========================================================================
     function void init_type0_header(
-        bit [15:0] vendor_id    = 16'hABCD,
-        bit [15:0] device_id    = 16'h1234,
-        bit [7:0]  revision_id  = 8'h01,
-        bit [23:0] class_code   = 24'h020000,  // Ethernet controller
-        bit [7:0]  header_type  = 8'h00
+        bit [15:0] vendor_id             = 16'hABCD,
+        bit [15:0] device_id             = 16'h1234,
+        bit [7:0]  revision_id           = 8'h01,
+        bit [23:0] class_code            = 24'h020000,  // Ethernet controller
+        bit [7:0]  header_type           = 8'h00,
+        bit [15:0] subsystem_vendor_id   = 16'h0000,
+        bit [15:0] subsystem_device_id   = 16'h0000
     );
         // Clear config space
         foreach (cfg_space[i]) cfg_space[i] = 0;
+        foreach (write_masks[i]) write_masks[i] = 8'hff;
 
         // Vendor ID (00h) - RO
         cfg_space[0] = vendor_id[7:0];
@@ -88,6 +97,16 @@ class pcie_tl_cfg_space_manager extends uvm_object;
         // BAR0-BAR5 (10h-27h) - RW (lower bits RO depending on size)
         // Left as zeros, to be configured by user
 
+        // Subsystem Vendor/Device ID (2Ch/2Eh) - RO
+        cfg_space[44] = subsystem_vendor_id[7:0];
+        cfg_space[45] = subsystem_vendor_id[15:8];
+        cfg_space[46] = subsystem_device_id[7:0];
+        cfg_space[47] = subsystem_device_id[15:8];
+        field_attrs[44] = CFG_FIELD_RO;
+        field_attrs[45] = CFG_FIELD_RO;
+        field_attrs[46] = CFG_FIELD_RO;
+        field_attrs[47] = CFG_FIELD_RO;
+
         // Capabilities Pointer (34h) - RO
         field_attrs[52] = CFG_FIELD_RO;
 
@@ -109,6 +128,7 @@ class pcie_tl_cfg_space_manager extends uvm_object;
         bit [7:0]  subordinate_bus = 8'h01
     );
         foreach (cfg_space[i]) cfg_space[i] = 0;
+        foreach (write_masks[i]) write_masks[i] = 8'hff;
 
         // Vendor/Device ID (00h/02h) - RO
         cfg_space[0] = vendor_id[7:0];   cfg_space[1] = vendor_id[15:8];
@@ -251,6 +271,12 @@ class pcie_tl_cfg_space_manager extends uvm_object;
             write_raw_dw(ext_cap.offset, ext_hdr);
         end
 
+        // The ID/version/next-pointer header describes chain topology and is
+        // immutable to normal configuration writes. Internal relinking above
+        // uses write_raw_dw(), which intentionally bypasses this permission.
+        for (int i = 0; i < 4; i++)
+            field_attrs[ext_cap.offset + i] = CFG_FIELD_RO;
+
         // Write data
         for (int i = 0; i < ext_cap.data.size(); i++) begin
             cfg_space[ext_cap.offset + 4 + i] = ext_cap.data[i];
@@ -299,7 +325,9 @@ class pcie_tl_cfg_space_manager extends uvm_object;
 
                 case (field_attrs[byte_addr])
                     CFG_FIELD_RW, CFG_FIELD_RWS:
-                        cfg_space[byte_addr] = byte_val;
+                        cfg_space[byte_addr] =
+                            (cfg_space[byte_addr] & ~write_masks[byte_addr]) |
+                            (byte_val & write_masks[byte_addr]);
                     CFG_FIELD_RW1C:
                         cfg_space[byte_addr] = cfg_space[byte_addr] & ~byte_val;
                     CFG_FIELD_RO, CFG_FIELD_ROS, CFG_FIELD_RSVD:
@@ -412,10 +440,64 @@ class pcie_tl_cfg_space_manager extends uvm_object;
     endfunction
 
     //=========================================================================
+    // Initialize the captured PCIe capability image used by DPU 20f9:501x PFs.
+    // Control registers deliberately retain their default RW attributes so the
+    // BIOS and guest driver, rather than this static profile, own their state.
+    //=========================================================================
+    function void init_dpu_501x_pcie_capability(bit [7:0] cap_offset = 8'h70);
+        pcie_capability pcie_cap;
+
+        pcie_cap = pcie_capability::type_id::create("dpu_501x_pcie_cap");
+        pcie_cap.cap_id = CAP_ID_PCIE;
+        pcie_cap.offset = cap_offset;
+        pcie_cap.data   = new[50];
+        foreach (pcie_cap.data[i]) pcie_cap.data[i] = 8'h00;
+
+        // +0x02 PCIe Capabilities = 0x0002
+        pcie_cap.data[0] = 8'h02;
+        // +0x04 Device Capabilities = 0x00008022
+        pcie_cap.data[2] = 8'h22;
+        pcie_cap.data[3] = 8'h80;
+        // +0x0C Link Capabilities = 0x0043f043
+        pcie_cap.data[10] = 8'h43;
+        pcie_cap.data[11] = 8'hf0;
+        pcie_cap.data[12] = 8'h43;
+        // +0x12 Link Status = 0x1043
+        pcie_cap.data[16] = 8'h43;
+        pcie_cap.data[17] = 8'h10;
+        // +0x24 Device Capabilities 2 = 0x00000016
+        pcie_cap.data[34] = 8'h16;
+        // +0x2C Link Capabilities 2 = 0x0000000e
+        pcie_cap.data[42] = 8'h0e;
+        // +0x32 Link Status 2 = 0x001e
+        pcie_cap.data[48] = 8'h1e;
+
+        register_capability(pcie_cap);
+
+        // Captured static fields are RO. Device/Link Control (+0x08/+0x10),
+        // Device Control 2 (+0x28), and Link Control 2 (+0x30) stay RW.
+        field_attrs[cap_offset + 2] = CFG_FIELD_RO;
+        field_attrs[cap_offset + 3] = CFG_FIELD_RO;
+        for (int i = 0; i < 4; i++) begin
+            field_attrs[cap_offset + 4  + i] = CFG_FIELD_RO;  // Device Cap
+            field_attrs[cap_offset + 12 + i] = CFG_FIELD_RO;  // Link Cap
+            field_attrs[cap_offset + 36 + i] = CFG_FIELD_RO;  // Device Cap2
+            field_attrs[cap_offset + 44 + i] = CFG_FIELD_RO;  // Link Cap2
+        end
+        field_attrs[cap_offset + 18] = CFG_FIELD_RO;          // Link Status
+        field_attrs[cap_offset + 19] = CFG_FIELD_RO;
+        field_attrs[cap_offset + 50] = CFG_FIELD_RO;          // Link Status2
+        field_attrs[cap_offset + 51] = CFG_FIELD_RO;
+    endfunction
+
+    //=========================================================================
     // Initialize Power Management Capability (cap id 0x01)
     //   放在 PCIe cap(默认 0x40,占 0x40..0x73)之后, 避免重叠。
     //=========================================================================
-    function void init_pm_capability(bit [7:0] cap_offset = 8'h80);
+    function void init_pm_capability(
+        bit [7:0] cap_offset = 8'h80,
+        bit       static_fields_ro = 0
+    );
         pcie_capability pm_cap;
         pm_cap = pcie_capability::type_id::create("pm_cap");
         pm_cap.cap_id = CAP_ID_PM;   // 0x01
@@ -426,6 +508,13 @@ class pcie_tl_cfg_space_manager extends uvm_object;
         pm_cap.data[2] = 8'h00;      // PMCSR: PowerState=D0
         pm_cap.data[3] = 8'h00;
         register_capability(pm_cap);
+
+        if (static_fields_ro) begin
+            // PMC (cap+2/+3) is captured static capability data. PMCSR
+            // (cap+4/+5) deliberately retains its default RW behavior.
+            field_attrs[cap_offset + 2] = CFG_FIELD_RO;
+            field_attrs[cap_offset + 3] = CFG_FIELD_RO;
+        end
     endfunction
 
     //=========================================================================
@@ -466,6 +555,10 @@ class pcie_tl_cfg_space_manager extends uvm_object;
         // config-bypass a stray/bad read that returns 0 would otherwise be written
         // back, zeroing Table Size -> kernel sees 1 vector (pci_msix_vec_count).
         field_attrs[cap_offset + 2] = CFG_FIELD_RO;
+        // Message Control high byte: bits [2:0] are Table Size[10:8] and
+        // bits [5:3] are reserved. Only Function Mask (bit6) and MSI-X Enable
+        // (bit7) are writable.
+        write_masks[cap_offset + 3] = 8'hc0;
         // Table Offset/BIR (cap+4..+7) and PBA (cap+8..+11) are RO.
         for (int i = 0; i < 8; i++)
             field_attrs[cap_offset + 4 + i] = CFG_FIELD_RO;

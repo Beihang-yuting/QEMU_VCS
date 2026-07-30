@@ -30,6 +30,10 @@ third_party/host_mem/src/host_mem_manager.sv
 // ---- interface (must precede package) ----
 pcie_tl_vip/src/pcie_tl_if.sv
 
+// ---- standalone helpers imported by pcie_tl_pkg ----
+pcie_tl_vip/src/shared/pcie_tl_bdf_utils_pkg.sv
+pcie_tl_vip/src/shared/pcie_tl_device_profile_pkg.sv
+
 // ---- top package (includes all src via relative `include) ----
 pcie_tl_vip/src/pcie_tl_pkg.sv
 
@@ -44,6 +48,7 @@ pcie_tl_vip/tests/pcie_tl_cross_root_isolation_test.sv
 pcie_tl_vip/tests/pcie_tl_uneven_ownership_test.sv
 pcie_tl_vip/tests/pcie_tl_per_root_tag_test.sv
 pcie_tl_vip/tests/pcie_tl_multi_root_stress_test.sv
+pcie_tl_vip/tests/pcie_tl_dpu_501x_profile_test.sv
 
 // ---- testbench top ----
 pcie_tl_vip/tests/pcie_tl_tb_top.sv

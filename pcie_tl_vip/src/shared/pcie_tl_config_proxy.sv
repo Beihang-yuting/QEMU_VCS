@@ -57,6 +57,50 @@ class pcie_tl_config_proxy extends uvm_component;
         super.new(name, parent);
     endfunction
 
+    //=========================================================================
+    // Shared 64-bit BAR-pair helpers. The descriptor-specific callers resolve
+    // a configuration DWORD to its low owner, then use these routines for PF
+    // and SR-IOV VF BAR reads/writes alike.
+    //=========================================================================
+    function int paired_bar_owner(input int bar_idx, input int descriptor_owner);
+        if (bar_idx < 0 || bar_idx >= 6 ||
+            descriptor_owner < 0 || descriptor_owner >= 6)
+            return bar_idx;
+        return descriptor_owner;
+    endfunction
+
+    function bit [31:0] paired_bar_read_dw(
+        input bit [63:0] base,
+        input bit [63:0] size,
+        input bit [31:0] flags,
+        input bit        upper,
+        input bit        sizing
+    );
+        if (sizing)
+            return pcie_bar_sizing_dw(size, flags, upper);
+        if (upper)
+            return base[63:32];
+        return base[31:0] | flags;
+    endfunction
+
+    function bit [63:0] paired_bar_program_base(
+        input bit [63:0] current_base,
+        input bit [31:0] write_dw,
+        input bit        upper,
+        input bit [63:0] size
+    );
+        bit [63:0] programmed_base;
+
+        programmed_base = current_base;
+        if (upper)
+            programmed_base[63:32] = write_dw;
+        else
+            programmed_base[31:0] = write_dw;
+        if (size != 0)
+            programmed_base = programmed_base & ~(size - 64'd1);
+        return programmed_base;
+    endfunction
+
     virtual function void build_phase(uvm_phase phase);
         int tmp;
         super.build_phase(phase);
@@ -262,9 +306,18 @@ class pcie_tl_config_proxy extends uvm_component;
     //=========================================================================
     function bit handle_cfg_read_bdf(bit [15:0] target_bdf, int dw_addr, output bit [31:0] data);
         pcie_tl_func_context ctx;
+        int sriov_dw_base;
+        bit sriov_cap_valid;
         if (!multi_function_mode || func_mgr == null) begin
             return handle_cfg_read(dw_addr, data);
         end
+
+        // QEMU computes target_bdf at config-access time, after firmware has
+        // assigned the Root Port's secondary bus. Rekey the bootstrap model
+        // before answering the first PF0 Vendor/Device ID read.
+        if (pcie_should_bind_runtime_bdf(
+                bypass_enable, func_mgr.runtime_bdf_bound, dw_addr, target_bdf))
+            void'(func_mgr.bind_runtime_pf_base(target_bdf));
 
         ctx = func_mgr.lookup_by_bdf(target_bdf);
         if (ctx == null) begin
@@ -272,40 +325,51 @@ class pcie_tl_config_proxy extends uvm_component;
             return 1;
         end
 
-        // BAR sizing response: check per-function bar_sizing state
+        sriov_cap_valid = 0;
+        sriov_dw_base   = 0;
+        if (!ctx.is_vf && ctx.pf_index >= 0 &&
+            ctx.pf_index < func_mgr.sriov_caps.size() &&
+            func_mgr.sriov_caps[ctx.pf_index] != null) begin
+            sriov_dw_base   = int'(func_mgr.sriov_caps[ctx.pf_index].offset >> 2);
+            sriov_cap_valid = 1;
+        end
+
+        // PF BAR reads resolve through the low owner. A high DWORD never
+        // becomes an independent BAR even though it has a config register.
         if (dw_addr >= 4 && dw_addr <= 9) begin
             int bar_idx = dw_addr - 4;
-            if (ctx.bar_sizing[bar_idx]) begin
-                if (ctx.bar_size[bar_idx] != 0)
-                    data = ~(ctx.bar_size[bar_idx][31:0] - 1);
-                else
-                    data = 32'h0;
-                `uvm_info("CFG_PROXY", $sformatf("BAR%0d sizing read BDF=0x%04h: mask=0x%08h",
-                    bar_idx, target_bdf, data), UVM_MEDIUM)
-                return 1;
-            end else if (ctx.bar_size[bar_idx] != 0) begin
-                // Implemented BAR (not sizing): return the assigned base. The
-                // base is stored in ctx.bar_base on write, not in cfg_space, so
-                // the normal cfg_read would return 0 -> kernel "error updating".
-                data = ctx.bar_base[bar_idx][31:0];
-                return 1;
+            int owner = paired_bar_owner(bar_idx, ctx.bar_owner[bar_idx]);
+            if (owner >= 0 && owner < 6) begin
+                if (ctx.bar_size[owner] != 0) begin
+                    data = paired_bar_read_dw(ctx.bar_base[owner], ctx.bar_size[owner],
+                                              ctx.bar_flags[owner], bar_idx != owner,
+                                              ctx.bar_sizing[owner]);
+                    `uvm_info("CFG_PROXY", $sformatf("BAR%0d sizing read BDF=0x%04h: mask=0x%08h",
+                        bar_idx, target_bdf, data), UVM_MEDIUM)
+                    return 1;
+                end else if (ctx.bar_sizing[owner]) begin
+                    data = 32'h0000_0000;
+                    return 1;
+                end
             end
         end
 
-        // VF BAR sizing read (SR-IOV cap VF BAR, dw 0x89..0x8E)
-        if (dw_addr >= 'h89 && dw_addr <= 'h8E) begin
-            int vbar = dw_addr - 'h89;
-            if (func_mgr.sriov_caps[ctx.pf_index].vf_bar_sizing[vbar]) begin
-                if (func_mgr.sriov_caps[ctx.pf_index].vf_bar_size[vbar] != 0)
-                    data = ~(func_mgr.sriov_caps[ctx.pf_index].vf_bar_size[vbar][31:0] - 1);
-                else
-                    data = 32'h0;
-                return 1;
-            end else if (func_mgr.sriov_caps[ctx.pf_index].vf_bar_size[vbar] != 0) begin
-                // Implemented VF BAR (not sizing): return assigned aperture base
-                // (stored in sriov_cap.vf_bar on write, not cfg_space).
-                data = func_mgr.sriov_caps[ctx.pf_index].vf_bar[vbar];
-                return 1;
+        // VF BAR descriptor reads use exactly the same low-owner resolution.
+        if (sriov_cap_valid && dw_addr >= sriov_dw_base + 9 &&
+            dw_addr <= sriov_dw_base + 14) begin
+            int vbar = dw_addr - (sriov_dw_base + 9);
+            pcie_tl_sriov_cap sc = func_mgr.sriov_caps[ctx.pf_index];
+            int owner = paired_bar_owner(vbar, sc.vf_bar_owner[vbar]);
+            if (owner >= 0 && owner < 6) begin
+                if (sc.vf_bar_size[owner] != 0) begin
+                    data = paired_bar_read_dw(sc.vf_bar[owner], sc.vf_bar_size[owner],
+                                              sc.vf_bar_flags[owner], vbar != owner,
+                                              sc.vf_bar_sizing[owner]);
+                    return 1;
+                end else if (sc.vf_bar_sizing[owner]) begin
+                    data = 32'h0000_0000;
+                    return 1;
+                end
             end
         end
 
@@ -323,6 +387,13 @@ class pcie_tl_config_proxy extends uvm_component;
     function bit handle_cfg_write_bdf(bit [15:0] target_bdf, int dw_addr,
                                        bit [31:0] data, int byte_off = 0, int byte_len = 4);
         pcie_tl_func_context ctx;
+        int sriov_dw_base;
+        bit sriov_cap_valid;
+        bit [31:0] current_dw;
+        bit [31:0] merged_dw;
+        bit [3:0]  write_be;
+        int safe_byte_off;
+        int safe_byte_len;
         if (!multi_function_mode || func_mgr == null) begin
             return handle_cfg_write(dw_addr, data, byte_off, byte_len);
         end
@@ -330,38 +401,92 @@ class pcie_tl_config_proxy extends uvm_component;
         ctx = func_mgr.lookup_by_bdf(target_bdf);
         if (ctx == null) return 1;  // silently drop writes to unknown BDF
 
-        // BAR sizing detection (DW4..DW9 = BAR0..BAR5)
+        // QEMU/DPI packs only the written bytes at data[7:0] upward. Merge
+        // those bytes into their address-selected lanes before interpreting
+        // SR-IOV fields or forwarding the normal configuration write.
+        current_dw    = func_mgr.cfg_read(target_bdf, dw_addr[11:0] << 2);
+        merged_dw     = current_dw;
+        write_be      = 4'b0000;
+        safe_byte_off = (byte_off < 0) ? 0 : byte_off;
+        if (safe_byte_off > 3)
+            safe_byte_off = 4;
+        safe_byte_len = (byte_len < 0) ? 0 : byte_len;
+        if (safe_byte_len > 4 - safe_byte_off)
+            safe_byte_len = 4 - safe_byte_off;
+        for (int b = 0; b < safe_byte_len; b++) begin
+            merged_dw[(safe_byte_off + b) * 8 +: 8] = data[b * 8 +: 8];
+            write_be[safe_byte_off + b] = 1'b1;
+        end
+
+        sriov_cap_valid = 0;
+        sriov_dw_base   = 0;
+        if (!ctx.is_vf && ctx.pf_index >= 0 &&
+            ctx.pf_index < func_mgr.sriov_caps.size() &&
+            func_mgr.sriov_caps[ctx.pf_index] != null) begin
+            sriov_dw_base   = int'(func_mgr.sriov_caps[ctx.pf_index].offset >> 2);
+            sriov_cap_valid = 1;
+        end
+
+        // PF BAR programming updates the canonical low-owner state. The
+        // packed byte-write merge above supplies a complete DWORD before it
+        // reaches this path, so partial config writes remain byte-correct.
         if (dw_addr >= 4 && dw_addr <= 9) begin
             int bar_idx = dw_addr - 4;
-            if (data == 32'hFFFF_FFFF) begin
-                ctx.bar_sizing[bar_idx] = 1;
-                `uvm_info("CFG_PROXY", $sformatf("BAR%0d sizing write detected BDF=0x%04h",
-                    bar_idx, target_bdf), UVM_MEDIUM)
-            end else begin
-                ctx.bar_sizing[bar_idx] = 0;
-                ctx.bar_base[bar_idx][31:0] = data & ~(ctx.bar_size[bar_idx][31:0] - 1);
-                `uvm_info("CFG_PROXY", $sformatf("BAR%0d assigned BDF=0x%04h base=0x%016h",
-                    bar_idx, target_bdf, ctx.bar_base[bar_idx]), UVM_MEDIUM)
-                `ifdef PCIE_COSIM_ENABLE
-                bridge_vcs_set_bar_base_bdf(int'(target_bdf), bar_idx, ctx.bar_base[bar_idx]);
-                `endif
+            int owner = paired_bar_owner(bar_idx, ctx.bar_owner[bar_idx]);
+            if (owner >= 0 && owner < 6) begin
+                if (ctx.bar_size[owner] != 0) begin
+                    if (write_be == 4'hf && merged_dw == 32'hffff_ffff) begin
+                        ctx.bar_sizing[owner] = 1;
+                        `uvm_info("CFG_PROXY", $sformatf(
+                            "BAR%0d sizing write detected BDF=0x%04h owner=BAR%0d",
+                            bar_idx, target_bdf, owner), UVM_MEDIUM)
+                    end else if (write_be != 0) begin
+                        bit [31:0] canonical_dw;
+
+                        ctx.bar_sizing[owner] = 0;
+                        ctx.bar_base[owner] = paired_bar_program_base(
+                            ctx.bar_base[owner], merged_dw, bar_idx != owner,
+                            ctx.bar_size[owner]);
+                        canonical_dw = paired_bar_read_dw(
+                            ctx.bar_base[owner], ctx.bar_size[owner],
+                            ctx.bar_flags[owner], bar_idx != owner, 1'b0);
+                        // Keep the raw function-manager image coherent for later
+                        // packed partial writes and direct configuration reads.
+                        func_mgr.cfg_write(target_bdf, dw_addr[11:0] << 2,
+                                           canonical_dw, 4'hf);
+                        `uvm_info("CFG_PROXY", $sformatf(
+                            "BAR%0d assigned BDF=0x%04h owner=BAR%0d base=0x%016h",
+                            bar_idx, target_bdf, owner, ctx.bar_base[owner]), UVM_MEDIUM)
+                        `ifdef PCIE_COSIM_ENABLE
+                        bridge_vcs_set_bar_base_bdf(int'(target_bdf), owner,
+                                                    ctx.bar_base[owner]);
+                        `endif
+                    end
+                end else if (write_be == 4'hf && merged_dw == 32'hffff_ffff) begin
+                    // Preserve legacy unimplemented-BAR probing semantics.
+                    ctx.bar_sizing[owner] = 1;
+                end else if (write_be != 0) begin
+                    ctx.bar_sizing[owner] = 0;
+                end
+                return 1;
             end
-            return 1;
         end
 
-        // SR-IOV NumVFs write (@0x210, dw 0x84): 只记录数量, 不立即实例化(符合 spec)
-        if (dw_addr == 'h84 && !ctx.is_vf) begin
-            func_mgr.sriov_caps[ctx.pf_index].num_vfs = data[15:0];
+        // SR-IOV NumVFs is the capability base plus four DWORDs. Record the
+        // requested count without instantiating VFs until VF Enable is set.
+        if (sriov_cap_valid && dw_addr == sriov_dw_base + 4 &&
+            (write_be[0] || write_be[1])) begin
+            func_mgr.sriov_caps[ctx.pf_index].num_vfs = merged_dw[15:0];
             `uvm_info("CFG_PROXY", $sformatf("SR-IOV NumVFs record BDF=0x%04h num_vfs=%0d",
-                target_bdf, data[15:0]), UVM_MEDIUM)
+                target_bdf, merged_dw[15:0]), UVM_MEDIUM)
         end
 
-        // SR-IOV Control (@0x208, dw 0x82) bit0 = VF Enable: 置 1 才实例化 VF。
-        // spec 时序: guest 先写 NumVFs 再写 VF Enable, VF 在 Enable=1 后出现。
-        if (dw_addr == 'h82 && !ctx.is_vf) begin
-            bit vf_en = data[0];
+        // SR-IOV Control is capability base plus two DWORDs. The guest writes
+        // NumVFs first; VFs appear only after Control.VF Enable becomes one.
+        if (sriov_cap_valid && dw_addr == sriov_dw_base + 2) begin
+            bit vf_en = merged_dw[0];
             int n     = int'(func_mgr.sriov_caps[ctx.pf_index].num_vfs);
-            if (vf_en && n > 0) begin
+            if (vf_en && !func_mgr.sriov_caps[ctx.pf_index].vf_enable && n > 0) begin
                 func_mgr.enable_vfs(ctx.pf_index, n);
                 `uvm_info("CFG_PROXY", $sformatf("SR-IOV VF Enable BDF=0x%04h num_vfs=%0d",
                     target_bdf, n), UVM_MEDIUM)
@@ -405,22 +530,49 @@ class pcie_tl_config_proxy extends uvm_component;
             end
         end
 
-        // VF BAR sizing (SR-IOV cap VF BAR @0x224-0x23B, dw 0x89..0x8E)
-        if (dw_addr >= 'h89 && dw_addr <= 'h8E && !ctx.is_vf) begin
-            int vbar = dw_addr - 'h89;
-            if (data == 32'hFFFF_FFFF)
-                func_mgr.sriov_caps[ctx.pf_index].vf_bar_sizing[vbar] = 1;
-            else begin
-                func_mgr.sriov_caps[ctx.pf_index].vf_bar_sizing[vbar] = 0;
-                func_mgr.sriov_caps[ctx.pf_index].vf_bar[vbar]        = data;
+        // SR-IOV VF BAR descriptors have the same paired BAR semantics as
+        // PF BARs. The bridge is notified with the complete low-owner base,
+        // never with a synthetic high-word BAR index.
+        if (sriov_cap_valid && dw_addr >= sriov_dw_base + 9 &&
+            dw_addr <= sriov_dw_base + 14) begin
+            int vbar = dw_addr - (sriov_dw_base + 9);
+            pcie_tl_sriov_cap sc = func_mgr.sriov_caps[ctx.pf_index];
+            int owner = paired_bar_owner(vbar, sc.vf_bar_owner[vbar]);
+            if (owner >= 0 && owner < 6) begin
+                if (sc.vf_bar_size[owner] != 0) begin
+                    if (write_be == 4'hf && merged_dw == 32'hffff_ffff) begin
+                        sc.vf_bar_sizing[owner] = 1;
+                    end else if (write_be != 0) begin
+                        bit [31:0] canonical_dw;
+
+                        sc.vf_bar_sizing[owner] = 0;
+                        sc.vf_bar[owner] = paired_bar_program_base(
+                            sc.vf_bar[owner], merged_dw, vbar != owner,
+                            sc.vf_bar_size[owner]);
+                        canonical_dw = paired_bar_read_dw(
+                            sc.vf_bar[owner], sc.vf_bar_size[owner],
+                            sc.vf_bar_flags[owner], vbar != owner, 1'b0);
+                        func_mgr.cfg_write(target_bdf, dw_addr[11:0] << 2,
+                                           canonical_dw, 4'hf);
+                        `ifdef PCIE_COSIM_ENABLE
+                        bridge_vcs_set_bar_base_bdf(int'(target_bdf), owner,
+                                                    sc.vf_bar[owner]);
+                        `endif
+                    end
+                end else if (write_be == 4'hf && merged_dw == 32'hffff_ffff) begin
+                    sc.vf_bar_sizing[owner] = 1;
+                end else if (write_be != 0) begin
+                    sc.vf_bar_sizing[owner] = 0;
+                end
+                return 1;
             end
-            return 1;
         end
 
         // Normal config write via func_mgr
-        func_mgr.cfg_write(target_bdf, dw_addr[11:0] << 2, data, 4'hF);
-        `uvm_info("CFG_PROXY", $sformatf("CfgWr BDF=0x%04h DW[%0d]=0x%08h (multi-func)",
-            target_bdf, dw_addr, data), UVM_HIGH)
+        func_mgr.cfg_write(target_bdf, dw_addr[11:0] << 2, merged_dw, write_be);
+        `uvm_info("CFG_PROXY", $sformatf(
+            "CfgWr BDF=0x%04h DW[%0d]=0x%08h be=0x%01h (multi-func)",
+            target_bdf, dw_addr, merged_dw, write_be), UVM_HIGH)
         return 1;
     endfunction
 

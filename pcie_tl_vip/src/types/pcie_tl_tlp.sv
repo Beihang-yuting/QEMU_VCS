@@ -93,6 +93,14 @@ class pcie_tl_tlp extends uvm_sequence_item;
     rand pcie_tl_prefix  prefixes[$];
     rand bit             has_prefix;
 
+    //--- Read-back capture (non-rand, runtime only) ---
+    // Populated by the requester driver when the Completion(s) for this
+    // non-posted request return. A sequence that needs the read data waits
+    // on rb_done, then reads rb_data / rb_status. Never randomized or copied.
+    bit [7:0]     rb_data[$];    // accumulated CplD payload bytes
+    cpl_status_e  rb_status;     // final completion status (SC on success)
+    bit           rb_done;       // set when all bytes received (or error)
+
     //--- Default constraints: no error injection (only in LEGAL mode) ---
     constraint c_no_inject {
         (constraint_mode_sel == CONSTRAINT_LEGAL) -> inject_ecrc_err  == 0;
@@ -621,5 +629,55 @@ class pcie_tl_ltr_tlp extends pcie_tl_tlp;
 
     function new(string name = "pcie_tl_ltr_tlp");
         super.new(name);
+    endfunction
+endclass
+
+//-----------------------------------------------------------------------------
+// Read-back registry (global) — used in SV_IF / interface-adapter mode.
+//
+// In adapter mode the env TLM loopback is idle and rc_driver.handle_completion
+// is NOT called (the adapter test's checker consumes completions off the RC
+// monitor). So the requester MONITOR is the only place that observes the
+// returning Completion. Driver registers each non-posted request here (keyed by
+// {requester_id, tag}); the monitor calls note() to fold the CplD payload/status
+// back onto the seq's request object (rb_done). Gated to SV_IF in the monitor so
+// TLM mode (which folds via the env/driver path) never double-folds.
+//-----------------------------------------------------------------------------
+class pcie_rb_registry;
+    static pcie_tl_tlp reqs [bit [25:0]];   // {req_id[15:0], tag[9:0]} -> request obj
+    static int         recv [bit [25:0]];   // bytes received per key
+    static int         total[bit [25:0]];   // bytes expected per key
+
+    static function bit [25:0] mk_key(bit [15:0] req_id, bit [9:0] tag);
+        return {req_id, tag};
+    endfunction
+
+    static function void register(pcie_tl_tlp t);
+        bit [25:0] k = mk_key(t.requester_id, t.tag);
+        reqs[k] = t;
+        recv.delete(k);
+        total.delete(k);
+    endfunction
+
+    static function void note(pcie_tl_cpl_tlp cpl);
+        bit [25:0] k = mk_key(cpl.requester_id, cpl.tag);
+        pcie_tl_tlp req;
+        bit last;
+        if (!reqs.exists(k)) return;
+        req = reqs[k];
+        if (!total.exists(k)) begin
+            total[k] = (req.length == 0) ? 4096 : req.length * 4;
+            recv[k]  = 0;
+        end
+        foreach (cpl.payload[i]) req.rb_data.push_back(cpl.payload[i]);
+        recv[k] += cpl.payload.size();
+        if (cpl.cpl_status != CPL_STATUS_SC) req.rb_status = cpl.cpl_status;
+        last = (recv[k] >= total[k]) || (cpl.cpl_status != CPL_STATUS_SC);
+        if (last) begin
+            req.rb_done = 1;
+            reqs.delete(k);
+            recv.delete(k);
+            total.delete(k);
+        end
     endfunction
 endclass

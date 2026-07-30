@@ -226,6 +226,23 @@ package cosim_bridge_pkg;
         input int rc, input int idx, input longint unsigned base);
     import "DPI-C" function longint unsigned bridge_vcs_get_bar_base_rc(input int rc, input int idx);
 
+    /* Per-RC topology publication. The parameter order exactly follows the
+     * C ABI: identity, six PF BAR flags, six PF BAR sizes, six VF BAR sizes. */
+    import "DPI-C" function void bridge_vcs_set_pf_topology_rc(
+        input int rc, input int pf_idx, input int bdf, input int num_vfs,
+        input int vf_device_id, input int vendor_id, input int device_id,
+        input int msix_vectors, input int vf_msix_vectors,
+        input int pf_bar_flags0, input int pf_bar_flags1, input int pf_bar_flags2,
+        input int pf_bar_flags3, input int pf_bar_flags4, input int pf_bar_flags5,
+        input longint unsigned pf_bar0, input longint unsigned pf_bar1,
+        input longint unsigned pf_bar2, input longint unsigned pf_bar3,
+        input longint unsigned pf_bar4, input longint unsigned pf_bar5,
+        input longint unsigned vf_bar0, input longint unsigned vf_bar1,
+        input longint unsigned vf_bar2, input longint unsigned vf_bar3,
+        input longint unsigned vf_bar4, input longint unsigned vf_bar5);
+    import "DPI-C" function void bridge_vcs_finalize_topology_rc(
+        input int rc, input int num_pfs, input int tag_width);
+
     /* DUT 入向扩展 TLP：per-RC 发起 DMA（DUT 作为 requester，host 服务） */
     import "DPI-C" function int bridge_vcs_dma_read_rc(input int rc, input longint unsigned host_addr,
                                                        output int unsigned data[16], input int len);

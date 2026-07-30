@@ -6,6 +6,7 @@
 SHELL := /bin/bash
 
 .PHONY: all help bridge cosim-lib cosim-lib-eth qemu-device run-qemu \
+        validate-pcie-pref64-reserve \
         test-unit test-integration test \
         clean clean-logs clean-run clean-all info
 
@@ -39,6 +40,14 @@ else
 endif
 # 多 QEMU 实例 + 连接描述符
 NUM_RC         ?= 1
+# 每个 cosim endpoint 的 PF 数量；VCS +NUM_PFS 必须取相同值。
+NUM_PFS        ?= 1
+# 每个 cosim Root Port 的 64-bit prefetchable MMIO 预留；DPU profile 的三组 PF BAR 使用此空间。
+PCIE_PREF64_RESERVE ?= 256M
+# Freeze a command-line/environment value before exporting it so embedded Make
+# functions remain literal input for validation rather than being evaluated.
+override PCIE_PREF64_RESERVE := $(value PCIE_PREF64_RESERVE)
+export PCIE_PREF64_RESERVE
 # 控制台模式: login       = 单 RC0 交互控制台(前台, 可登录, 输出同时进日志)
 #             login-multi = NUM_RC 个后台 QEMU, 每 RC 一个控制台 socket(可登录)+独立日志
 #             file        = 无人值守, NUM_RC 个后台 QEMU, 串口只写日志文件
@@ -87,7 +96,9 @@ QEMU_BUILD   = $(QEMU_SRC_DIR)/build
 
 qemu-device:
 	@[ -f "$(QEMU_BUILD)/build.ninja" ] || { echo "[错误] 无 qemu build: $(QEMU_BUILD)（先 ./setup.sh 建 QEMU）"; exit 1; }
-	@touch $(QEMU_SRC_DIR)/hw/net/cosim_pcie_rc.c 2>/dev/null || true
+	@cp "$(PROJECT_DIR)/qemu-plugin/cosim_pcie_rc.c" "$(QEMU_SRC_DIR)/hw/net/cosim_pcie_rc.c"
+	@cp "$(PROJECT_DIR)/qemu-plugin/cosim_pcie_rc.h" "$(QEMU_SRC_DIR)/include/hw/net/cosim_pcie_rc.h"
+	@cp "$(PROJECT_DIR)/bridge/common/cosim_topology.h" "$(QEMU_SRC_DIR)/include/hw/net/cosim_topology.h"
 	ninja -C $(QEMU_BUILD) qemu-system-x86_64
 	@echo "[BUILD] $(QEMU_BUILD)/qemu-system-x86_64"
 
@@ -107,7 +118,14 @@ BRIDGE_C_SRCS = \
 # 运行时库路径（确保源码编译的 glib 等库可被找到）
 _QEMU_LD_PATH = LD_LIBRARY_PATH=/usr/local/lib:/usr/local/lib/x86_64-linux-gnu:$(BRIDGE_LIB_DIR):$${LD_LIBRARY_PATH:-}
 
-run-qemu:
+validate-pcie-pref64-reserve:
+	@if ! printf '%s\n' "$$PCIE_PREF64_RESERVE" | grep -Eq '^[1-9][0-9]*[KMG]$$'; then \
+		echo "[错误] PCIE_PREF64_RESERVE 必须是正整数加 K、M 或 G（例如 256M）" >&2; \
+		exit 1; \
+	fi
+
+run-qemu: validate-pcie-pref64-reserve
+	@case '$(NUM_PFS)' in 1|2|3|4|5|6|7|8|9|10|11|12|13|14|15|16) ;; *) echo "[错误] NUM_PFS 必须是 1..16，当前值: $(NUM_PFS)"; exit 1;; esac
 	@[ -f '$(QEMU)' ] || { echo "[错误] QEMU 未找到: $(QEMU)（先 ./setup.sh 建 QEMU）"; exit 1; }
 	@[ -n '$(KERNEL)' ] && [ -f '$(KERNEL)' ] || { echo "[错误] Kernel 未找到 (GUEST_TYPE=$(GUEST_TYPE))"; exit 1; }
 	@[ -n '$(ROOTFS)' ] && [ -f '$(ROOTFS)' ] || echo "[警告] 未找到 rootfs (GUEST_TYPE=$(GUEST_TYPE))"
@@ -121,7 +139,7 @@ ifeq ($(CONSOLE),login)
 	  echo "  \"num_rc\": 1,"; \
 	  echo "  \"port_formula\": \"port = port_base + instance_id*3\","; \
 	  echo "  \"rcs\": [ {\"rc\": 0, \"instance_id\": 0, \"port\": $(PORT_BASE)} ],"; \
-	  echo "  \"device\": { \"vendor\": \"$(DEV_VENDOR)\", \"device\": \"$(DEV_DEVICE)\", \"bar0_size\": \"$(DEV_BAR0_SIZE)\" }"; \
+	  echo "  \"device\": { \"vendor\": \"$(DEV_VENDOR)\", \"device\": \"$(DEV_DEVICE)\", \"bar0_size\": \"$(DEV_BAR0_SIZE)\", \"num_pfs\": $(NUM_PFS) }"; \
 	  echo "}"; } > $(CONN_JSON)
 	@echo "[cosim] 描述符: $(CONN_JSON)"; cat $(CONN_JSON)
 	@echo "[cosim] 本终端即 guest 控制台(可登录); Ctrl-A C 切 QEMU monitor, Ctrl-A X 退出; VCS 读描述符连过来。"
@@ -129,7 +147,8 @@ ifeq ($(CONSOLE),login)
 		-kernel $(KERNEL) -drive file=$(ROOTFS),format=raw,if=none,id=rootdisk0 \
 		-device virtio-blk-pci,drive=rootdisk0,addr=0x10 \
 		-append "console=ttyS0 root=/dev/vda rw guest_ip=10.0.0.10" \
-		-device "cosim-pcie-rc,transport=tcp,port_base=$(PORT_BASE),instance_id=0,mmio_timeout_ms=$(MMIO_TIMEOUT_MS)" \
+		-device "pcie-root-port,id=cosim_rp0,bus=pcie.0,addr=0x3,slot=3,chassis=1,mem-reserve=64M,pref64-reserve=$$PCIE_PREF64_RESERVE" \
+		-device "cosim-pcie-rc,bus=cosim_rp0,addr=0x0,num_pfs=$(NUM_PFS),transport=tcp,port_base=$(PORT_BASE),instance_id=0,mmio_timeout_ms=$(MMIO_TIMEOUT_MS)" \
 		-display none \
 		-chardev stdio,id=cons0,mux=on,signal=off,logfile=$(LOG_DIR)/qemu_rc0.log \
 		-serial chardev:cons0 -mon chardev=cons0,mode=readline
@@ -143,7 +162,8 @@ else ifeq ($(CONSOLE),login-multi)
 			-kernel $(KERNEL) -drive file=$(ROOTFS),format=raw,if=none,id=rootdisk$$r \
 			-device virtio-blk-pci,drive=rootdisk$$r,addr=0x10 \
 			-append "console=ttyS0 root=/dev/vda rw guest_ip=10.0.0.$$((10+r))" \
-			-device "cosim-pcie-rc,transport=tcp,port_base=$(PORT_BASE),instance_id=$$r,mmio_timeout_ms=$(MMIO_TIMEOUT_MS)" \
+			-device "pcie-root-port,id=cosim_rp$$r,bus=pcie.0,addr=0x3,slot=3,chassis=$$((r+1)),mem-reserve=64M,pref64-reserve=$$PCIE_PREF64_RESERVE" \
+			-device "cosim-pcie-rc,bus=cosim_rp$$r,addr=0x0,num_pfs=$(NUM_PFS),transport=tcp,port_base=$(PORT_BASE),instance_id=$$r,mmio_timeout_ms=$(MMIO_TIMEOUT_MS)" \
 			-display none \
 			-chardev socket,id=cons$$r,path=$(RUN_DIR)/console_rc$$r.sock,server=on,wait=off,logfile=$(LOG_DIR)/qemu_rc$$r.log \
 			-serial chardev:cons$$r \
@@ -161,7 +181,7 @@ else ifeq ($(CONSOLE),login-multi)
 	  printf "  \"rcs\": ["; \
 	  for r in $$(seq 0 $$(($(NUM_RC)-1))); do [ $$r -gt 0 ] && printf ","; printf " {\"rc\": %d, \"instance_id\": %d, \"port\": %d}" $$r $$r $$(($(PORT_BASE)+r*3)); done; \
 	  echo " ],"; \
-	  echo "  \"device\": { \"vendor\": \"$(DEV_VENDOR)\", \"device\": \"$(DEV_DEVICE)\", \"bar0_size\": \"$(DEV_BAR0_SIZE)\" }"; \
+	  echo "  \"device\": { \"vendor\": \"$(DEV_VENDOR)\", \"device\": \"$(DEV_DEVICE)\", \"bar0_size\": \"$(DEV_BAR0_SIZE)\", \"num_pfs\": $(NUM_PFS) }"; \
 	  echo "}"; } > $(CONN_JSON); \
 	echo "[cosim] 描述符: $(CONN_JSON)"; cat $(CONN_JSON); \
 	echo "[cosim] 登录各 RC 控制台(每个开一个终端): socat -,raw,echo=0 unix-connect:$(RUN_DIR)/console_rc<N>.sock"; \
@@ -177,7 +197,8 @@ else
 			-kernel $(KERNEL) -drive file=$(ROOTFS),format=raw,if=none,id=rootdisk$$r \
 			-device virtio-blk-pci,drive=rootdisk$$r,addr=0x10 \
 			-append "console=ttyS0 root=/dev/vda rw guest_ip=10.0.0.$$((10+r))" \
-			-device "cosim-pcie-rc,transport=tcp,port_base=$(PORT_BASE),instance_id=$$r,mmio_timeout_ms=$(MMIO_TIMEOUT_MS)" \
+			-device "pcie-root-port,id=cosim_rp$$r,bus=pcie.0,addr=0x3,slot=3,chassis=$$((r+1)),mem-reserve=64M,pref64-reserve=$$PCIE_PREF64_RESERVE" \
+			-device "cosim-pcie-rc,bus=cosim_rp$$r,addr=0x0,num_pfs=$(NUM_PFS),transport=tcp,port_base=$(PORT_BASE),instance_id=$$r,mmio_timeout_ms=$(MMIO_TIMEOUT_MS)" \
 			-nographic -serial file:$(LOG_DIR)/qemu_rc$$r.log -monitor none \
 			> $(LOG_DIR)/qemu_rc$$r.boot 2>&1 & \
 		PIDS="$$PIDS $$!"; \
@@ -192,7 +213,7 @@ else
 	  printf "  \"rcs\": ["; \
 	  for r in $$(seq 0 $$(($(NUM_RC)-1))); do [ $$r -gt 0 ] && printf ","; printf " {\"rc\": %d, \"instance_id\": %d, \"port\": %d}" $$r $$r $$(($(PORT_BASE)+r*3)); done; \
 	  echo " ],"; \
-	  echo "  \"device\": { \"vendor\": \"$(DEV_VENDOR)\", \"device\": \"$(DEV_DEVICE)\", \"bar0_size\": \"$(DEV_BAR0_SIZE)\" }"; \
+	  echo "  \"device\": { \"vendor\": \"$(DEV_VENDOR)\", \"device\": \"$(DEV_DEVICE)\", \"bar0_size\": \"$(DEV_BAR0_SIZE)\", \"num_pfs\": $(NUM_PFS) }"; \
 	  echo "}"; } > $(CONN_JSON); \
 	echo "[cosim] 描述符: $(CONN_JSON)"; cat $(CONN_JSON); \
 	echo "[cosim] VCS 侧读它连过来;Ctrl-C 停。"; \
@@ -273,6 +294,8 @@ help:
 	@echo ""
 	@echo "参数（KEY=VALUE）:"
 	@echo "  NUM_RC=1               QEMU 实例数"
+	@echo "  NUM_PFS=1              每个cosim endpoint的PF数(须与VCS +NUM_PFS一致)"
+	@echo "  PCIE_PREF64_RESERVE=256M 每个 cosim Root Port 的 64-bit prefetchable MMIO 预留"
 	@echo "  PORT_BASE=9100         TCP 端口基数（端口=BASE+instance_id*3）"
 	@echo "  CONSOLE=login|login-multi|file  控制台模式(默认 login)"
 	@echo "  MMIO_TIMEOUT_MS=180000  MMIO 读等 VCS 应答超时 ms(默认 3min; 0=禁用,永久阻塞)"

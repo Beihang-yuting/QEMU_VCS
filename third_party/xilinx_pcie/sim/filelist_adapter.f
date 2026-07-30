@@ -7,6 +7,8 @@
 /tmp/xbuild/shm_work/host_mem/src/host_mem_pkg.sv
 /tmp/xbuild/shm_work/host_mem/src/host_mem_manager.sv
 /tmp/xbuild/pcie_work/pcie_tl_vip/src/pcie_tl_if.sv
+/tmp/xbuild/pcie_work/pcie_tl_vip/src/shared/pcie_tl_bdf_utils_pkg.sv
+/tmp/xbuild/pcie_work/pcie_tl_vip/src/shared/pcie_tl_device_profile_pkg.sv
 /tmp/xbuild/pcie_work/pcie_tl_vip/src/pcie_tl_pkg.sv
 /tmp/xbuild/xilinx_pcie/src/xilinx_pcie_params.svh
 /tmp/xbuild/xilinx_pcie/src/adapter/xilinx_pcie_adapter_pkg.sv
