@@ -16,6 +16,13 @@ class pcie_tl_base_driver extends uvm_driver #(pcie_tl_tlp);
     //--- Adapter reference ---
     pcie_tl_if_adapter         adapter;
 
+    //--- Read-back capture (private outstanding map, independent of the shared
+    //--- tag_mgr which env may free early). Maps tag -> requesting TLP handle
+    //--- so returning Completions can be written back onto the seq's object. ---
+    protected pcie_tl_tlp      rb_outstanding[bit [9:0]];
+    protected int              rb_recv[bit [9:0]];   // bytes received per tag
+    protected int              rb_total[bit [9:0]];  // expected bytes per tag
+
     function new(string name = "pcie_tl_base_driver", uvm_component parent = null);
         super.new(name, parent);
     endfunction
@@ -43,6 +50,14 @@ class pcie_tl_base_driver extends uvm_driver #(pcie_tl_tlp);
             bit [9:0] t = tag_mgr.alloc_tag(tlp.requester_id[2:0]);
             tlp.tag = t;
             tag_mgr.register_outstanding(t, tlp);
+            // Register for read-back capture (private map, keyed by tag).
+            tlp.rb_done = 0;
+            tlp.rb_data = {};
+            tlp.rb_status = CPL_STATUS_SC;
+            rb_outstanding[t] = tlp;
+            // Global registry for SV_IF/adapter mode, where the monitor (not the
+            // env/driver completion path) folds the returning CplD.
+            pcie_rb_registry::register(tlp);
         end
 
         // 2. Ordering engine enqueue + wait
@@ -69,6 +84,35 @@ class pcie_tl_base_driver extends uvm_driver #(pcie_tl_tlp);
 
         `uvm_info(get_name(), $sformatf("Sent TLP: %s", tlp.convert2string()), UVM_HIGH)
     endtask
+
+    //=========================================================================
+    // Read-back capture: fold one returning Completion into its request object.
+    // Called by RC/EP driver completion handlers. Accumulates CplD payload onto
+    // the original request TLP (the same handle the sequence holds), and sets
+    // rb_done once all requested bytes have arrived or an error status is seen.
+    //=========================================================================
+    function void rb_note_completion(pcie_tl_cpl_tlp cpl);
+        pcie_tl_tlp req;
+        bit last;
+        if (!rb_outstanding.exists(cpl.tag)) return;   // not a request we track
+        req = rb_outstanding[cpl.tag];
+        if (!rb_total.exists(cpl.tag)) begin
+            rb_total[cpl.tag] = (req.length == 0) ? 4096 : req.length * 4;
+            rb_recv[cpl.tag]  = 0;
+        end
+        foreach (cpl.payload[i]) req.rb_data.push_back(cpl.payload[i]);
+        rb_recv[cpl.tag] += cpl.payload.size();
+        if (cpl.cpl_status != CPL_STATUS_SC) req.rb_status = cpl.cpl_status;
+        // Error status terminates immediately (no data will follow).
+        last = (rb_recv[cpl.tag] >= rb_total[cpl.tag]) ||
+               (cpl.cpl_status != CPL_STATUS_SC);
+        if (last) begin
+            req.rb_done = 1;
+            rb_outstanding.delete(cpl.tag);
+            rb_recv.delete(cpl.tag);
+            rb_total.delete(cpl.tag);
+        end
+    endfunction
 
     //=========================================================================
     // Wait for FC credit and BW shaper permission

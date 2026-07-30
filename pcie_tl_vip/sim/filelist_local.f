@@ -48,6 +48,8 @@ pcie_tl_vip/tests/pcie_tl_cross_root_isolation_test.sv
 pcie_tl_vip/tests/pcie_tl_uneven_ownership_test.sv
 pcie_tl_vip/tests/pcie_tl_per_root_tag_test.sv
 pcie_tl_vip/tests/pcie_tl_multi_root_stress_test.sv
+pcie_tl_vip/tests/pcie_tl_rw_readback_test.sv
+pcie_tl_vip/tests/pcie_tl_switch_rw_readback_test.sv
 pcie_tl_vip/tests/pcie_tl_dpu_501x_profile_test.sv
 
 // ---- testbench top ----

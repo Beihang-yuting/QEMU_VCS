@@ -473,7 +473,14 @@ class pcie_tl_env extends uvm_env;
 
             rc2ep_delay.forward(tlp, ep_adapter.tlm_rx_fifo);
             replenish_credits(tlp);
-            if (cfg.ep_auto_response && ep_agent.ep_driver != null) begin
+            if (ep_agent.ep_driver != null &&
+                tlp.get_category() == TLP_CAT_COMPLETION) begin
+                // CplD for an EP-originated request (e.g. DMA read): fold
+                // read-back data onto the request object so the EP seq can read it.
+                pcie_tl_cpl_tlp cpl;
+                if ($cast(cpl, tlp)) ep_agent.ep_driver.handle_completion(cpl);
+            end
+            else if (cfg.ep_auto_response && ep_agent.ep_driver != null) begin
                 fork
                     begin
                         pcie_tl_tlp tlp_copy = tlp;
@@ -546,7 +553,14 @@ class pcie_tl_env extends uvm_env;
                 scbs[i].register_pending(tlp);
             rc2ep_delay.forward(tlp, ep_adapters[i].tlm_rx_fifo);
             replenish_port_credits(fc_mgrs[mi], tlp);
-            if (cfg.ep_auto_response && ep_agents[i].ep_driver != null) begin
+            if (ep_agents[i].ep_driver != null &&
+                tlp.get_category() == TLP_CAT_COMPLETION) begin
+                // CplD for an EP-originated request: fold read-back data onto
+                // the request object so the EP seq can read it.
+                pcie_tl_cpl_tlp cpl;
+                if ($cast(cpl, tlp)) ep_agents[i].ep_driver.handle_completion(cpl);
+            end
+            else if (cfg.ep_auto_response && ep_agents[i].ep_driver != null) begin
                 fork
                     begin
                         pcie_tl_tlp tlp_copy = tlp;
@@ -711,7 +725,14 @@ class pcie_tl_env extends uvm_env;
             sw.dsp[idx].tx_fifo.get(tlp);
             ep_adapters[idx].tlm_rx_fifo.put(tlp);
             replenish_credits(tlp);
-            if (cfg.ep_auto_response && ep_agents[idx].ep_driver != null) begin
+            if (ep_agents[idx].ep_driver != null &&
+                tlp.get_category() == TLP_CAT_COMPLETION) begin
+                // CplD for an EP-originated request: fold read-back data onto
+                // the request object so the EP seq can read it.
+                pcie_tl_cpl_tlp cpl;
+                if ($cast(cpl, tlp)) ep_agents[idx].ep_driver.handle_completion(cpl);
+            end
+            else if (cfg.ep_auto_response && ep_agents[idx].ep_driver != null) begin
                 if (tlp.kind inside {TLP_MEM_RD, TLP_MEM_RD_LK, TLP_MEM_WR,
                                      TLP_CFG_RD0, TLP_CFG_WR0, TLP_IO_RD, TLP_IO_WR}) begin
                     fork

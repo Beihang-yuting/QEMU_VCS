@@ -281,6 +281,9 @@ class pcie_tl_rc_driver extends pcie_tl_base_driver;
             return 0;
         end
 
+        // Fold payload/status back onto the request object for seq read-back.
+        rb_note_completion(cpl);
+
         // Initialize byte tracker on first CplD for this tag
         if (!cpl_byte_trackers.exists(cpl.tag)) begin
             cpl_byte_tracker_t t;

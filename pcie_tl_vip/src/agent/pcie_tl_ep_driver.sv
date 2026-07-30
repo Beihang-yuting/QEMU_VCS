@@ -67,6 +67,16 @@ class pcie_tl_ep_driver extends pcie_tl_base_driver;
     //=========================================================================
     // Handle incoming request (called when EP receives a TLP)
     //=========================================================================
+    //=========================================================================
+    // Handle incoming Completion (EP is the requester, e.g. DMA read).
+    // EP has no completion timeout path of its own; it simply folds the
+    // returning CplD payload/status back onto the request object so a
+    // sequence started on the EP sequencer can read the data back.
+    //=========================================================================
+    virtual function void handle_completion(pcie_tl_cpl_tlp cpl);
+        rb_note_completion(cpl);
+    endfunction
+
     virtual task handle_request(pcie_tl_tlp req);
         int delay;
         if (!auto_response_enable) return;

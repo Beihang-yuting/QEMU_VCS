@@ -63,6 +63,17 @@ class pcie_tl_base_monitor extends uvm_monitor;
             return;
         end
 
+        // Read-back fold (SV_IF / interface-adapter mode only): the env TLM
+        // loopback is idle and rc_driver.handle_completion is not called here, so
+        // the requester monitor is where the returning Completion is observed.
+        // Fold its payload/status onto the original request object via the global
+        // registry. TLM mode folds via the env/driver path, so this is gated off.
+        if (adapter != null && adapter.mode == SV_IF_MODE &&
+            tlp.get_category() == TLP_CAT_COMPLETION) begin
+            pcie_tl_cpl_tlp cpl;
+            if ($cast(cpl, tlp)) pcie_rb_registry::note(cpl);
+        end
+
         // Protocol checks
         if (tlp_format_check_enable)
             has_error |= !check_tlp_format(tlp);
