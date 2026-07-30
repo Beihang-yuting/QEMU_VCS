@@ -26,25 +26,29 @@
 #include "bridge_qemu.h"
 #include "cosim_transport.h"
 #include "irq_poller.h"
+#include "hw/net/cosim_mmio_be.h"
 
 /* ========== MMIO 操作 ========== */
 
-/* Core MMIO forward: one DWORD-aligned access at absolute pcie_addr, routed to
- * target_bdf. Shared by PF BARs and VF BAR apertures. */
+/* Core MMIO forward: turn QEMU's 1/2/4/8B access into a DWORD-aligned PCIe
+ * request with correct first/last byte enables.  An unaligned 8B access may
+ * occupy three DWORDs, so it must not be truncated to a single DWORD. */
 static uint64_t cosim_mmio_do_read(CosimPCIeRC *s, uint64_t pcie_addr,
                                    uint16_t target_bdf, unsigned size)
 {
     bridge_ctx_t *ctx = (bridge_ctx_t *)s->bridge_ctx;
     uint32_t byte_off = pcie_addr & 3u;
     uint64_t dw_addr  = pcie_addr & ~3ULL;
-    uint8_t  first_be = (uint8_t)(((1u << size) - 1) << byte_off);
+    cosim_mmio_be_layout_t layout;
+    if (cosim_mmio_be_layout_build(byte_off, size, 0, &layout) < 0)
+        return UINT64_MAX;
 
     tlp_entry_t req = {0};
     req.type       = TLP_MRD;
     req.addr       = dw_addr;
-    req.len        = 4;               /* 始终读整个 DWORD */
-    req.first_be   = first_be;
-    req.last_be    = 0;
+    req.len        = layout.wire_len;
+    req.first_be   = layout.first_be;
+    req.last_be    = layout.last_be;
     req.target_bdf = target_bdf;
 
     cpl_entry_t cpl = {0};
@@ -57,17 +61,12 @@ static uint64_t cosim_mmio_do_read(CosimPCIeRC *s, uint64_t pcie_addr,
                       "cosim: MRd %s pcie=0x%lx bdf=0x%04x -> 0xFFFFFFFF\n",
                       ret == -2 ? "timeout" : "failed",
                       (unsigned long)pcie_addr, target_bdf);
-        return 0xFFFFFFFF;
+        return UINT64_MAX;
     }
 
-    uint32_t dword = 0;
-    for (int i = 0; i < 4 && i < COSIM_TLP_DATA_SIZE; i++) {
-        dword |= ((uint32_t)cpl.data[i]) << (i * 8);
-    }
-    uint64_t val = dword >> (byte_off * 8);
-    if (size < 4) {
-        val &= (1ULL << (size * 8)) - 1;
-    }
+    uint64_t val = 0;
+    for (unsigned i = 0; i < size && i < COSIM_TLP_DATA_SIZE; i++)
+        val |= (uint64_t)cpl.data[i] << (i * 8);
     return val;
 }
 
@@ -77,19 +76,22 @@ static void cosim_mmio_do_write(CosimPCIeRC *s, uint64_t pcie_addr,
     bridge_ctx_t *ctx = (bridge_ctx_t *)s->bridge_ctx;
     uint32_t byte_off = pcie_addr & 3u;
     uint64_t dw_addr  = pcie_addr & ~3ULL;
-    uint8_t  first_be = (uint8_t)(((1u << size) - 1) << byte_off);
-    uint32_t shifted  = (uint32_t)val << (byte_off * 8);
+    cosim_mmio_be_layout_t layout;
+    if (cosim_mmio_be_layout_build(byte_off, size, val, &layout) < 0) {
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "cosim: invalid MMIO write size=%u offset=%u\n",
+                      size, byte_off);
+        return;
+    }
 
     tlp_entry_t req = {0};
     req.type       = TLP_MWR;
     req.addr       = dw_addr;
-    req.len        = 4;
-    req.first_be   = first_be;
-    req.last_be    = 0;
+    req.len        = layout.wire_len;
+    req.first_be   = layout.first_be;
+    req.last_be    = layout.last_be;
     req.target_bdf = target_bdf;
-    for (int i = 0; i < 4; i++) {
-        req.data[i] = (shifted >> (i * 8)) & 0xFF;
-    }
+    memcpy(req.data, layout.data, layout.wire_len);
 
     if (bridge_send_tlp_fire(ctx, &req) < 0) {
         qemu_log_mask(LOG_GUEST_ERROR, "cosim: MWr failed pcie=0x%lx bdf=0x%04x\n",
@@ -340,9 +342,12 @@ static AddressSpace *cosim_dma_as(CosimPCIeRC *s, uint16_t rid, uint64_t addr,
 {
     AddressSpace *pf_as = pci_get_address_space(PCI_DEVICE(s));
     /* AT=10: address already IOMMU-translated (pre-authorized via ATS). Trust it
-     * and bypass the per-VF window — the translation grant already enforced the
-     * window; re-checking would double-translate. */
-    if (translated) return pf_as;
+     * and bypass both the per-VF window and the PF bus-master AddressSpace.
+     * In config-bypass the guest's Command.BME write is intentionally consumed
+     * by the VIP, so the PF DMA AS may remain disabled even after an ATS grant.
+     * The translated PA must therefore be issued on QEMU's system address
+     * space; AT=00 keeps using the requester/IOMMU path below. */
+    if (translated) return &address_space_memory;
     if (!s->vf_iommu) return pf_as;
     if (addr >= COSIM_MSI_BASE && addr < COSIM_MSI_END) return pf_as;
     int vi = -1;

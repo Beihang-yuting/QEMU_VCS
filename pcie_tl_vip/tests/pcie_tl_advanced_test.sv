@@ -155,6 +155,485 @@ class pcie_tl_mps_sweep_test extends pcie_tl_base_test;
 endclass
 
 //=============================================================================
+// Long Memory Read helper — bypasses pcie_tl_mem_rd_seq's 128-DW generation
+// limit while retaining the legal 4KiB maximum TLP size.
+//=============================================================================
+class pcie_tl_long_mem_rd_seq extends uvm_sequence #(pcie_tl_tlp);
+    `uvm_object_utils(pcie_tl_long_mem_rd_seq)
+
+    bit [63:0] request_addr;
+    int unsigned request_bytes;
+    bit [15:0] requester_id;
+
+    function new(string name = "pcie_tl_long_mem_rd_seq");
+        super.new(name);
+    endfunction
+
+    task body();
+        pcie_tl_mem_tlp req;
+
+        if (request_bytes == 0 || request_bytes > 4096 ||
+            (request_bytes % 4) != 0)
+            `uvm_fatal("MPS_RCB", $sformatf(
+                "invalid long MRd size %0d (must be 4..4096 and DWORD-aligned)",
+                request_bytes))
+
+        req = pcie_tl_mem_tlp::type_id::create("long_mem_rd_req");
+        start_item(req);
+        req.kind         = TLP_MEM_RD;
+        req.type_f       = TLP_TYPE_MEM_RD;
+        req.addr         = request_addr;
+        req.is_64bit     = (request_addr[63:32] != 0);
+        req.fmt          = req.is_64bit ? FMT_4DW_NO_DATA : FMT_3DW_NO_DATA;
+        req.length       = (request_bytes == 4096) ? 10'd0 : request_bytes / 4;
+        req.first_be     = 4'hF;
+        req.last_be      = (request_bytes == 4) ? 4'h0 : 4'hF;
+        req.requester_id = requester_id;
+        req.payload      = new[0];
+        finish_item(req);
+    endtask
+endclass
+
+//=============================================================================
+// Completion MPS/RCB matrix: verify every returned CplD rather than relying
+// only on the scoreboard's end-to-end data match.
+//=============================================================================
+class pcie_tl_mps_rcb_matrix_test extends pcie_tl_base_test;
+    `uvm_component_utils(pcie_tl_mps_rcb_matrix_test)
+
+    // Every CplD producer has its own observation path.  In particular, the
+    // legacy RC responder writes directly to the scoreboard and therefore
+    // cannot be observed through either agent monitor.
+    uvm_tlm_analysis_fifo #(pcie_tl_tlp) ep_driver_cpl_fifo;
+    uvm_tlm_analysis_fifo #(pcie_tl_tlp) unified_rc_cpl_fifo;
+    uvm_tlm_analysis_fifo #(pcie_tl_tlp) legacy_rc_cpl_fifo;
+
+    string completion_mode;
+    bit use_unified_path;
+    int checked_cases;
+    int failed_cases;
+    int ep_driver_checked_cases;
+    int unified_rc_checked_cases;
+    int legacy_rc_checked_cases;
+    int ep_driver_failed_cases;
+    int unified_rc_failed_cases;
+    int legacy_rc_failed_cases;
+    int extra_cpld_count;
+    bit matrix_failed;
+
+    function new(string name = "pcie_tl_mps_rcb_matrix_test",
+                 uvm_component parent = null);
+        super.new(name, parent);
+    endfunction
+
+    virtual function void configure_test();
+        string requested_mode;
+
+        super.configure_test();
+        completion_mode = "unified";
+        if ($value$plusargs("MPS_RCB_MODE=%s", requested_mode))
+            completion_mode = requested_mode;
+
+        case (completion_mode)
+            "unified": use_unified_path = 1'b1;
+            "legacy":  use_unified_path = 1'b0;
+            default: `uvm_fatal("MPS_RCB", $sformatf(
+                "unsupported +MPS_RCB_MODE=%s (valid: unified, legacy)",
+                completion_mode))
+        endcase
+
+        cfg.max_payload_size          = MPS_128;
+        cfg.max_read_request_size     = MRRS_4096;
+        cfg.read_completion_boundary  = RCB_64;
+        cfg.ep_auto_response          = 1;
+        cfg.use_unified_mem           = use_unified_path;
+        cfg.mem_access_mode           = PCIE_TL_MEM_PER_BUFFER;
+        configure_fc(0, 1);
+    endfunction
+
+    function void build_phase(uvm_phase phase);
+        super.build_phase(phase);
+        ep_driver_cpl_fifo = new("ep_driver_cpl_fifo", this);
+        unified_rc_cpl_fifo = new("unified_rc_cpl_fifo", this);
+        legacy_rc_cpl_fifo = new("legacy_rc_cpl_fifo", this);
+    endfunction
+
+    function void connect_phase(uvm_phase phase);
+        super.connect_phase(phase);
+        // EP driver completions return to the RC adapter/monitor.
+        env.rc_agent.monitor.tlp_ap.connect(ep_driver_cpl_fifo.analysis_export);
+        // Unified RC driver completions return through the EP adapter/monitor.
+        env.ep_agent.monitor.tlp_ap.connect(unified_rc_cpl_fifo.analysis_export);
+        // Legacy RC auto-response CplDs intentionally bypass both adapters.
+        env.legacy_rc_cpl_ap.connect(legacy_rc_cpl_fifo.analysis_export);
+    endfunction
+
+    protected task drain_fifo(uvm_tlm_analysis_fifo #(pcie_tl_tlp) fifo);
+        pcie_tl_tlp discarded;
+        while (fifo.try_get(discarded));
+    endtask
+
+    protected task get_cpl(uvm_tlm_analysis_fifo #(pcie_tl_tlp) fifo,
+                           output pcie_tl_cpl_tlp cpl,
+                           input string direction,
+                           output bit got_cpl);
+        pcie_tl_tlp tlp;
+        time start_time;
+
+        cpl = null;
+        got_cpl = 0;
+        start_time = $time;
+        while (($time - start_time) < 10000ns) begin
+            if (fifo.try_get(tlp)) begin
+                if ($cast(cpl, tlp)) begin
+                    got_cpl = 1;
+                    return;
+                end
+                // The RC monitor also observes EP-originated requests as they
+                // traverse the loopback.  They are not completion candidates;
+                // leave them out of this stream check and wait for the CplD.
+                `uvm_info("MPS_RCB", $sformatf(
+                    "%s skipped non-Completion TLP while awaiting CplD", direction),
+                    UVM_HIGH)
+            end
+            else begin
+                #10ns;
+            end
+        end
+        if (!got_cpl) begin
+            `uvm_error("MPS_RCB", $sformatf(
+                "%s timed out waiting for CplD", direction))
+        end
+    endtask
+
+    // The next case is not started until this task returns.  Keep observing
+    // the current response FIFO long enough for all TLM forks/monitor deltas
+    // to settle, so a producer cannot hide a late or extra CplD in the next
+    // case's unconditional fifo drain.
+    protected task check_no_extra_cplds(
+        uvm_tlm_analysis_fifo #(pcie_tl_tlp) fifo,
+        input string direction,
+        input int unsigned request_bytes,
+        output bit extra_seen);
+        pcie_tl_tlp tlp;
+        pcie_tl_cpl_tlp cpl;
+        time start_time;
+
+        extra_seen = 1'b0;
+        start_time = $time;
+        do begin
+            #1ns;
+            while (fifo.try_get(tlp)) begin
+                if ($cast(cpl, tlp)) begin
+                    `uvm_error("MPS_RCB", $sformatf(
+                        "%s observed unexpected extra CplD size=%0d after %0d response bytes",
+                        direction, cpl.payload.size(), request_bytes))
+                    extra_seen = 1'b1;
+                    extra_cpld_count++;
+                end
+                else begin
+                    `uvm_info("MPS_RCB", $sformatf(
+                        "%s ignored non-Completion TLP during extra-CplD window",
+                        direction), UVM_HIGH)
+                end
+            end
+        end while (($time - start_time) < 100ns);
+    endtask
+
+    protected task verify_read_completions(
+        uvm_tlm_analysis_fifo #(pcie_tl_tlp) fifo,
+        input string direction,
+        input longint unsigned request_addr,
+        input int unsigned request_bytes,
+        input int unsigned mps_bytes,
+        input int unsigned rcb_bytes,
+        input byte expected_data[],
+        output bit case_ok);
+        longint unsigned cur_addr;
+        int unsigned remaining;
+        int unsigned received;
+        bit extra_seen;
+
+        case_ok   = 1'b1;
+        cur_addr  = request_addr;
+        remaining = request_bytes;
+        received  = 0;
+        while (remaining > 0) begin
+            pcie_tl_cpl_tlp cpl;
+            int unsigned bytes_to_rcb;
+            int unsigned expected_chunk;
+            bit [11:0] expected_byte_count;
+            bit got_cpl;
+
+            get_cpl(fifo, cpl, direction, got_cpl);
+            if (!got_cpl || cpl == null) begin
+                case_ok = 1'b0;
+                return;
+            end
+            bytes_to_rcb = rcb_bytes - (cur_addr % rcb_bytes);
+            if (bytes_to_rcb == 0) bytes_to_rcb = rcb_bytes;
+            expected_chunk = (mps_bytes < bytes_to_rcb) ? mps_bytes : bytes_to_rcb;
+            if (expected_chunk > remaining) expected_chunk = remaining;
+            expected_byte_count = (remaining == 4096) ? 12'h000 : remaining[11:0];
+
+            if (cpl.kind != TLP_CPLD || cpl.cpl_status != CPL_STATUS_SC) begin
+                `uvm_error("MPS_RCB", $sformatf(
+                    "%s completion status/kind invalid", direction))
+                case_ok = 1'b0;
+            end
+            if (cpl.payload.size() > mps_bytes) begin
+                `uvm_error("MPS_RCB", $sformatf(
+                    "%s CplD=%0dB exceeds MPS=%0dB", direction,
+                    cpl.payload.size(), mps_bytes))
+                case_ok = 1'b0;
+            end
+            if (cpl.payload.size() > bytes_to_rcb) begin
+                `uvm_error("MPS_RCB", $sformatf(
+                    "%s CplD addr=0x%0h size=%0d crosses RCB=%0d", direction,
+                    cur_addr, cpl.payload.size(), rcb_bytes))
+                case_ok = 1'b0;
+            end
+            if (cpl.payload.size() != expected_chunk) begin
+                `uvm_error("MPS_RCB", $sformatf(
+                    "%s CplD size got=%0d expected=%0d", direction,
+                    cpl.payload.size(), expected_chunk))
+                case_ok = 1'b0;
+            end
+            if (cpl.lower_addr != cur_addr[6:0]) begin
+                `uvm_error("MPS_RCB", $sformatf(
+                    "%s lower_addr got=0x%02h expected=0x%02h", direction,
+                    cpl.lower_addr, cur_addr[6:0]))
+                case_ok = 1'b0;
+            end
+            if (cpl.byte_count != expected_byte_count) begin
+                `uvm_error("MPS_RCB", $sformatf(
+                    "%s byte_count got=%0d expected=%0d", direction,
+                    cpl.byte_count, expected_byte_count))
+                case_ok = 1'b0;
+            end
+            if (cpl.payload.size() == 0 || cpl.payload.size() > remaining) begin
+                `uvm_error("MPS_RCB", $sformatf(
+                    "%s invalid CplD payload size=%0d remaining=%0d", direction,
+                    cpl.payload.size(), remaining))
+                case_ok = 1'b0;
+                return;
+            end
+            foreach (cpl.payload[i]) begin
+                if ((received + i) >= expected_data.size() ||
+                    cpl.payload[i] != expected_data[received + i]) begin
+                    `uvm_error("MPS_RCB", $sformatf(
+                        "%s data mismatch offset=%0d got=0x%02h expected=0x%02h",
+                        direction, received + i, cpl.payload[i],
+                        ((received + i) < expected_data.size()) ?
+                        expected_data[received + i] : 8'hXX))
+                    case_ok = 1'b0;
+                end
+            end
+            cur_addr  += cpl.payload.size();
+            remaining -= cpl.payload.size();
+            received  += cpl.payload.size();
+        end
+        if (received != request_bytes) begin
+            `uvm_error("MPS_RCB", $sformatf(
+                "%s received=%0d expected=%0d", direction, received, request_bytes))
+            case_ok = 1'b0;
+        end
+        else begin
+            check_no_extra_cplds(fifo, direction, request_bytes, extra_seen);
+            if (extra_seen)
+                case_ok = 1'b0;
+        end
+    endtask
+
+    protected task make_case_data(input bit ep_requester,
+                                  input int unsigned offset,
+                                  input int unsigned request_bytes,
+                                  output bit [63:0] allocation_base,
+                                  output bit [63:0] request_addr,
+                                  output byte expected_data[]);
+        byte seeded_data[];
+
+        allocation_base = '0;
+        expected_data = new[request_bytes];
+        if (use_unified_path) begin
+            seeded_data = new[4096];
+            foreach (seeded_data[i])
+                seeded_data[i] = byte'((ep_requester ? 8'hA0 : 8'h40) + i);
+
+            if (ep_requester) begin
+                if (env.host_mem == null)
+                    `uvm_fatal("MPS_RCB", "unified EP->RC path has null host_mem")
+                allocation_base = env.host_mem.alloc(4096, 4096);
+                env.host_mem.write_mem(allocation_base, seeded_data);
+            end
+            else begin
+                if (env.dev_mem[0] == null)
+                    `uvm_fatal("MPS_RCB", "unified RC->EP path has null dev_mem[0]")
+                allocation_base = env.dev_mem[0].alloc(4096, 4096);
+                env.dev_mem[0].write_mem(allocation_base, seeded_data);
+            end
+            request_addr = allocation_base + offset;
+            foreach (expected_data[i])
+                expected_data[i] = seeded_data[offset + i];
+        end
+        else begin
+            request_addr = 64'h0000_0001_0000_0000 + offset;
+            foreach (expected_data[i])
+                expected_data[i] = ep_requester ? 8'hAA : 8'h00;
+        end
+    endtask
+
+    protected task free_case_data(input bit ep_requester,
+                                  input bit [63:0] allocation_base);
+        if (!use_unified_path) return;
+        if (ep_requester)
+            env.host_mem.free(allocation_base);
+        else
+            env.dev_mem[0].free(allocation_base);
+    endtask
+
+    protected task run_read_case(input bit ep_requester,
+                                 input int unsigned mps_bytes,
+                                 input int unsigned rcb_bytes,
+                                 input int unsigned offset);
+        pcie_tl_long_mem_rd_seq rd;
+        uvm_tlm_analysis_fifo #(pcie_tl_tlp) cpl_fifo;
+        bit [63:0] allocation_base;
+        bit [63:0] addr;
+        byte expected_data[];
+        int unsigned request_bytes;
+        string direction;
+        bit case_ok;
+
+        request_bytes = mps_bytes * 2;
+        if (request_bytes > 4096 - offset) request_bytes = 4096 - offset;
+        if (!ep_requester) begin
+            direction = "EP_DRIVER_RC_TO_EP";
+            cpl_fifo = ep_driver_cpl_fifo;
+        end
+        else if (use_unified_path) begin
+            direction = "UNIFIED_RC_EP_TO_RC";
+            cpl_fifo = unified_rc_cpl_fifo;
+        end
+        else begin
+            direction = "LEGACY_RC_EP_TO_RC";
+            cpl_fifo = legacy_rc_cpl_fifo;
+        end
+        cfg.max_payload_size         = mps_e'(mps_bytes);
+        cfg.read_completion_boundary = rcb_e'(rcb_bytes);
+        env.ep_agent.ep_driver.mps_bytes = mps_bytes;
+        env.ep_agent.ep_driver.rcb_bytes = rcb_bytes;
+        env.rc_agent.rc_driver.mps_bytes = mps_bytes;
+        env.rc_agent.rc_driver.rcb_bytes = rcb_bytes;
+        drain_fifo(ep_driver_cpl_fifo);
+        drain_fifo(unified_rc_cpl_fifo);
+        drain_fifo(legacy_rc_cpl_fifo);
+        make_case_data(ep_requester, offset, request_bytes, allocation_base,
+                       addr, expected_data);
+
+        rd = pcie_tl_long_mem_rd_seq::type_id::create(
+            $sformatf("long_rd_%s_mps%0d_rcb%0d_off%0d",
+                      direction, mps_bytes, rcb_bytes, offset));
+        rd.request_addr  = addr;
+        rd.request_bytes = request_bytes;
+        rd.requester_id  = ep_requester ? 16'h0100 : 16'h0000;
+        if (ep_requester)
+            rd.start(env.ep_agent.sequencer);
+        else
+            rd.start(env.rc_agent.sequencer);
+
+        verify_read_completions(cpl_fifo, direction, addr, request_bytes,
+                                mps_bytes, rcb_bytes, expected_data, case_ok);
+        free_case_data(ep_requester, allocation_base);
+
+        if (case_ok) begin
+            checked_cases++;
+            if (!ep_requester)
+                ep_driver_checked_cases++;
+            else if (use_unified_path)
+                unified_rc_checked_cases++;
+            else
+                legacy_rc_checked_cases++;
+        end
+        else begin
+            matrix_failed = 1'b1;
+            failed_cases++;
+            if (!ep_requester)
+                ep_driver_failed_cases++;
+            else if (use_unified_path)
+                unified_rc_failed_cases++;
+            else
+                legacy_rc_failed_cases++;
+        end
+    endtask
+
+    task run_phase(uvm_phase phase);
+        int unsigned mps_values[6] = '{128, 256, 512, 1024, 2048, 4096};
+        int unsigned rcb_values[2] = '{64, 128};
+        int errors_before;
+        int errors_after;
+
+        phase.raise_objection(this);
+        checked_cases = 0;
+        failed_cases = 0;
+        ep_driver_checked_cases = 0;
+        unified_rc_checked_cases = 0;
+        legacy_rc_checked_cases = 0;
+        ep_driver_failed_cases = 0;
+        unified_rc_failed_cases = 0;
+        legacy_rc_failed_cases = 0;
+        extra_cpld_count = 0;
+        matrix_failed = 1'b0;
+        errors_before = uvm_report_server::get_server().get_severity_count(UVM_ERROR);
+        `uvm_info("MPS_RCB", $sformatf(
+            "MPS_RCB mode=%s: running 48 EP-driver RC->EP cases and 48 %s EP->RC cases",
+            completion_mode, use_unified_path ? "unified-RC-driver" : "legacy-RC-auto-response"),
+            UVM_NONE)
+        for (int mi = 0; mi < 6; mi++) begin
+            for (int ri = 0; ri < 2; ri++) begin
+                int unsigned offsets[4] = '{0, 4, 32, rcb_values[ri] - 4};
+                for (int oi = 0; oi < 4; oi++) begin
+                    run_read_case(0, mps_values[mi], rcb_values[ri], offsets[oi]);
+                    run_read_case(1, mps_values[mi], rcb_values[ri], offsets[oi]);
+                end
+            end
+        end
+        errors_after = uvm_report_server::get_server().get_severity_count(UVM_ERROR);
+        `uvm_info("MPS_RCB", $sformatf(
+            "MPS_RCB PATH EP_DRIVER_RC_TO_EP checked=%0d failed=%0d expected=48",
+            ep_driver_checked_cases, ep_driver_failed_cases), UVM_NONE)
+        `uvm_info("MPS_RCB", $sformatf(
+            "MPS_RCB PATH UNIFIED_RC_EP_TO_RC checked=%0d failed=%0d expected=%0d",
+            unified_rc_checked_cases, unified_rc_failed_cases,
+            use_unified_path ? 48 : 0), UVM_NONE)
+        `uvm_info("MPS_RCB", $sformatf(
+            "MPS_RCB PATH LEGACY_RC_EP_TO_RC checked=%0d failed=%0d expected=%0d",
+            legacy_rc_checked_cases, legacy_rc_failed_cases,
+            use_unified_path ? 0 : 48), UVM_NONE)
+        `uvm_info("MPS_RCB", $sformatf(
+            "MPS_RCB EXTRA_CPLD window=100ns observed=%0d", extra_cpld_count),
+            UVM_NONE)
+        if (checked_cases != 96 && !matrix_failed) begin
+            matrix_failed = 1'b1;
+            `uvm_error("MPS_RCB", $sformatf(
+                "MPS_RCB completed %0d valid cases, expected 96", checked_cases))
+        end
+        if (!matrix_failed && errors_after == errors_before) begin
+            `uvm_info("MPS_RCB", $sformatf(
+                "=== MPS_RCB PASS mode=%s cases=%0d configs=12 directions=2 ===",
+                completion_mode, checked_cases), UVM_NONE)
+        end
+        else begin
+            `uvm_info("MPS_RCB", $sformatf(
+                "=== MPS_RCB FAIL mode=%s checked=%0d failed=%0d new_uvm_errors=%0d ===",
+                completion_mode, checked_cases, failed_cases,
+                errors_after - errors_before), UVM_NONE)
+        end
+        phase.drop_objection(this);
+    endtask
+endclass
+
+//=============================================================================
 // Test 3: 4KB Boundary - DMA transfers across 4KB boundaries
 //=============================================================================
 class pcie_tl_4kb_boundary_test extends pcie_tl_base_test;

@@ -56,6 +56,12 @@ class pcie_tl_env extends uvm_env;
     host_mem_api    host_mem;
     host_mem_api    dev_mem[16];
 
+    //--- Legacy RC auto-response observation ---
+    // Legacy CplD objects are written directly to the scoreboard rather than
+    // injected back through an adapter.  This port exposes that stream to
+    // verification consumers without changing the legacy transport path.
+    uvm_analysis_port #(pcie_tl_tlp) legacy_rc_cpl_ap;
+
     function new(string name = "pcie_tl_env", uvm_component parent = null);
         super.new(name, parent);
     endfunction
@@ -68,6 +74,8 @@ class pcie_tl_env extends uvm_env;
         int  n_mgr;         // manager-set count (>=1 so EP-only still has managers)
         bit  ns_multi_ep;   // non-switch multi-EP (num_ep>1) -> ep_agents[] array
         super.build_phase(phase);
+
+        legacy_rc_cpl_ap = new("legacy_rc_cpl_ap", this);
 
         // 1. Get or create config
         if (!uvm_config_db#(pcie_tl_env_config)::get(this, "", "cfg", cfg)) begin
@@ -611,7 +619,7 @@ class pcie_tl_env extends uvm_env;
     protected task rc_auto_respond(pcie_tl_tlp req);
         pcie_tl_mem_tlp mem_req;
         pcie_tl_cpl_tlp cpl;
-        int total_bytes, chunk, remaining, cpl_idx, received;
+        int total_bytes, chunk, remaining, received;
         bit [63:0] cur_addr;
         int mps_bytes, rcb_bytes;
 
@@ -627,19 +635,16 @@ class pcie_tl_env extends uvm_env;
         total_bytes = (req.length == 0) ? 4096 : req.length * 4;
         remaining   = total_bytes;
         cur_addr    = mem_req.addr;
-        cpl_idx     = 0;
         received    = 0;
 
         while (remaining > 0) begin
             int bytes_to_rcb, len_dw;
 
-            if (cpl_idx == 0) begin
-                bytes_to_rcb = rcb_bytes - (cur_addr % rcb_bytes);
-                if (bytes_to_rcb == 0) bytes_to_rcb = rcb_bytes;
-                chunk = (bytes_to_rcb < mps_bytes) ? bytes_to_rcb : mps_bytes;
-            end else begin
-                chunk = mps_bytes;
-            end
+            // Every Completion must end at or before the next RCB boundary.
+            bytes_to_rcb = rcb_bytes - (cur_addr % rcb_bytes);
+            if (bytes_to_rcb == 0) bytes_to_rcb = rcb_bytes;
+            chunk = mps_bytes;
+            if (bytes_to_rcb < chunk) chunk = bytes_to_rcb;
             if (chunk > remaining) chunk = remaining;
             len_dw = (chunk + 3) / 4;
 
@@ -661,6 +666,11 @@ class pcie_tl_env extends uvm_env;
             foreach (cpl.payload[i])
                 cpl.payload[i] = 8'hAA;  // Fill pattern
 
+            // Observation only: legacy completions deliberately bypass the
+            // adapter/monitor transport, so publish before the direct
+            // scoreboard write without changing functional behavior.
+            legacy_rc_cpl_ap.write(cpl);
+
             // Write to scoreboard directly (avoids tag-reuse race through delay path)
             if (scb != null)
                 scb.write_ep(cpl);
@@ -668,7 +678,6 @@ class pcie_tl_env extends uvm_env;
             cur_addr  += chunk;
             remaining -= chunk;
             received  += chunk;
-            cpl_idx++;
         end
     endtask
 
