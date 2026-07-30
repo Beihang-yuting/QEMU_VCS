@@ -103,12 +103,10 @@ class pcie_tl_rc_driver extends pcie_tl_base_driver;
         int total_byte_count;
         int remaining;
         bit [63:0] cur_addr;
-        int cpl_idx;
 
         total_byte_count = (r.length == 0) ? 4096 : r.length * 4;
         remaining = total_byte_count;
         cur_addr  = r.addr;
-        cpl_idx   = 0;
 
         while (remaining > 0) begin
             pcie_tl_cpl_tlp cpl;
@@ -117,15 +115,11 @@ class pcie_tl_rc_driver extends pcie_tl_base_driver;
             int len_dw;
             bit [7:0] um_data[];
 
-            // First split: align to RCB boundary, then clamp to MPS
-            // Subsequent splits: MPS-sized or remainder
-            if (cpl_idx == 0) begin
-                bytes_to_rcb = rcb_bytes - (cur_addr % rcb_bytes);
-                if (bytes_to_rcb == 0) bytes_to_rcb = rcb_bytes;
-                chunk = (bytes_to_rcb < mps_bytes) ? bytes_to_rcb : mps_bytes;
-            end else begin
-                chunk = mps_bytes;
-            end
+            // Every Completion must end at or before the next RCB boundary.
+            bytes_to_rcb = rcb_bytes - (cur_addr % rcb_bytes);
+            if (bytes_to_rcb == 0) bytes_to_rcb = rcb_bytes;
+            chunk = mps_bytes;
+            if (bytes_to_rcb < chunk) chunk = bytes_to_rcb;
             if (chunk > remaining) chunk = remaining;
 
             len_dw = (chunk + 3) / 4;
@@ -155,7 +149,6 @@ class pcie_tl_rc_driver extends pcie_tl_base_driver;
 
             cur_addr  += chunk;
             remaining -= chunk;
-            cpl_idx++;
         end
     endtask
 
