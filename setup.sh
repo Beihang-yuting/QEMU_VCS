@@ -1176,6 +1176,17 @@ if [ "$NEED_QEMU" = true ]; then
                 QEMU_FETCHED=false
                 TARBALL="${PROJECT_DIR}/third_party/qemu-9.2.0.tar.xz"
 
+                # prepare-offline.sh may obtain GitHub's gzip release archive.
+                # Prefer xz when both are present, but accept either offline input.
+                for qemu_tarball_candidate in \
+                    "$TARBALL" \
+                    "${PROJECT_DIR}/third_party/qemu-9.2.0.tar.gz"; do
+                    if [ -f "$qemu_tarball_candidate" ]; then
+                        TARBALL="$qemu_tarball_candidate"
+                        break
+                    fi
+                done
+
                 # 优先检查本地 tarball（支持离线）
                 if [ -f "$TARBALL" ]; then
                     info "从本地 tarball 解压 QEMU..."

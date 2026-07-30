@@ -23,6 +23,10 @@ add_test(NAME test_cli_smoke
          COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/test_cli_smoke.sh)
 set_tests_properties(test_cli_smoke PROPERTIES TIMEOUT 10)
 
+add_test(NAME test_offline_qemu_archive
+         COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/test_offline_qemu_archive.sh)
+set_tests_properties(test_offline_qemu_archive PROPERTIES TIMEOUT 10)
+
 # P3 ETH integration tests
 add_executable(test_eth_loopback test_eth_loopback.c)
 target_link_libraries(test_eth_loopback cosim_eth)
