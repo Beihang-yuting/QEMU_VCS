@@ -177,13 +177,17 @@ endfunction
 
 - [ ] **Step 4: 61 编译** `make vcs-vip` → 0 error。**Commit** `feat(ext-tlp): rx_loop 入向 MRd/MWr 分派 + build CplD`
 
-## Task 0.3: 阶段0 SV e2e(53 QEMU 不变 + 61 VCS)
+## Task 0.3: 阶段0 SV e2e —— 白盒注入自检(53 QEMU + 61 VCS)
 
-**Files:** 无(集成验证)+ 可能加 test 挂 mem_rd/mem_wr RQ seq
+> **修正(recon 后):** 原假设"对 RC 的 RQ agent 起 mem_rd/mem_wr seq"**方向错**。核实:`tb_cosim_multirc_top` 里 RC-role adapter **驱 CQ/RC、采样 CC/RQ**,4 条 AXIS far-end **悬空**(接真 DUT 的模板,tb 内无 DUT/ep_stub);RC sequencer 起 mem seq → 驱 **CQ(host→DUT MMIO)**,**不触发**入向 `service_inbound_*`(那由 **RQ monitor** 喂,只有真 DUT/EP-role 能产)。VIP-only tb 里无物产入向 RQ。选**最小·白盒注入**验地基(EP-替身全保真链留后续)。
 
-- [ ] **Step 1: 造激励** —— 在 cosim_xrc_test(或新 test)run_phase 里,对某 RC 的 RQ agent 起 `mem_rd_seq`/`mem_wr_seq`(样板 `pcie_tl_unified_mem_test.sv:301-306`,把 sequencer 换成 `env.rc_agents[r].<rq_agent>.sequencer`)。目标 host_addr 用 guest 已知缓冲。
-- [ ] **Step 2: 起环境** —— 53 `make run-qemu`(device 不变,无需 ninja),61 `make vcs-vip` 后 `simv_vip +COSIM ... +REMOTE_HOST=<53> +PORT_BASE=9100`。
-- [ ] **Step 3: 判定** —— DUT MWr 后 guest 内存被改;DUT MRd 收到 CplD(scoreboard 对读值)。sim log 有 `service_inbound_mem_*`,无 UVM_ERROR。**Commit**(--allow-empty 记录结果)。
+**Files:** Modify `vcs-tb/cosim_xrc_driver.sv`(加 test-only 钩子)、`vcs-tb/cosim_xrc_test.sv`(加自检 + plusarg 守卫)
+
+- [ ] **Step 1: 驱动加 test-only 钩子** —— `cosim_xrc_driver` 加 2 公有方法:`test_inbound_mwr(addr,d[16],nbytes)`(复用生产 `build_mmio_tlp(BV_TLP_MWR,...)` 建 MWr → 走真 `service_inbound_mem_write` → `bridge_vcs_dma_write_rc`);`test_read_host(addr,nbytes,d[16])`(转调 `bridge_vcs_dma_read_rc`,不发 CplD)。
+- [ ] **Step 2: test 加自检** —— `cosim_xrc_test` 加 `run_inbound_dma_selfcheck()`:逐 RC 写 64B 已知 pattern 到 per-RC 隔离 GPA(`0x0F100000 + r*0x10000`,高内存保留区)→ 读回逐字比对。run_phase 用 `+INBOUND_DMA_TEST` 守卫(置则自检后即退,不阻塞 shutdown;默认行为不变)。
+- [ ] **Step 3: 起环境** —— 61 `build_cosim_multirc.sh build`(lib 覆盖见头);53 起 QEMU:9000(cosim device,`transport=tcp,port_base,instance_id`)。
+- [ ] **Step 4: 跑 + 判定** —— 61 `simv_cosim_mrc +INBOUND_DMA_TEST +REMOTE_HOST=<53> +PORT_BASE=9000`。判据:log 出 `inbound-DMA self-check PASS (all RC)`,`got==exp` 逐字一致,无 UVM_ERROR。**Commit** 记录结果。
+> **范围**:验 Task 0.1 写/读 DPI + 0.2 `service_inbound_mem_write` 分派 + 真 QEMU 往返;**不**驱真 RQ-AXIS、**不**走 `service_inbound_mem_read` 的 CplD-over-wire(tb 无 RC-channel 消费者会 hang,留 EP-替身方案)。
 
 ---
 

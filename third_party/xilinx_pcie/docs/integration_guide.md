@@ -1,6 +1,6 @@
 # Xilinx PCIe 接口 Adapter 集成与使用指南
 
-本文档说明如何把 `xilinx_pcie` 接入仿真环境并使用。**自 adapter 化重构起**，本项目已收敛为**纯 Xilinx 接口 adapter**：只负责 PG213 的 4 通道 AXI-Stream（RQ/RC/CQ/CC）⟷ 抽象 `pcie_tl_tlp` 的编解码与通道路由；所有协议逻辑（agent / driver / EP 自动响应 / completion 追踪 / seq 库 / scoreboard）全部委托外部 `pcie_tl_vip`。旧的多 agent / WIRE_RC-WIRE_EP / xilinx scoreboard 协议栈已删除。
+本文档说明如何把 `xilinx_pcie` 接入仿真环境并使用。**自 adapter 化重构起**，本项目已收敛为**纯 Xilinx 接口 adapter**：只负责 PG213 的 4 通道 AXI-Stream（RQ/RC/CQ/CC）⟷ 抽象 `pcie_tl_tlp` 的编解码与通道路由；所有协议逻辑（agent / driver / EP 自动响应 / completion 追踪 / seq 库 / scoreboard）全部委托外部 `pcie_tl_vip`。旧的 **xilinx 侧**多 agent 协议栈 / 老 WIRE_RC-WIRE_EP 宏 / xilinx scoreboard 已删除;多 agent 能力现由上游 `pcie_tl_env` 的 `num_rc`/`num_ep` 提供(见 §2.3),配套新的按下标连线宏 `XILINX_ADAPTER_WIRE_RC/EP`。
 
 > 设计原理（adapter 子类吸收、codec / tuser / straddle、SV_IF 模式、与 pcie_tl_vip 的接缝）见
 > `docs/superpowers/specs/2026-06-29-xilinx-adapter-mode-design.md` 与实现计划
@@ -118,6 +118,45 @@ end
 
 宏（`tb/xilinx_adapter_connect.svh`）把同一 vif `set` 到 `uvm_test_top.env.rc_adapter*.<ch>_agent*` 与 `ep_adapter*.<ch>_agent*` 两处。master/slave 区分由 adapter 的 `make_axis_config` 按 role+channel 决定，tb 不必区分方向。
 
+### 2.3 多 agent（任意 N RC + M EP，无 switch）+ 对接真实 DUT
+
+上游 `pcie_tl_env` 支持任意数量**独立** agent（非 switch）：`cfg.num_rc` / `cfg.num_ep`（默认 1）。**=1 时沿用旧的无下标名** `rc_adapter` / `ep_adapter`（1RC+1EP 完全向后兼容）；**>1 时建 `rc_adapter_<i>` / `ep_adapter_<i>`**，每个 adapter 有自己独立的 4 通道 link，互不共享。关掉某一类用 `*_agent_enable=0`。
+
+```systemverilog
+cfg.if_mode         = SV_IF_MODE;
+cfg.rc_agent_enable = 1;
+cfg.ep_agent_enable = 0;
+cfg.num_rc          = 2;   // N 个独立 RC host link
+cfg.num_ep          = 0;   // M 个独立 EP link
+cfg.switch_enable   = 0;   // 非 switch；switch 模式下 EP 数由 switch_cfg.num_ds_ports 决定，num_ep 被忽略
+```
+
+每个 indexed adapter 用按下标连线宏连自己的 4 条总线（tb 内为每个 link 声明 4 条 `axis_if`）：
+
+```systemverilog
+`XILINX_ADAPTER_WIRE_RC(0, rc0_rq, rc0_rc, rc0_cq, rc0_cc)   // BFM host  -> 真实 EP DUT #0
+`XILINX_ADAPTER_WIRE_RC(1, rc1_rq, rc1_rc, rc1_cq, rc1_cc)   //                          #1
+`XILINX_ADAPTER_WIRE_EP(0, ep0_rq, ep0_rc, ep0_cq, ep0_cc)   // BFM EP    -> 真实 Root/host
+```
+
+参考 tb：`tb/tb_adapter_multirc_top.sv`（2 RC host）、`tb/tb_adapter_multiep_top.sv`（2 EP）。
+
+#### 对接真实 DUT（bypass 硬 IP）：角色决定要不要翻译层
+
+真实单个 Xilinx 器件自己的 4 个 pin（器件视角，方向固定）：RQ=出 / RC=入 / CQ=入 / CC=出。BFM 各 role 的 pin 方向与之对比：
+
+| | RQ | RC | CQ | CC | 与真实器件 |
+|---|---|---|---|---|---|
+| 真实器件自身 | 出 | 入 | 入 | 出 | — |
+| **BFM RC-role** | 入 | 出 | 出 | 入 | **镜像**（方向相反、格式同名） |
+| BFM EP-role | 出 | 入 | 入 | 出 | 相同（非镜像） |
+
+- **BFM 当 host、DUT 是真实 EP** → BFM 用 **RC-role**（`num_rc=N`）。RC-role pin 是真实器件的镜像，**4 通道同名直连**（BFM.RQ←DUT.RQ、BFM.RC→DUT.RC、BFM.CQ→DUT.CQ、BFM.CC←DUT.CC），格式一一对上，**零描述符翻译**。推荐做法。
+- **BFM 当 EP、DUT 是真实 Root/host** → BFM-EP 发 RQ、DUT 在 CQ 收，格式不同（RQ-desc ≠ CQ-desc），同名连会两个 master 打架；需 **RQ↔CQ / RC↔CC 交叉 + 描述符翻译层**（真实硬 IP 干的那一层）——这是额外新代码，当前 adapter 不含。
+
+> 4 通道 TUSER 宽度各异（DW=64：RQ=62 / RC=75 / CQ=88 / CC=33），任何 RQ↔CQ 或 RC↔CC 交叉都需翻译；RC-role 同名直连不跨格式，故免翻译。
+> **no-DUT smoke**：总线开路无 `tready` 源，active RC 不能驱流，仅做 build/connect/elaborate + idle 探测（见 `multirc_noep_test` / `multiep_norc_test`）。真实激励在 DUT（或 loopback）提供 `tready` 后，于 `env.rc_agents[i].sequencer` 上 start。
+
 ---
 
 ## 3. 激励与端到端校验
@@ -195,7 +234,7 @@ ssh -p 2222 ryan@10.11.10.61 'source ~/set-env.sh >/dev/null 2>&1
 
 > **plusarg 与 define 必须一致**：`+define+DATA_WIDTH=N`（编译期）与 `+DATA_WIDTH=N`（运行期）须相同；STRADDLE 同理（`+STRADDLE_EN` 运行期 plusarg 接入 straddle 引擎）。
 
-可用 test：`xilinx_pcie_adapter_base_test`（mem PoC 基类）/ `_smoke_test` / `_rdwr_test` / `_backpressure_test` / `_enum_dma_test` / `_cfg_test` / `_err_poisoned_test`。
+可用 test：`xilinx_pcie_adapter_base_test`（mem PoC 基类）/ `_smoke_test` / `_rdwr_test` / `_backpressure_test` / `_enum_dma_test` / `_cfg_test` / `_err_poisoned_test`。多 agent（§2.3）：`_multirc_noep_test`（2 RC host，filelist `filelist_multirc.f`）/ `_multiep_norc_test`（2 EP，filelist `filelist_multiep.f`）。
 
 ### 判定 PASS
 
@@ -216,6 +255,7 @@ ssh -p 2222 ryan@10.11.10.61 'source ~/set-env.sh >/dev/null 2>&1
 1. `pcie_tl_if_adapter::send()` / `receive()` 加 `virtual` —— 否则工厂 override 不分派。
 2. `pcie_tl_enum_then_dma_vseq` 的 `max_payload=0` → `chunk=0` 死循环，修为 `max_payload=256`。
 
+> **§2.3 多 agent（num_rc/num_ep）需要 `pcie_work` main 含 reconcile**（PR #5，合并 sha `52ea845`）—— 更早的 commit（含上述 `d7f1f3c`）**没有** `num_rc`/`num_ep`，只能跑单 RC+EP 或 switch 多根。集成多-agent 时把 `pcie_work` 锁到 ≥ 该合并点。
 > 上游 pcie_tl_vip 活跃开发（multi-root/pf-vf/link-delay），集成/回归前锁定一个已知能编译的 commit。
 
 ---
@@ -241,5 +281,8 @@ DATA_WIDTH ∈ {256, 512}，`+ntb_random_seed=1`，远程 VCS。所有功能场�
 | enum_then_dma | ✅ | ✅ | 1/0/0/0 |
 | cfg round-trip | ✅ | ✅ | reg_num round-trips |
 | err_poisoned | 上游 EP monitor warning（adapter 不判协议） | 同 | — |
+| 多 RC host（`multirc_noep`，2 RC 无 EP，无 DUT） | UVM_ERROR=0（build/idle） | — | 无流（无 tready 源） |
+| 多 EP（`multiep_norc`，2 EP 无 RC，无 DUT） | UVM_ERROR=0（build/idle） | — | 无流（无 tready 源） |
 
 > checker 列为 `xilinx_pcie_e2e_checker` 计数 `matched/outstanding/unmatched/mismatch`；backpressure 全 posted 写，无非 posted 请求被追踪（`n_req=0`）。
+> 多 agent 两行为 build/connect/elaborate + clean-idle 探测（无 DUT 时无 `tready` 源，active RC 不驱流）；接真实 DUT 后于 `env.rc_agents[i].sequencer` 上起激励。

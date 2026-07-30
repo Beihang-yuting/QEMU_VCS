@@ -38,5 +38,13 @@ package xilinx_pcie_adapter_pkg;
   // the Task 6 deletion of src/env/. Resolves via the +incdir+.../src already in
   // filelist_adapter.f (same as the codec/ and adapter/ includes above).
   `include "check/xilinx_pcie_e2e_checker.sv"
+
+  // Interrupt agent (cfg_interrupt sideband, PG213) — self-contained, drives EP
+  // send tasks + models the local PCIe-IP sent/fail response. No env_config dep.
+  `include "agent/xilinx_pcie_interrupt_agent.sv"
+
+  // cfg_interrupt -> 上行 MemWr TLP 桥接 (建模 IP 把 MSI 断言转成 MemWr, 使 RC
+  // 在普通 TLP 接口收到中断)。依赖 xilinx_interrupt_item + pcie_tl_rw_seq。
+  `include "agent/xilinx_pcie_int2tlp_bridge.sv"
 endpackage
 `endif

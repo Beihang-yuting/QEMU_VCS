@@ -111,10 +111,18 @@ class cosim_xrc_test extends uvm_test;
         end
         `uvm_info("COSIM_XRC", $sformatf("%0d RC bridges ready, polling", drivers.size()), UVM_LOW)
 
-        // --- Wait until ANY RC's QEMU shuts down ---
-        wait_any_shutdown();
+        // --- Optional inbound-DMA foundation self-check (Task 0.3) ---
+        // +INBOUND_DMA_TEST: exercise the DUT-initiated inbound DMA plumbing
+        // (service_inbound_mem_write + per-RC DPI) against each RC's QEMU host,
+        // then exit — self-contained, does not wait for a guest shutdown.
+        if ($test$plusargs("INBOUND_DMA_TEST")) begin
+            run_inbound_dma_selfcheck();
+        end else begin
+            // --- Wait until ANY RC's QEMU shuts down ---
+            wait_any_shutdown();
+            `uvm_info("COSIM_XRC", "shutdown received, finishing", UVM_LOW)
+        end
 
-        `uvm_info("COSIM_XRC", "shutdown received, finishing", UVM_LOW)
         for (int r = 0; r < NUM_RC; r++) bridge_vcs_cleanup_ex_rc(r);
         phase.drop_objection(this, "cosim_xrc_test done");
     endtask
@@ -129,6 +137,67 @@ class cosim_xrc_test extends uvm_test;
             join_none
         end
         @any_done;
+    endtask
+
+    // Inbound-DMA foundation self-check (+INBOUND_DMA_TEST). For each RC: write
+    // a known 64B pattern to a safe, per-RC-distinct guest physical address via
+    // the inbound MWr service path, read it back through the per-RC read DPI,
+    // and compare. Verifies Task 0.1 (per-RC DMA DPI) + Task 0.2
+    // (service_inbound_mem_write dispatch) end-to-end against the live QEMU
+    // host, without needing a DUT to drive the RQ AXIS wire.
+    protected task run_inbound_dma_selfcheck();
+        localparam longint unsigned BASE_GPA = 64'h0000_0000_0F10_0000;
+        localparam int              NBYTES   = 64;   // 16 DW, at the DPI cap
+        int total_errors = 0;
+
+        if (drivers.size() == 0) begin
+            `uvm_fatal("COSIM_XRC", "INBOUND_DMA_TEST: no RC drivers available")
+            return;
+        end
+
+        foreach (drivers[r]) begin
+            cosim_xrc_driver drv    = drivers[r];
+            longint unsigned gpa    = BASE_GPA + (r * 64'h0001_0000); // per-RC page
+            int unsigned     exp[16];
+            int unsigned     got[16];
+            int              rc;
+            int              errors = 0;
+
+            for (int i = 0; i < 16; i++) exp[i] = 32'h0C0F_0000 + (r << 12) + i;
+
+            `uvm_info("COSIM_XRC", $sformatf(
+                "inbound-DMA self-check: RC%0d MWr %0dB -> GPA 0x%016h", r, NBYTES, gpa),
+                UVM_LOW)
+            drv.test_inbound_mwr(gpa, exp, NBYTES);
+
+            rc = drv.test_read_host(gpa, NBYTES, got);
+            if (rc != 0) begin
+                `uvm_error("COSIM_XRC", $sformatf(
+                    "RC%0d inbound-DMA read-back DPI failed rc=%0d", r, rc))
+                total_errors++;
+                continue;
+            end
+
+            for (int i = 0; i < 16; i++)
+                if (got[i] !== exp[i]) begin
+                    errors++;
+                    `uvm_error("COSIM_XRC", $sformatf(
+                        "RC%0d inbound-DMA mismatch word[%0d]: got 0x%08h exp 0x%08h",
+                        r, i, got[i], exp[i]))
+                end
+
+            if (errors == 0)
+                `uvm_info("COSIM_XRC", $sformatf(
+                    "RC%0d inbound-DMA self-check PASS (16/16 words)", r), UVM_LOW)
+            else
+                total_errors += errors;
+        end
+
+        if (total_errors == 0)
+            `uvm_info("COSIM_XRC", "=== inbound-DMA self-check PASS (all RC) ===", UVM_LOW)
+        else
+            `uvm_error("COSIM_XRC", $sformatf(
+                "=== inbound-DMA self-check FAIL (%0d errors) ===", total_errors))
     endtask
 
     function void report_phase(uvm_phase phase);

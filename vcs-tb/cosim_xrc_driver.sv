@@ -422,6 +422,25 @@ class cosim_xrc_driver extends pcie_tl_rc_driver;
                     payload[i*4 + b] = d[i][(b*8) +: 8];
     endfunction
 
+    // -----------------------------------------------------------------------
+    // Test-only inbound-DMA hooks (cosim_xrc_test +INBOUND_DMA_TEST self-check).
+    // Build a DUT-initiated inbound MWr with the production MWr builder and run
+    // it through the REAL service path (service_inbound_mem_write -> pack ->
+    // bridge_vcs_dma_write_rc), then read this RC's QEMU host memory straight
+    // back via the read DPI. No CplD is emitted, so there is no dependency on a
+    // DUT/EP consuming the RC channel.
+    // -----------------------------------------------------------------------
+    task test_inbound_mwr(input longint unsigned addr,
+                          input int unsigned d[16], input int nbytes);
+        pcie_tl_tlp t = build_mmio_tlp(BV_TLP_MWR, addr, d, nbytes, 0);
+        service_inbound_mem_write(t);
+    endtask
+
+    function int test_read_host(input longint unsigned addr, input int nbytes,
+                                output int unsigned d[16]);
+        return bridge_vcs_dma_read_rc(rc_index, addr, d, nbytes);
+    endfunction
+
     virtual function void report_phase(uvm_phase phase);
         super.report_phase(phase);
         `uvm_info(get_name(), $sformatf(
