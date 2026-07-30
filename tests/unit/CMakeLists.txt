@@ -30,3 +30,7 @@ set_tests_properties(test_transport_tcp PROPERTIES TIMEOUT 30)
 add_executable(test_cosim_topology test_cosim_topology.c)
 target_link_libraries(test_cosim_topology cosim_bridge_common)
 add_test(NAME test_cosim_topology COMMAND test_cosim_topology)
+
+add_executable(test_cosim_mmio_be test_cosim_mmio_be.c)
+target_include_directories(test_cosim_mmio_be PRIVATE ${CMAKE_SOURCE_DIR}/qemu-plugin)
+add_test(NAME test_cosim_mmio_be COMMAND test_cosim_mmio_be)

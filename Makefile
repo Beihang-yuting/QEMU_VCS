@@ -98,6 +98,7 @@ qemu-device:
 	@[ -f "$(QEMU_BUILD)/build.ninja" ] || { echo "[错误] 无 qemu build: $(QEMU_BUILD)（先 ./setup.sh 建 QEMU）"; exit 1; }
 	@cp "$(PROJECT_DIR)/qemu-plugin/cosim_pcie_rc.c" "$(QEMU_SRC_DIR)/hw/net/cosim_pcie_rc.c"
 	@cp "$(PROJECT_DIR)/qemu-plugin/cosim_pcie_rc.h" "$(QEMU_SRC_DIR)/include/hw/net/cosim_pcie_rc.h"
+	@cp "$(PROJECT_DIR)/qemu-plugin/cosim_mmio_be.h" "$(QEMU_SRC_DIR)/include/hw/net/cosim_mmio_be.h"
 	@cp "$(PROJECT_DIR)/bridge/common/cosim_topology.h" "$(QEMU_SRC_DIR)/include/hw/net/cosim_topology.h"
 	ninja -C $(QEMU_BUILD) qemu-system-x86_64
 	@echo "[BUILD] $(QEMU_BUILD)/qemu-system-x86_64"

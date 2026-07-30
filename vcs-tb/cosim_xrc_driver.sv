@@ -99,9 +99,12 @@ class cosim_xrc_driver extends pcie_tl_rc_driver;
     int unsigned     dpi_data[16];
     int              dpi_len;
     int              dpi_tag;
+    byte unsigned    dpi_first_be;
+    byte unsigned    dpi_last_be;
 
     // ---- Coordination ----
     bit   bridge_ready = 0;
+    bit   be_matrix_pending = 0;
     event shutdown_event;
     int   polling_interval_ns = 10;
 
@@ -338,6 +341,8 @@ class cosim_xrc_driver extends pcie_tl_rc_driver;
         if (self_init_bridge_en && !bridge_ready)
             self_init_bridge();
         cosim_active = 1;                 // rx_loop 切到 forward_to_qemu
+        if ($test$plusargs("BE_MATRIX_SELFTEST"))
+            be_matrix_pending = 1;
         request_loop(phase);              // QEMU poll → DUT, 阻塞直到 shutdown
 
         bridge_vcs_cleanup_ex_rc(rc_index);
@@ -583,6 +588,282 @@ class cosim_xrc_driver extends pcie_tl_rc_driver;
         return ctrl[16];                            // PASID Enable = Control bit0
     endfunction
 
+    // Return whether one byte of a memory request is enabled by its PCIe byte
+    // enables.  The payload remains DWORD-aligned; only the first/last DWORD
+    // can be sparse, while all middle DWORDs are fully enabled.
+    protected function bit dma_byte_enabled(input int byte_index,
+                                            input int total_bytes,
+                                            input bit [3:0] first_be,
+                                            input bit [3:0] last_be);
+        int total_dw;
+        int dw;
+        int lane;
+        total_dw = (total_bytes + 3) / 4;
+        dw       = byte_index / 4;
+        lane     = byte_index % 4;
+        if (total_dw <= 1)
+            return first_be[lane];
+        if (dw == 0)
+            return first_be[lane];
+        if (dw == total_dw - 1)
+            return last_be[lane];
+        return 1'b1;
+    endfunction
+
+    // A DPI DMA transfer holds at most 64 bytes.  Preserve protocol ordering
+    // and requester attribution while allowing a PCIe request to be serviced
+    // as a sequence of bounded transfers.
+    protected task dma_read_chunk(input bit translated, input bit [15:0] rid,
+                                  input longint unsigned addr, input int nbytes,
+                                  output int unsigned data[16], output int rc);
+        if (translated)
+            rc = bridge_vcs_dma_read_rc_rid_at(rc_index, int'(rid), addr, data, nbytes);
+        else
+            rc = bridge_vcs_dma_read_rc_rid(rc_index, int'(rid), addr, data, nbytes);
+    endtask
+
+    protected task dma_write_chunk(input bit translated, input bit [15:0] rid,
+                                   input longint unsigned addr, input int unsigned data[16],
+                                   input int nbytes, output int rc);
+        if (translated)
+            rc = bridge_vcs_dma_write_rc_rid_at(rc_index, int'(rid), addr, data, nbytes);
+        else
+            rc = bridge_vcs_dma_write_rc_rid(rc_index, int'(rid), addr, data, nbytes);
+    endtask
+
+    // Write only enabled bytes.  This deliberately coalesces consecutive bytes
+    // (including all full middle DWORDs) but never writes a disabled byte.
+    protected task dma_write_masked(input pcie_tl_mem_tlp mem,
+                                    input bit translated, output int rc);
+        int total_bytes;
+        int pos;
+        int run_start;
+        int run_len;
+        int chunk_rc;
+        int unsigned data[16];
+        total_bytes = (mem.length == 0) ? 4096 : int'(mem.length) * 4;
+        pos = 0;
+        rc = 0;
+        while (pos < total_bytes) begin
+            if (!dma_byte_enabled(pos, total_bytes, mem.first_be, mem.last_be)) begin
+                pos++;
+                continue;
+            end
+            run_start = pos;
+            while (pos < total_bytes &&
+                   dma_byte_enabled(pos, total_bytes, mem.first_be, mem.last_be) &&
+                   (pos - run_start) < 64)
+                pos++;
+            run_len = pos - run_start;
+            for (int i = 0; i < 16; i++) data[i] = 0;
+            for (int i = 0; i < run_len; i++)
+                if (run_start + i < mem.payload.size())
+                    data[i/4][8*(i%4) +: 8] = mem.payload[run_start + i];
+            dma_write_chunk(translated, mem.requester_id, mem.addr + run_start,
+                            data, run_len, chunk_rc);
+            if (chunk_rc != 0 && rc == 0) rc = chunk_rc;
+            if (chunk_rc != 0) return;
+        end
+    endtask
+
+    // Read only enabled bytes and pack them contiguously for a PCIe CplD.  The
+    // CplD lower_addr identifies the first enabled byte; padding to a DWORD is
+    // appended after the requested byte stream, never before it.
+    protected task dma_read_masked(input pcie_tl_mem_tlp mem,
+                                   input bit translated,
+                                   output bit [7:0] result[],
+                                   output int first_enabled,
+                                   output int enabled_count,
+                                   output int rc);
+        int total_bytes;
+        int pos;
+        int run_start;
+        int run_len;
+        int chunk_rc;
+        int old_size;
+        int unsigned data[16];
+        bit [7:0] expanded[];
+        total_bytes = (mem.length == 0) ? 4096 : int'(mem.length) * 4;
+        pos = 0;
+        rc = 0;
+        first_enabled = -1;
+        enabled_count = 0;
+        result = new[0];
+        while (pos < total_bytes) begin
+            if (!dma_byte_enabled(pos, total_bytes, mem.first_be, mem.last_be)) begin
+                pos++;
+                continue;
+            end
+            if (first_enabled < 0) first_enabled = pos;
+            run_start = pos;
+            while (pos < total_bytes &&
+                   dma_byte_enabled(pos, total_bytes, mem.first_be, mem.last_be) &&
+                   (pos - run_start) < 64)
+                pos++;
+            run_len = pos - run_start;
+            for (int i = 0; i < 16; i++) data[i] = 0;
+            dma_read_chunk(translated, mem.requester_id, mem.addr + run_start,
+                           run_len, data, chunk_rc);
+            if (chunk_rc != 0) begin
+                rc = chunk_rc;
+                return;
+            end
+            old_size = result.size();
+            expanded = new[old_size + run_len];
+            for (int i = 0; i < old_size; i++) expanded[i] = result[i];
+            for (int i = 0; i < run_len; i++)
+                expanded[old_size + i] = data[i/4][8*(i%4) +: 8];
+            result = expanded;
+            enabled_count += run_len;
+        end
+    endtask
+
+    // Real QEMU/VCS regression: exercise every legal PCIe memory-request
+    // byte-enable shape through the production DMA helpers.  Disabled guest
+    // bytes start with a sentinel and must remain unchanged after an MWr; an
+    // MRd must return exactly the enabled source bytes in PCIe CplD order.
+    // All 15 non-zero one-DW FBE values + all 15x15 non-zero multi-DW
+    // FBE/LBE values = 240.  A zero BE enables no byte and is deliberately
+    // excluded: it is not a useful PCIe memory request shape.
+    protected task run_be_matrix_selfcheck();
+        localparam longint unsigned BASE_GPA = 64'h0000_0000_0F20_0000;
+        localparam int SINGLE_BE_CASES = 15;
+        localparam int MULTI_BE_CASES  = 15 * 15;
+        localparam int TOTAL_BE_CASES  = SINGLE_BE_CASES + MULTI_BE_CASES;
+        bit [3:0] single_be[SINGLE_BE_CASES] = '{4'h1, 4'h2, 4'h3, 4'h4,
+                                                 4'h5, 4'h6, 4'h7, 4'h8,
+                                                 4'h9, 4'hA, 4'hB, 4'hC,
+                                                 4'hD, 4'hE, 4'hF};
+        int errors = 0;
+        int cases = 0;
+        int unsigned init_words[16];
+        int unsigned got_words[16];
+        int odd_effective_cases[9];
+
+        for (int i = 0; i < 9; i++) odd_effective_cases[i] = 0;
+        for (int shape = 0; shape < TOTAL_BE_CASES; shape++) begin
+            pcie_tl_mem_tlp req = pcie_tl_mem_tlp::type_id::create("be_matrix_req");
+            bit [3:0] fbe;
+            bit [3:0] lbe;
+            int nbytes;
+            int first_enabled;
+            int enabled_count;
+            int write_rc;
+            int read_rc;
+            int setup_rc;
+            bit [7:0] returned_bytes[];
+
+            if (shape < SINGLE_BE_CASES) begin
+                fbe = single_be[shape];
+                lbe = 4'h0;
+                nbytes = 4;
+                req.length = 1;
+            end else begin
+                int pair = shape - SINGLE_BE_CASES;
+                fbe = pair / 15 + 1;
+                lbe = pair % 15 + 1;
+                nbytes = 8;
+                req.length = 2;
+            end
+            req.kind         = TLP_MEM_WR;
+            req.addr         = BASE_GPA + (shape * 16);
+            req.requester_id = 16'h0000;
+            req.first_be     = fbe;
+            req.last_be      = lbe;
+            req.at           = 2'b00;
+            req.payload      = new[nbytes];
+            for (int i = 0; i < nbytes; i++) begin
+                init_words[i/4][8*(i%4) +: 8] = 8'hA0 + i;
+                req.payload[i] = 8'h10 + ((shape * 13 + i) % 16'h70);
+            end
+            for (int i = (nbytes + 3) / 4; i < 16; i++) init_words[i] = 0;
+            // This is a bridge-level byte-enable test, not an AT=00/IOMMU
+            // policy test.  Use the existing translated DMA path so the test
+            // can address its scratch GPA without changing real DUT isolation.
+            dma_write_chunk(1, req.requester_id, req.addr, init_words, nbytes, setup_rc);
+            if (setup_rc != 0) begin
+                `uvm_error(get_name(), $sformatf("BE matrix setup DMA failed case=%0d rc=%0d", shape, setup_rc))
+                errors++;
+                continue;
+            end
+
+            dma_write_masked(req, 1, write_rc);
+            if (write_rc != 0) begin
+                `uvm_error(get_name(), $sformatf("BE matrix MWr DMA failed case=%0d fbe=%0h lbe=%0h rc=%0d", shape, fbe, lbe, write_rc))
+                errors++;
+                continue;
+            end
+            for (int i = 0; i < 16; i++) got_words[i] = 0;
+            dma_read_chunk(1, req.requester_id, req.addr, nbytes, got_words, read_rc);
+            if (read_rc != 0) begin
+                `uvm_error(get_name(), $sformatf("BE matrix MWr read-back failed case=%0d rc=%0d", shape, read_rc))
+                errors++;
+                continue;
+            end
+            for (int i = 0; i < nbytes; i++) begin
+                bit [7:0] got = got_words[i/4][8*(i%4) +: 8];
+                bit [7:0] exp = dma_byte_enabled(i, nbytes, fbe, lbe)
+                             ? req.payload[i] : (8'hA0 + i);
+                if (got !== exp) begin
+                    `uvm_error(get_name(), $sformatf("BE matrix MWr mismatch case=%0d byte=%0d fbe=%0h lbe=%0h got=%02h exp=%02h", shape, i, fbe, lbe, got, exp))
+                    errors++;
+                end
+            end
+
+            req.kind = TLP_MEM_RD;
+            dma_read_masked(req, 1, returned_bytes, first_enabled, enabled_count, read_rc);
+            if (read_rc != 0) begin
+                `uvm_error(get_name(), $sformatf("BE matrix MRd DMA failed case=%0d rc=%0d", shape, read_rc))
+                errors++;
+                continue;
+            end
+            if (returned_bytes.size() != enabled_count || first_enabled < 0) begin
+                `uvm_error(get_name(), $sformatf("BE matrix MRd shape failed case=%0d returned=%0d enabled=%0d first=%0d", shape, returned_bytes.size(), enabled_count, first_enabled))
+                errors++;
+            end else begin
+                int out = 0;
+                for (int i = 0; i < nbytes; i++) begin
+                    if (dma_byte_enabled(i, nbytes, fbe, lbe)) begin
+                        bit [7:0] exp = req.payload[i];
+                        if (returned_bytes[out] !== exp) begin
+                            `uvm_error(get_name(), $sformatf("BE matrix MRd mismatch case=%0d data=%0d fbe=%0h lbe=%0h got=%02h exp=%02h", shape, out, fbe, lbe, returned_bytes[out], exp))
+                            errors++;
+                        end
+                        out++;
+                    end
+                end
+            end
+            if ((enabled_count & 1) != 0 && enabled_count < 9)
+                odd_effective_cases[enabled_count]++;
+            cases++;
+        end
+        if (odd_effective_cases[1] != 4 || odd_effective_cases[3] != 52 ||
+            odd_effective_cases[5] != 56 || odd_effective_cases[7] != 8) begin
+            `uvm_error(get_name(), $sformatf(
+                "BE matrix odd-byte coverage failed: 1B=%0d 3B=%0d 5B=%0d 7B=%0d",
+                odd_effective_cases[1], odd_effective_cases[3],
+                odd_effective_cases[5], odd_effective_cases[7]))
+            errors++;
+        end
+        if (errors == 0)
+            `uvm_info(get_name(), $sformatf(
+                "=== BE_MATRIX PASS cases=%0d (single=%0d multi=%0d; odd-effective: 1B=%0d 3B=%0d 5B=%0d 7B=%0d) ===",
+                cases, SINGLE_BE_CASES, MULTI_BE_CASES, odd_effective_cases[1],
+                odd_effective_cases[3], odd_effective_cases[5], odd_effective_cases[7]), UVM_NONE)
+        else
+            `uvm_error(get_name(), $sformatf("=== BE_MATRIX FAIL cases=%0d errors=%0d ===", cases, errors))
+    endtask
+
+    // QEMU realizes and probes the PF synchronously.  Run the DMA matrix only
+    // after those config completions have been returned, otherwise its first
+    // DMA request would contend with an outstanding config transaction.
+    protected task maybe_run_be_matrix_selfcheck();
+        if (be_matrix_pending && total_tlp_count >= 64) begin
+            be_matrix_pending = 0;
+            run_be_matrix_selfcheck();
+        end
+    endtask
+
     // -----------------------------------------------------------------------
     // handle_dut_ats_tlp: bridge a DUT-initiated ATS TLP (a real RTL DUT emits
     // these on its RQ channel; the monitor decodes them into pcie_tl_mem_tlp
@@ -599,7 +880,9 @@ class cosim_xrc_driver extends pcie_tl_rc_driver;
         bit [15:0]       rid = mem.requester_id;
         longint unsigned pa;
         int              trr, wr;
-        int unsigned     dbuf[16];
+        bit [7:0]        dma_read_data[];
+        int              first_enabled;
+        int              enabled_count;
         // ATS must be enabled in the requester's ATS Control Register before it
         // may issue Translation Requests (AT=01) or use translated addresses
         // (AT=10). Untranslated (AT=00) DMA is ungated.
@@ -651,7 +934,7 @@ class cosim_xrc_driver extends pcie_tl_rc_driver;
             // AT=00 (untranslated) or AT=10 (translated, pre-authorized) memory
             // access. Translated ops use the *_at DPI (RC bypasses the window).
             bit translated = (mem.at == 2'b10);
-            int nbytes = mem.length * 4;
+            int nbytes = (mem.length == 0) ? 4096 : mem.length * 4;
             // Gate: AT=10 requires ATS enabled (a real RC rejects a Translated
             // request from a function whose ATS Control.Enable=0 as UR).
             if (translated && !ats_en) begin
@@ -661,16 +944,17 @@ class cosim_xrc_driver extends pcie_tl_rc_driver;
                 return;
             end
             if (nbytes <= 0) nbytes = 4;
-            for (int i = 0; i < 16; i++) dbuf[i] = 0;
             if (mem.kind == TLP_MEM_RD) begin
-                // DUT read -> read guest memory, return a CplD with the data.
-                wr = translated
-                   ? bridge_vcs_dma_read_rc_rid_at(rc_index, int'(rid), mem.addr, dbuf, nbytes)
-                   : bridge_vcs_dma_read_rc_rid   (rc_index, int'(rid), mem.addr, dbuf, nbytes);
+                // DUT read -> fetch only requested bytes and return a PCIe CplD
+                // whose byte_count/lower_addr describe the sparse request.
+                dma_read_masked(mem, translated, dma_read_data, first_enabled,
+                                enabled_count, wr);
                 begin
                     pcie_tl_cpl_tlp cpl = pcie_tl_cpl_tlp::type_id::create("dut_rd_cpl");
-                    cpl.kind         = TLP_CPLD;
-                    cpl.fmt          = FMT_3DW_WITH_DATA;
+                    int payload_bytes;
+                    longint unsigned first_addr;
+                    cpl.kind         = (wr == 0) ? TLP_CPLD : pcie_tl_pkg::TLP_CPL;
+                    cpl.fmt          = (wr == 0) ? FMT_3DW_WITH_DATA : FMT_3DW_NO_DATA;
                     cpl.type_f       = TLP_TYPE_CPL;
                     cpl.attr         = mem.attr;
                     cpl.at           = mem.at;
@@ -679,29 +963,28 @@ class cosim_xrc_driver extends pcie_tl_rc_driver;
                     cpl.tag          = mem.tag;
                     cpl.completer_id = 16'h0000;
                     cpl.cpl_status   = (wr == 0) ? CPL_STATUS_SC : CPL_STATUS_UR;
-                    cpl.length       = mem.length;
-                    cpl.byte_count   = nbytes[11:0];
-                    cpl.payload      = new[nbytes];
-                    for (int b = 0; b < nbytes; b++)
-                        cpl.payload[b] = dbuf[b/4][8*(b%4) +: 8];
+                    payload_bytes    = (enabled_count + 3) & ~3;
+                    cpl.length       = (wr == 0) ? (payload_bytes / 4) : 0;
+                    cpl.byte_count   = (wr == 0) ? enabled_count[11:0] : 0;
+                    first_addr       = mem.addr + ((first_enabled < 0) ? 0 : first_enabled);
+                    cpl.lower_addr   = first_addr[6:0];
+                    cpl.payload      = new[(wr == 0) ? payload_bytes : 0];
+                    for (int b = 0; b < dma_read_data.size(); b++)
+                        cpl.payload[b] = dma_read_data[b];
                     send_tlp(cpl);
                     `uvm_info(get_name(), $sformatf(
-                        "VIP: DUT %s read bdf=0x%04h addr=0x%0h len=%0d ret=%0d -> CplD data[0]=0x%08h",
+                        "VIP: DUT %s read bdf=0x%04h addr=0x%0h len=%0d enabled=%0d ret=%0d",
                         translated?"translated(AT=10)":"untranslated(AT=00)",
-                        rid, mem.addr, nbytes, wr, dbuf[0]), UVM_LOW)
+                        rid, mem.addr, nbytes, enabled_count, wr), UVM_LOW)
                 end
             end else begin
-                // DUT write -> pack payload, write guest memory.
-                for (int i = 0; i < 16 && (i*4) < mem.payload.size(); i++)
-                    dbuf[i] = {mem.payload[i*4+3], mem.payload[i*4+2],
-                               mem.payload[i*4+1], mem.payload[i*4+0]};
-                wr = translated
-                   ? bridge_vcs_dma_write_rc_rid_at(rc_index, int'(rid), mem.addr, dbuf, nbytes)
-                   : bridge_vcs_dma_write_rc_rid   (rc_index, int'(rid), mem.addr, dbuf, nbytes);
+                // DUT write -> DMA only enabled bytes; leave disabled bytes in
+                // guest memory untouched, including sparse 0x5/0xA BE masks.
+                dma_write_masked(mem, translated, wr);
                 `uvm_info(get_name(), $sformatf(
-                    "VIP: DUT %s write bdf=0x%04h addr=0x%0h len=%0d ret=%0d",
+                    "VIP: DUT %s write bdf=0x%04h addr=0x%0h len=%0d fbe=0x%0h lbe=0x%0h ret=%0d",
                     translated?"translated(AT=10)":"untranslated(AT=00)",
-                    rid, mem.addr, nbytes, wr), UVM_LOW)
+                    rid, mem.addr, nbytes, mem.first_be, mem.last_be, wr), UVM_LOW)
             end
         end
     endtask
@@ -721,6 +1004,11 @@ class cosim_xrc_driver extends pcie_tl_rc_driver;
                 break;
             end
             if (ret > 0) begin
+                // No QEMU request is outstanding on the control channel.  This
+                // is the safe point for a synchronous DMA self-test: running it
+                // while QEMU is blocked in a config read would deadlock both
+                // transactions on the same transport.
+                maybe_run_be_matrix_selfcheck();
                 #(polling_interval_ns * 1ns);
                 continue;
             end
@@ -730,6 +1018,8 @@ class cosim_xrc_driver extends pcie_tl_rc_driver;
             dpi_addr = bridge_vcs_get_poll_addr_rc(rc_index);
             dpi_len  = bridge_vcs_get_poll_len_rc(rc_index);
             dpi_tag  = bridge_vcs_get_poll_tag_rc(rc_index);
+            dpi_first_be = bridge_vcs_get_poll_first_be_rc(rc_index);
+            dpi_last_be  = bridge_vcs_get_poll_last_be_rc(rc_index);
             for (int i = 0; i < 16; i++)
                 dpi_data[i] = bridge_vcs_get_poll_data_rc(rc_index, i);
 
@@ -845,7 +1135,8 @@ class cosim_xrc_driver extends pcie_tl_rc_driver;
             end
 
             // ---- MMIO to DUT: build a VIP TLP, send through the pipeline ----
-            vip_tlp = build_mmio_tlp(dpi_type, dpi_addr, dpi_data, dpi_len, dpi_tag);
+            vip_tlp = build_mmio_tlp(dpi_type, dpi_addr, dpi_data, dpi_len, dpi_tag,
+                                     dpi_first_be[3:0], dpi_last_be[3:0]);
             if (vip_tlp == null) begin
                 unknown_type_count++;
                 `uvm_warning(get_name(),
@@ -933,15 +1224,17 @@ class cosim_xrc_driver extends pcie_tl_rc_driver;
         vip_tag_to_qemu_tag.delete(vip_tag_int);
         qemu_tag_to_vip_tag.delete(qemu_tag[9:0]);
 
-        // First dword of payload, PCIe big-endian -> little-endian word for QEMU
-        if (cpl.payload.size() >= 4)
-            rdata = {cpl.payload[0], cpl.payload[1], cpl.payload[2], cpl.payload[3]};
-        else
-            for (int i = 0; i < cpl.payload.size(); i++)
-                rdata[((3-i)*8) +: 8] = cpl.payload[i];
-
         for (int i = 0; i < 16; i++) bridge_vcs_set_cpl_data_rc(rc_index, i, 0);
-        bridge_vcs_set_cpl_data_rc(rc_index, 0, rdata);
+        // Every DWORD is converted from VIP payload order to the little-endian
+        // host word expected by the bridge.  QEMU may now issue an unaligned
+        // 8B MMIO read (three request DWORDs), so returning only payload[0:3]
+        // would silently truncate the high bytes.
+        for (int dw = 0; dw < 16 && dw * 4 < cpl.payload.size(); dw++) begin
+            rdata = 0;
+            for (int b = 0; b < 4 && dw * 4 + b < cpl.payload.size(); b++)
+                rdata[((3-b)*8) +: 8] = cpl.payload[dw * 4 + b];
+            bridge_vcs_set_cpl_data_rc(rc_index, dw, rdata);
+        end
         if (bridge_vcs_send_cpl_scalar_rc(rc_index, qemu_tag, 1) != 0)
             `uvm_error(get_name(),
                 $sformatf("RC%0d send_cpl failed qemu_tag=0x%03h", rc_index, qemu_tag))
@@ -961,7 +1254,9 @@ class cosim_xrc_driver extends pcie_tl_rc_driver;
         input longint unsigned addr,
         input int unsigned     d[16],
         input int              len,
-        input int              tag);
+        input int              tag,
+        input bit [3:0]        first_be,
+        input bit [3:0]        last_be);
 
         pcie_tl_mem_tlp m;
         int payload_bytes;
@@ -974,8 +1269,8 @@ class cosim_xrc_driver extends pcie_tl_rc_driver;
                 m.is_64bit = (addr[63:32] != 0);
                 m.fmt      = m.is_64bit ? FMT_4DW_WITH_DATA : FMT_3DW_WITH_DATA;
                 m.type_f   = TLP_TYPE_MEM_RD;   // MEM_WR shares encoding
-                m.first_be = 4'hF;
-                m.last_be  = (len > 4) ? 4'hF : 4'h0;
+                m.first_be = first_be;
+                m.last_be  = last_be;
                 payload_bytes = (len > 0) ? len : 4;
                 m.length   = (payload_bytes + 3) / 4;
                 unpack_words_to_bytes(d, payload_bytes, m.payload);
@@ -988,8 +1283,8 @@ class cosim_xrc_driver extends pcie_tl_rc_driver;
                 m.is_64bit = (addr[63:32] != 0);
                 m.fmt      = m.is_64bit ? FMT_4DW_NO_DATA : FMT_3DW_NO_DATA;
                 m.type_f   = TLP_TYPE_MEM_RD;
-                m.first_be = 4'hF;
-                m.last_be  = (len > 4) ? 4'hF : 4'h0;
+                m.first_be = first_be;
+                m.last_be  = last_be;
                 m.length   = (len > 0) ? (len + 3) / 4 : 1;
                 m.tag      = 10'(tag[9:0]);
                 return m;
