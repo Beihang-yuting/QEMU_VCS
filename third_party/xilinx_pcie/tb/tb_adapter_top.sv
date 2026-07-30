@@ -39,6 +39,9 @@ module tb_adapter_top;
   // cfg_interrupt sideband (PG213) for the interrupt agent + SVA checker
   xilinx_pcie_cfg_if cfg_bus(.clk(clk), .rst_n(rst_n));
 
+  // cfg_interrupt sideband (PG213) for the interrupt agent + SVA checker
+  xilinx_pcie_cfg_if cfg_bus(.clk(clk), .rst_n(rst_n));
+
   initial begin
     `XILINX_ADAPTER_WIRE(rq, RQ, rq_bus)
     `XILINX_ADAPTER_WIRE(rc, RC, rc_bus)
