@@ -6,6 +6,8 @@
 #   --guest ubuntu|debian   Guest 类型（默认 ubuntu）
 #   --output <path>         输出 zip 路径（默认 cosim-offline-<date>.zip）
 #   --skip-rootfs           跳过 rootfs 构建（已有镜像时）
+#   --custom-driver <path>  DPU host-driver-net 源码包（可选）
+#   --compat-runtime-deb <path>  DPU 编译兼容 libc6 .deb（可选）
 #
 # 产物: 一个 zip 文件，包含内网 setup.sh 所需的全部素材
 # 内网使用: ./setup.sh 交互菜单选择"导入离线包"
@@ -31,6 +33,8 @@ GUEST_TYPE="ubuntu"
 SKIP_ROOTFS=false
 OUTPUT=""
 KVER="6.8.0-107-generic"
+CUSTOM_DRIVER_ARCHIVE=""
+COMPAT_RUNTIME_DEB=""
 QEMU_VERSION="v9.2.0"
 
 while [ $# -gt 0 ]; do
@@ -38,8 +42,10 @@ while [ $# -gt 0 ]; do
         --guest) GUEST_TYPE="$2"; shift 2 ;;
         --output) OUTPUT="$2"; shift 2 ;;
         --skip-rootfs) SKIP_ROOTFS=true; shift ;;
+        --custom-driver) CUSTOM_DRIVER_ARCHIVE="$2"; shift 2 ;;
+        --compat-runtime-deb) COMPAT_RUNTIME_DEB="$2"; shift 2 ;;
         --help|-h)
-            echo "用法: $0 [--guest ubuntu|debian] [--output path.zip] [--skip-rootfs]"
+            echo "用法: $0 [--guest ubuntu|debian] [--output path.zip] [--custom-driver path.tar.gz] [--compat-runtime-deb libc6.deb] [--skip-rootfs]"
             exit 0 ;;
         *) fail "未知参数: $1"; exit 1 ;;
     esac
@@ -56,6 +62,14 @@ echo ""
 info "Guest 类型: ${GUEST_TYPE}"
 info "输出路径:   ${OUTPUT}"
 echo ""
+if [ -n "$CUSTOM_DRIVER_ARCHIVE" ]; then
+    [ -f "$CUSTOM_DRIVER_ARCHIVE" ] || { fail "DPU 驱动源码包不存在: $CUSTOM_DRIVER_ARCHIVE"; exit 1; }
+    info "DPU 驱动:   ${CUSTOM_DRIVER_ARCHIVE}"
+fi
+if [ -n "$COMPAT_RUNTIME_DEB" ]; then
+    [ -f "$COMPAT_RUNTIME_DEB" ] || { fail "DPU 兼容运行库不存在: $COMPAT_RUNTIME_DEB"; exit 1; }
+    info "兼容运行库: ${COMPAT_RUNTIME_DEB}"
+fi
 
 # ---- 检查依赖 ----
 for cmd in curl zip; do
@@ -67,7 +81,7 @@ done
 
 # ---- 清理 staging 目录 ----
 rm -rf "$STAGING"
-mkdir -p "$STAGING"/{qemu-src,guest/debian,guest/ubuntu,kheaders}
+mkdir -p "$STAGING"/{qemu-src,guest/debian,guest/ubuntu,kheaders,custom-driver}
 
 PASS=0
 FAIL_COUNT=0
@@ -285,14 +299,41 @@ fi
 PASS=$((PASS + 1))
 
 # ============================================================
+# [6/6] DPU 自定义驱动素材（可选）
+# ============================================================
+CUSTOM_ARCHIVE_NAME=""
+COMPAT_RUNTIME_NAME=""
+if [ -n "$CUSTOM_DRIVER_ARCHIVE" ]; then
+    echo ""
+    echo -e "${BOLD}[6/6] DPU 自定义驱动素材${NC}"
+    if ! "${PROJECT_DIR}/scripts/build_dpu_driver_bundle.sh" \
+            --validate-only --archive "$CUSTOM_DRIVER_ARCHIVE"; then
+        fail "DPU 驱动源码包结构校验失败"
+        FAIL_COUNT=$((FAIL_COUNT + 1))
+    else
+        CUSTOM_ARCHIVE_NAME=$(basename "$CUSTOM_DRIVER_ARCHIVE")
+        cp "$CUSTOM_DRIVER_ARCHIVE" "${STAGING}/custom-driver/${CUSTOM_ARCHIVE_NAME}"
+        if [ -n "$COMPAT_RUNTIME_DEB" ]; then
+            COMPAT_RUNTIME_NAME=$(basename "$COMPAT_RUNTIME_DEB")
+            cp "$COMPAT_RUNTIME_DEB" "${STAGING}/custom-driver/${COMPAT_RUNTIME_NAME}"
+        fi
+        ok "DPU 自定义驱动素材已加入离线包"
+        PASS=$((PASS + 1))
+    fi
+fi
+
+# ============================================================
 # 写入元数据
 # ============================================================
 cat > "${STAGING}/offline-meta.env" << EOF
 # CoSim 离线包元数据（自动生成，请勿修改）
-OFFLINE_VERSION=1
+OFFLINE_VERSION=2
 OFFLINE_DATE=$(date +%Y-%m-%d)
 OFFLINE_GUEST_TYPE=${GUEST_TYPE}
 OFFLINE_KVER=${KVER}
+OFFLINE_HAS_CUSTOM_DPU=$([ -n "${CUSTOM_ARCHIVE_NAME}" ] && echo true || echo false)
+OFFLINE_CUSTOM_DPU_ARCHIVE=${CUSTOM_ARCHIVE_NAME}
+OFFLINE_CUSTOM_DPU_RUNTIME=${COMPAT_RUNTIME_NAME}
 OFFLINE_QEMU_VERSION=${QEMU_VERSION}
 OFFLINE_HAS_DEBIAN_ROOTFS=$([ -f "${STAGING}/guest/debian/rootfs.ext4" ] && echo true || echo false)
 OFFLINE_HAS_UBUNTU_ROOTFS=$([ -f "${STAGING}/guest/ubuntu/rootfs.ext4" ] && echo true || echo false)

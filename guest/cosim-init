@@ -154,6 +154,11 @@ if [ -f /lib/modules/cosim_nic.ko ]; then
     cp /lib/modules/cosim_nic.ko /sysroot/lib/modules/ 2>/dev/null
     echo "[cosim-init] Installed cosim_nic.ko to rootfs"
 fi
+if [ -d /lib/modules/cosim-drivers ]; then
+    mkdir -p /sysroot/lib/modules/cosim-drivers
+    cp -a /lib/modules/cosim-drivers/. /sysroot/lib/modules/cosim-drivers/ 2>/dev/null
+    echo "[cosim-init] Installed custom driver bundle to rootfs"
+fi
 if [ -f /etc/cosim/driver.conf ]; then
     mkdir -p /sysroot/etc/cosim
     cp /etc/cosim/driver.conf /sysroot/etc/cosim/ 2>/dev/null
@@ -162,6 +167,16 @@ if [ -f /etc/local.d/cosim-driver.start ]; then
     mkdir -p /sysroot/etc/local.d
     cp /etc/local.d/cosim-driver.start /sysroot/etc/local.d/ 2>/dev/null
     chmod +x /sysroot/etc/local.d/cosim-driver.start 2>/dev/null
+fi
+if [ -f /etc/cosim/load-custom-driver.sh ]; then
+    mkdir -p /sysroot/etc/cosim
+    cp /etc/cosim/load-custom-driver.sh /sysroot/etc/cosim/ 2>/dev/null
+fi
+if [ -f /etc/systemd/system/cosim-driver.service ]; then
+    mkdir -p /sysroot/etc/systemd/system/multi-user.target.wants
+    cp /etc/systemd/system/cosim-driver.service /sysroot/etc/systemd/system/ 2>/dev/null
+    ln -sf ../cosim-driver.service \
+        /sysroot/etc/systemd/system/multi-user.target.wants/cosim-driver.service
 fi
 
 # 自动探测 init 路径（Ubuntu/Debian=/lib/systemd/systemd 或 /sbin/init）

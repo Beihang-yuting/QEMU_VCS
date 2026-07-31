@@ -103,13 +103,19 @@ _fix_broken_symlinks() {
     return 0
 }
 
+_find_exact_headers() {
+    local headers_root="$1"
+    find "$headers_root" -maxdepth 5 -type f \
+        -path "*/usr/src/linux-headers-${KVER}/Makefile" -printf "%h\\n" | head -1
+}
+
 # ---- 下载并提取 kernel headers ----
 download_headers() {
     local headers_dir="${PROJECT_DIR}/build/kheaders-${KVER}"
 
     # 检查缓存：deb 解压后在 usr/src/linux-headers-*/
     local cached_root=""
-    cached_root=$(find "$headers_dir" -maxdepth 4 -type d -name "linux-headers-${KVER}" 2>/dev/null | head -1)
+    cached_root=$(_find_exact_headers "$headers_dir" || true)
     if [ -n "$cached_root" ] && _verify_headers "$cached_root"; then
         info "Kernel headers 已缓存: ${cached_root}"
         KDIR="$cached_root"
@@ -234,10 +240,11 @@ download_headers() {
 
     # 查找 arch-specific headers 目录（如 linux-headers-6.8.0-107-generic）
     local hdr_root=""
-    hdr_root=$(find "$headers_dir" -maxdepth 4 -type d -name "linux-headers-${KVER}" 2>/dev/null | head -1)
+    hdr_root=$(_find_exact_headers "$headers_dir" || true)
     if [ -z "$hdr_root" ]; then
         # fallback: 任意 linux-headers-* 目录
-        hdr_root=$(find "$headers_dir" -maxdepth 4 -type d -name "linux-headers-*" 2>/dev/null | head -1)
+        hdr_root=$(find "$headers_dir" -maxdepth 5 -type f \
+            -path "*/usr/src/linux-headers-*/Makefile" -printf "%h\\n" | head -1 || true)
     fi
 
     if [ -n "$hdr_root" ] && [ -f "${hdr_root}/Makefile" ]; then

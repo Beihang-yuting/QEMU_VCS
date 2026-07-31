@@ -218,7 +218,14 @@ QEMU_SRC_OPT=""
 DRIVER_MODE=""
 CUSTOM_KO=""
 OFFLINE_ZIP=""
+IMPORT_ONLY=false
 UBUNTU_IMAGE_PATH=""
+OFFLINE_DATE=""
+OFFLINE_GUEST_TYPE=""
+OFFLINE_KVER=""
+OFFLINE_CUSTOM_DRIVER_DIR=""
+OFFLINE_CUSTOM_DRIVER_ARCHIVE=""
+OFFLINE_CUSTOM_DRIVER_COMPAT_RUNTIME=""
 
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -234,6 +241,8 @@ while [ $# -gt 0 ]; do
             CUSTOM_KO="$2"; shift 2 ;;
         --import)
             OFFLINE_ZIP="$2"; shift 2 ;;
+        --import-only)
+            IMPORT_ONLY=true; shift ;;
         --ubuntu-image)
             UBUNTU_IMAGE_PATH="$2"; shift 2 ;;
         --kver)
@@ -248,6 +257,53 @@ while [ $# -gt 0 ]; do
             usage ;;
     esac
 done
+
+# 仅解析白名单键，离线包的 metadata 不能作为 shell 脚本执行。
+read_offline_metadata() {
+    local metadata_file="$1"
+    local key value
+    [ -f "$metadata_file" ] || return 0
+    while IFS="=" read -r key value; do
+        case "$key" in
+            OFFLINE_DATE|OFFLINE_GUEST_TYPE|OFFLINE_KVER|OFFLINE_CUSTOM_DPU_ARCHIVE|OFFLINE_CUSTOM_DPU_RUNTIME)
+                printf -v "$key" "%s" "$value"
+                ;;
+        esac
+    done < "$metadata_file"
+}
+
+extract_offline_headers() {
+    local kver="$1"
+    local source_dir="$2"
+    local headers_dest="${PROJECT_DIR}/build/kheaders-${kver}"
+    local deb kdir extracted=false
+
+    [ -n "$kver" ] || return 0
+    if ! command -v dpkg-deb >/dev/null 2>&1; then
+        warn "未安装 dpkg-deb，无法解开离线 kernel headers"
+        return 0
+    fi
+
+    mkdir -p "$headers_dest"
+    for deb in "$source_dir"/*.deb; do
+        [ -f "$deb" ] || continue
+        if dpkg-deb -x "$deb" "$headers_dest"; then
+            extracted=true
+        else
+            warn "解开离线 kernel headers 失败: $(basename "$deb")"
+        fi
+    done
+
+    if "$extracted"; then
+        kdir=$(find "$headers_dest" -type f \
+            -path "*/usr/src/linux-headers-${kver}/Makefile" -printf "%h\\n" | head -1 || true)
+        if [ -n "$kdir" ] && [ -f "$kdir/Makefile" ]; then
+            ok "Kernel headers 已解开: build/kheaders-${kver}/"
+        else
+            warn "离线 kernel headers 未提供精确目录: linux-headers-${kver}"
+        fi
+    fi
+}
 
 # ============================================================
 # 离线包导入
@@ -294,7 +350,7 @@ import_offline() {
 
     # 读取元数据
     if [ -f "$tmpdir/offline-meta.env" ]; then
-        source "$tmpdir/offline-meta.env"
+        read_offline_metadata "$tmpdir/offline-meta.env"
         ok "离线包版本: ${OFFLINE_DATE:-unknown}"
         ok "Guest 类型:  ${OFFLINE_GUEST_TYPE:-unknown}"
         ok "内核版本:    ${OFFLINE_KVER:-unknown}"
@@ -303,6 +359,7 @@ import_offline() {
     fi
 
     local imported=0
+    local custom_dest artifact artifact_count=0
 
     # QEMU 源码
     local qemu_tar
@@ -336,7 +393,35 @@ import_offline() {
         mkdir -p "$kheaders_dest"
         cp "$tmpdir"/kheaders/*.deb "$kheaders_dest/"
         ok "Kernel headers 已导入: build/kheaders-download/"
+        extract_offline_headers "$OFFLINE_KVER" "$tmpdir/kheaders"
         imported=$((imported + 1))
+    fi
+
+    # 可选的 DPU 自定义驱动源码与兼容运行库
+    if [ -d "$tmpdir/custom-driver" ]; then
+        custom_dest="${PROJECT_DIR}/build/offline-custom-driver"
+        rm -rf "$custom_dest"
+        mkdir -p "$custom_dest"
+        while IFS= read -r -d "" artifact; do
+            cp -- "$artifact" "$custom_dest/"
+            artifact_count=$((artifact_count + 1))
+        done < <(find "$tmpdir/custom-driver" -maxdepth 1 -type f -print0)
+
+        if [ "$artifact_count" -gt 0 ]; then
+            OFFLINE_CUSTOM_DRIVER_DIR="$custom_dest"
+            OFFLINE_CUSTOM_DRIVER_ARCHIVE=$(find "$custom_dest" -maxdepth 1 -type f \
+                \( -name "*.tar.gz" -o -name "*.tgz" \) -printf "%f\\n" | sort | head -1 || true)
+            OFFLINE_CUSTOM_DRIVER_COMPAT_RUNTIME=$(find "$custom_dest" -maxdepth 1 -type f \
+                -name "libc6_*amd64.deb" -printf "%f\\n" | sort | head -1 || true)
+            if [ -n "$OFFLINE_CUSTOM_DRIVER_ARCHIVE" ]; then
+                OFFLINE_CUSTOM_DRIVER_ARCHIVE="${custom_dest}/${OFFLINE_CUSTOM_DRIVER_ARCHIVE}"
+            fi
+            if [ -n "$OFFLINE_CUSTOM_DRIVER_COMPAT_RUNTIME" ]; then
+                OFFLINE_CUSTOM_DRIVER_COMPAT_RUNTIME="${custom_dest}/${OFFLINE_CUSTOM_DRIVER_COMPAT_RUNTIME}"
+            fi
+            ok "自定义 DPU 驱动素材已导入: build/offline-custom-driver/"
+            imported=$((imported + 1))
+        fi
     fi
 
     # 预编译 cosim_nic.ko
@@ -362,6 +447,21 @@ import_offline() {
     echo ""
     info "接下来 setup.sh 将使用导入的素材进行本地编译（QEMU、Bridge 等）"
     echo ""
+}
+
+resolve_offline_custom_driver() {
+    [ "$DRIVER_MODE" = "custom" ] || return 0
+
+    if [ -z "$CUSTOM_KO" ] && [ -n "$OFFLINE_CUSTOM_DRIVER_ARCHIVE" ]; then
+        CUSTOM_KO="$OFFLINE_CUSTOM_DRIVER_ARCHIVE"
+        info "自定义驱动使用离线源码包: ${CUSTOM_KO}"
+    fi
+
+    if [ -z "${CUSTOM_DRIVER_COMPAT_RUNTIME_DEB:-}" ] && \
+            [ -n "$OFFLINE_CUSTOM_DRIVER_COMPAT_RUNTIME" ]; then
+        export CUSTOM_DRIVER_COMPAT_RUNTIME_DEB="$OFFLINE_CUSTOM_DRIVER_COMPAT_RUNTIME"
+        info "DPU 编译使用离线兼容运行库: ${CUSTOM_DRIVER_COMPAT_RUNTIME_DEB}"
+    fi
 }
 
 # ============================================================
@@ -563,8 +663,16 @@ interactive_menu() {
     ok "QEMU 源码: ${QEMU_SRC_OPT}"
 }
 
-# 命令行指定 --import 时，先导入再继续
-if [ -n "$OFFLINE_ZIP" ] && [ -z "$SETUP_MODE" ]; then
+# 命令行指定 --import 时，先导入再继续。
+if [ "$IMPORT_ONLY" = true ]; then
+    if [ -z "$OFFLINE_ZIP" ]; then
+        fail "--import-only 必须与 --import <zip> 一起使用"
+        exit 1
+    fi
+    import_offline "$OFFLINE_ZIP"
+    resolve_offline_custom_driver
+    exit 0
+elif [ -n "$OFFLINE_ZIP" ] && [ -z "$SETUP_MODE" ]; then
     # --import 但没指定 --mode，导入后进入交互菜单
     import_offline "$OFFLINE_ZIP"
 elif [ -n "$OFFLINE_ZIP" ]; then
@@ -620,8 +728,14 @@ esac
 
 if [ "${QEMU_SRC_OPT:-}" = "skip" ]; then
     NEED_QEMU=false
-    NEED_GUEST=false
     NEED_TAP_BRIDGE=false
+    if [ "$DRIVER_MODE" = "custom" ] && \
+            { [ -n "$CUSTOM_KO" ] || [ -n "$OFFLINE_CUSTOM_DRIVER_ARCHIVE" ]; }; then
+        # 允许离线包导入后只构建 Bridge 并完成驱动编译/注入。
+        NEED_GUEST=true
+    else
+        NEED_GUEST=false
+    fi
 fi
 
 # ============================================================
@@ -662,6 +776,8 @@ if [ -f "$CONFIG_FILE" ]; then
 else
     warn "未找到 config.env，使用默认值"
 fi
+
+resolve_offline_custom_driver
 
 QEMU_VERSION="${QEMU_VERSION:-v9.2.0}"
 VCS_HOME="${VCS_HOME:-}"
@@ -1615,8 +1731,53 @@ elif [ "$NEED_GUEST" = true ] && [ "$DRIVER_MODE" = "custom" ] && [ -n "$CUSTOM_
     next_step "注入自定义驱动"
 
     info "注入自定义驱动: ${CUSTOM_KO}"
-    if COSIM_NIC_KO="$CUSTOM_KO" "${PROJECT_DIR}/scripts/build_cosim_nic.sh" "${GUEST_TYPE}" --inject-only; then
-        ok "自定义驱动注入成功"
+    if [[ "$CUSTOM_KO" == *.tar.gz || "$CUSTOM_KO" == *.tgz ]]; then
+        guest_kernel=""
+        for kernel_image in "${IMAGES_DIR}/vmlinuz" "${IMAGES_DIR}/bzImage"; do
+            [ -f "$kernel_image" ] || continue
+            guest_kernel=$(file "$kernel_image" | sed -n 's/.*version \([^ ]*\).*/\1/p')
+            [ -n "$guest_kernel" ] && break
+        done
+        if [ -z "$guest_kernel" ]; then
+            warn "无法从 Guest kernel 识别版本，不能编译 DPU 驱动"
+            SKIP_COUNT=$((SKIP_COUNT + 1))
+        else
+            dpu_kdir="${CUSTOM_DRIVER_KDIR:-}"
+            if [ -z "$dpu_kdir" ]; then
+                dpu_kdir=$(find "${BUILD_DIR}/kheaders-${guest_kernel}" -type f \
+                    -path "*/usr/src/linux-headers-${guest_kernel}/Makefile" -printf "%h\\n" | head -1 || true)
+            fi
+            if [ -z "$dpu_kdir" ] || [ ! -f "$dpu_kdir/Makefile" ]; then
+                warn "缺少 ${guest_kernel} 的精确 kernel headers"
+                warn "设置 CUSTOM_DRIVER_KDIR=/path/to/linux-headers-${guest_kernel} 后重试"
+                SKIP_COUNT=$((SKIP_COUNT + 1))
+            else
+                dpu_bundle=$(mktemp -d "${BUILD_DIR}/dpu-driver-bundle.XXXXXX")
+                dpu_compat_args=()
+                if [ -n "${CUSTOM_DRIVER_COMPAT_RUNTIME_DEB:-}" ]; then
+                    dpu_compat_args=(--compat-runtime-deb "$CUSTOM_DRIVER_COMPAT_RUNTIME_DEB")
+                fi
+                if "${PROJECT_DIR}/scripts/build_dpu_driver_bundle.sh" \
+                    --use-system-bonding --archive "$CUSTOM_KO" \
+                    --kernel-build "$dpu_kdir" --output "$dpu_bundle" "${dpu_compat_args[@]}"; then
+                    if [ -f "${IMAGES_DIR}/initramfs.gz" ]; then
+                        "${PROJECT_DIR}/scripts/inject_driver_bundle.sh" \
+                            --bundle "$dpu_bundle" --initramfs "${IMAGES_DIR}/initramfs.gz"
+                    else
+                        "${PROJECT_DIR}/scripts/inject_driver_bundle.sh" \
+                            --bundle "$dpu_bundle" --rootfs "${IMAGES_DIR}/rootfs.ext4"
+                    fi
+                    ok "DPU 自定义驱动编译并注入成功（使用 Guest bonding 模块）"
+                    PASS_COUNT=$((PASS_COUNT + 1))
+                else
+                    warn "DPU 自定义驱动编译或注入失败"
+                    SKIP_COUNT=$((SKIP_COUNT + 1))
+                fi
+                rm -rf "$dpu_bundle"
+            fi
+        fi
+    elif COSIM_NIC_KO="$CUSTOM_KO" "${PROJECT_DIR}/scripts/build_cosim_nic.sh" "${GUEST_TYPE}" --inject-only; then
+        ok "单模块自定义驱动注入成功"
         PASS_COUNT=$((PASS_COUNT + 1))
     else
         warn "自定义驱动注入失败，请手动将 ${CUSTOM_KO} 放入 Guest /lib/modules/"

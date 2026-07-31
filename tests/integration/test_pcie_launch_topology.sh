@@ -227,6 +227,16 @@ require_dpu_profile_pattern 'VF device identity default' \
 require_profile_pattern 'profile propagation before topology build' \
     'func_mgr[[:space:]]*\.[[:space:]]*cfg_profile[[:space:]]*=[[:space:]]*cfg_profile[[:space:]]*;[[:space:]]*func_mgr[[:space:]]*\.[[:space:]]*build_topology[[:space:]]*\('
 
+if ! grep -Fq '$test$plusargs("AUTO_START_COSIM")' "$xrc_driver"; then
+    echo 'FAIL: VCS has no AUTO_START_COSIM alias for automated TCP startup' >&2
+    exit 1
+fi
+
+if ! grep -Fq '[CFG_PROFILE] resolved' "$xrc_driver"; then
+    echo 'FAIL: VCS does not log resolved profile identity after topology build' >&2
+    exit 1
+fi
+
 if grep -- '-device "pcie-root-port' "$makefile" |
         grep -v 'mem-reserve=64M' >/dev/null; then
     echo "FAIL: a cosim Root Port does not reserve 64M MMIO space" >&2

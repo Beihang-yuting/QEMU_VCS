@@ -208,6 +208,11 @@ class cosim_xrc_driver extends pcie_tl_rc_driver;
             func_mgr = pcie_tl_func_manager::type_id::create("func_mgr");
             func_mgr.cfg_profile = cfg_profile;
             func_mgr.build_topology(topo, n_pfs, max_vfs, ven[15:0], dev[15:0], vfdev[15:0]);
+            `uvm_info(get_name(), $sformatf(
+                "[CFG_PROFILE] resolved name=%s PFs=%0d PF0=%04h:%04h VF=%04h",
+                cfg_profile_name, n_pfs, func_mgr.pf_ctx[0].vendor_id,
+                func_mgr.pf_ctx[0].device_id, func_mgr.vf_device_id),
+                UVM_LOW)
             config_proxy.func_mgr            = func_mgr;
             config_proxy.multi_function_mode = 1;
             // An explicit +BYPASS_CONFIG value always wins. This permits the
@@ -323,7 +328,8 @@ class cosim_xrc_driver extends pcie_tl_rc_driver;
 
         // ---- 阶段1: VIP 主导, 等 UCLI 触发 ----
         // +COSIM_AUTOSTART: 批量运行(无 UCLI)跳过阶段1, 直接连 QEMU。
-        if (!bridge_ready && !$test$plusargs("COSIM_AUTOSTART")) begin
+        if (!bridge_ready && !($test$plusargs("COSIM_AUTOSTART") ||
+                              $test$plusargs("AUTO_START_COSIM"))) begin
             fork : vip_stage
                 super.run_phase(phase);   // 基类 forever get_next_item/send_tlp/item_done
             join_none

@@ -3,12 +3,38 @@
 if [ -f /etc/cosim/driver.conf ]; then
     . /etc/cosim/driver.conf
     case "$mode" in
-        stub|custom)
+        stub)
             if [ -f "/lib/modules/${ko_name}" ]; then
                 insmod "/lib/modules/${ko_name}" 2>/dev/null
                 echo "[cosim] Loaded driver: ${ko_name}"
             else
                 echo "[cosim] WARNING: ${ko_name} not found in /lib/modules/"
+            fi
+            ;;
+        custom)
+            module_dir="/lib/modules/${ko_dir}"
+            if [ -z "${ko_dir:-}" ] || [ ! -d "$module_dir" ]; then
+                echo "[cosim] WARNING: custom module directory missing: ${module_dir}"
+                exit 0
+            fi
+            for dependency in ${ko_deps:-}; do
+                if [ -f "$module_dir/$dependency" ]; then
+                    insmod "$module_dir/$dependency" 2>/dev/null || {
+                        echo "[cosim] WARNING: failed to load dependency: $dependency"
+                        exit 0
+                    }
+                else
+                    modprobe "$dependency" 2>/dev/null || {
+                        echo "[cosim] WARNING: failed to modprobe dependency: $dependency"
+                        exit 0
+                    }
+                fi
+            done
+            if [ -f "$module_dir/${ko_name}" ]; then
+                insmod "$module_dir/${ko_name}" 2>/dev/null &&
+                    echo "[cosim] Loaded custom driver: ${ko_name}"
+            else
+                echo "[cosim] WARNING: ${ko_name} not found in ${module_dir}"
             fi
             ;;
         none)
