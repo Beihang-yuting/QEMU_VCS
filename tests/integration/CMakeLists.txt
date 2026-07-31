@@ -56,6 +56,10 @@ add_test(NAME test_launch_smoke
          COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/test_launch_smoke.sh)
 set_tests_properties(test_launch_smoke PROPERTIES TIMEOUT 15)
 
+add_test(NAME test_qemu_time_mode
+         COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/test_qemu_time_mode.sh)
+set_tests_properties(test_qemu_time_mode PROPERTIES TIMEOUT 10)
+
 # QEMU PCIe topology and REAL_DUT config-bypass source policy.
 add_test(NAME test_pcie_launch_topology
          COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/test_pcie_launch_topology.sh)

@@ -6,7 +6,7 @@
 SHELL := /bin/bash
 
 .PHONY: all help bridge cosim-lib cosim-lib-eth qemu-device run-qemu \
-        validate-pcie-pref64-reserve \
+        validate-pcie-pref64-reserve validate-qemu-time-mode \
         test-unit test-integration test \
         clean clean-logs clean-run clean-all info
 
@@ -52,6 +52,19 @@ export PCIE_PREF64_RESERVE
 #             login-multi = NUM_RC 个后台 QEMU, 每 RC 一个控制台 socket(可登录)+独立日志
 #             file        = 无人值守, NUM_RC 个后台 QEMU, 串口只写日志文件
 CONSOLE        ?= login
+# QEMU 时间模式：realtime 保持现有行为；icount 使用 TCG 指令计数虚拟时间，
+# 使 host 侧等待 VCS Completion 时不推进 guest 虚拟时间。
+QEMU_TIME_MODE ?= realtime
+# Preserve a command-line/environment value literally before using it in a
+# conditional or a shell recipe.  This prevents an embedded Make function from
+# being evaluated while the mode is validated.
+override QEMU_TIME_MODE := $(value QEMU_TIME_MODE)
+export QEMU_TIME_MODE
+ifeq ($(QEMU_TIME_MODE),icount)
+QEMU_TIME_ARGS := -accel tcg -icount shift=auto,align=off,sleep=off
+else
+QEMU_TIME_ARGS :=
+endif
 # MMIO 读超时(ms): >0 时 BAR MMIO 读等 VCS 应答超时即返 0xFFFFFFFF, 设备无响应也能启动到登录;
 #                  0=禁用(永久阻塞,旧行为)。默认 180000(3min)。传给 cosim-pcie-rc 设备属性。
 MMIO_TIMEOUT_MS ?= 180000
@@ -125,7 +138,13 @@ validate-pcie-pref64-reserve:
 		exit 1; \
 	fi
 
-run-qemu: validate-pcie-pref64-reserve
+validate-qemu-time-mode:
+	@if ! printf '%s\n' "$$QEMU_TIME_MODE" | grep -Eq '^(realtime|icount)$$'; then \
+		echo "[错误] QEMU_TIME_MODE 必须是 realtime 或 icount" >&2; \
+		exit 1; \
+	fi
+
+run-qemu: validate-pcie-pref64-reserve validate-qemu-time-mode
 	@case '$(NUM_PFS)' in 1|2|3|4|5|6|7|8|9|10|11|12|13|14|15|16) ;; *) echo "[错误] NUM_PFS 必须是 1..16，当前值: $(NUM_PFS)"; exit 1;; esac
 	@[ -f '$(QEMU)' ] || { echo "[错误] QEMU 未找到: $(QEMU)（先 ./setup.sh 建 QEMU）"; exit 1; }
 	@[ -n '$(KERNEL)' ] && [ -f '$(KERNEL)' ] || { echo "[错误] Kernel 未找到 (GUEST_TYPE=$(GUEST_TYPE))"; exit 1; }
@@ -144,7 +163,7 @@ ifeq ($(CONSOLE),login)
 	  echo "}"; } > $(CONN_JSON)
 	@echo "[cosim] 描述符: $(CONN_JSON)"; cat $(CONN_JSON)
 	@echo "[cosim] 本终端即 guest 控制台(可登录); Ctrl-A C 切 QEMU monitor, Ctrl-A X 退出; VCS 读描述符连过来。"
-	@$(_QEMU_LD_PATH) $(QEMU) -M q35 -m $(GUEST_MEMORY) -smp 1 -snapshot \
+	@$(_QEMU_LD_PATH) $(QEMU)$(if $(QEMU_TIME_ARGS), $(QEMU_TIME_ARGS)) -M q35 -m $(GUEST_MEMORY) -smp 1 -snapshot \
 		-kernel $(KERNEL) -drive file=$(ROOTFS),format=raw,if=none,id=rootdisk0 \
 		-device virtio-blk-pci,drive=rootdisk0,addr=0x10 \
 		-append "console=ttyS0 root=/dev/vda rw guest_ip=10.0.0.10" \
@@ -159,7 +178,7 @@ else ifeq ($(CONSOLE),login-multi)
 	cleanup() { echo; echo "[cosim] 停 QEMU..."; for p in $$PIDS; do kill $$p 2>/dev/null || true; done; wait 2>/dev/null || true; }; \
 	trap cleanup INT TERM EXIT; \
 	for r in $$(seq 0 $$(($(NUM_RC)-1))); do \
-		$(_QEMU_LD_PATH) $(QEMU) -M q35 -m $(GUEST_MEMORY) -smp 1 -snapshot \
+		$(_QEMU_LD_PATH) $(QEMU)$(if $(QEMU_TIME_ARGS), $(QEMU_TIME_ARGS)) -M q35 -m $(GUEST_MEMORY) -smp 1 -snapshot \
 			-kernel $(KERNEL) -drive file=$(ROOTFS),format=raw,if=none,id=rootdisk$$r \
 			-device virtio-blk-pci,drive=rootdisk$$r,addr=0x10 \
 			-append "console=ttyS0 root=/dev/vda rw guest_ip=10.0.0.$$((10+r))" \
@@ -194,7 +213,7 @@ else
 	cleanup() { echo; echo "[cosim] 停 QEMU..."; for p in $$PIDS; do kill $$p 2>/dev/null || true; done; wait 2>/dev/null || true; }; \
 	trap cleanup INT TERM EXIT; \
 	for r in $$(seq 0 $$(($(NUM_RC)-1))); do \
-		$(_QEMU_LD_PATH) $(QEMU) -M q35 -m $(GUEST_MEMORY) -smp 1 -snapshot \
+		$(_QEMU_LD_PATH) $(QEMU)$(if $(QEMU_TIME_ARGS), $(QEMU_TIME_ARGS)) -M q35 -m $(GUEST_MEMORY) -smp 1 -snapshot \
 			-kernel $(KERNEL) -drive file=$(ROOTFS),format=raw,if=none,id=rootdisk$$r \
 			-device virtio-blk-pci,drive=rootdisk$$r,addr=0x10 \
 			-append "console=ttyS0 root=/dev/vda rw guest_ip=10.0.0.$$((10+r))" \
@@ -299,6 +318,7 @@ help:
 	@echo "  PCIE_PREF64_RESERVE=256M 每个 cosim Root Port 的 64-bit prefetchable MMIO 预留"
 	@echo "  PORT_BASE=9100         TCP 端口基数（端口=BASE+instance_id*3）"
 	@echo "  CONSOLE=login|login-multi|file  控制台模式(默认 login)"
+	@echo "  QEMU_TIME_MODE=realtime|icount QEMU 时间模式(默认 realtime);icount 使用 -accel tcg -icount shift=auto,align=off,sleep=off"
 	@echo "  MMIO_TIMEOUT_MS=180000  MMIO 读等 VCS 应答超时 ms(默认 3min; 0=禁用,永久阻塞)"
 	@echo "  ADVERTISE_HOST         写入描述符的 host（默认本机 IP）"
 	@echo "  GUEST_TYPE=ubuntu|debian  Guest 系统（默认 ubuntu）"
