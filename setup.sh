@@ -321,7 +321,19 @@ import_offline() {
 
     # 检查 md5（如果有 .md5 文件）
     if [ -f "${zip_file}.md5" ]; then
-        if md5sum -c "${zip_file}.md5" &>/dev/null; then
+        local expected_md5 actual_md5 sidecar_record record_count
+        local md5_record_re='^([[:xdigit:]]{32})[[:space:]][ *].+$'
+        sidecar_record=$(awk 'NF { print; exit }' "${zip_file}.md5")
+        record_count=$(grep -cve '^[[:space:]]*$' "${zip_file}.md5" || true)
+        if [ "$record_count" -eq 1 ] && [[ "$sidecar_record" =~ $md5_record_re ]]; then
+            expected_md5="${BASH_REMATCH[1]}"
+            expected_md5=${expected_md5,,}
+            actual_md5=$(md5sum -- "$zip_file" | awk '{ print $1 }')
+        else
+            expected_md5=""
+            actual_md5=""
+        fi
+        if [ -n "$expected_md5" ] && [ "$expected_md5" = "$actual_md5" ]; then
             ok "MD5 校验通过"
         else
             fail "MD5 校验失败，文件可能在传输中损坏"

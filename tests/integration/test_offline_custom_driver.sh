@@ -42,6 +42,15 @@ printf 'OFFLINE_DATE=$(touch "%s/metadata-was-executed")\n' "$work" >> "$payload
 archive="$work/offline-custom-driver.zip"
 (cd "$payload" && zip -qr "$archive" .)
 
+# Older offline packages recorded the packager's absolute ZIP path in their
+# sidecar.  The package must still import after a transfer to another path.
+md5sum "$archive" > "${archive}.md5"
+relocated="$work/relocated"
+mkdir -p "$relocated"
+cp "$archive" "${archive}.md5" "$relocated/"
+rm -f "$archive" "${archive}.md5"
+archive="$relocated/$(basename "$archive")"
+
 "$test_project/setup.sh" --driver custom --import "$archive" --import-only >"$work/import.log" 2>&1
 
 test -f "$test_project/build/offline-custom-driver/host-driver-net-test.tar.gz"
@@ -52,6 +61,28 @@ grep -Fq "自定义 DPU 驱动素材已导入" "$work/import.log"
 grep -Fq "Kernel headers 已解开" "$work/import.log"
 grep -Fq "自定义驱动使用离线源码包" "$work/import.log"
 grep -Fq "DPU 编译使用离线兼容运行库" "$work/import.log"
+
+# A valid digest without the required filename field is not a md5sum sidecar.
+malformed_archive="$work/malformed-checksum.zip"
+cp "$archive" "$malformed_archive"
+malformed_hash=$(md5sum "$malformed_archive" | awk '{ print $1 }')
+printf '%s\n' "$malformed_hash" > "${malformed_archive}.md5"
+if "$test_project/setup.sh" --driver custom --import "$malformed_archive" --import-only >"$work/malformed-import.log" 2>&1; then
+    echo "FAIL: setup accepted an incomplete MD5 sidecar" >&2
+    exit 1
+fi
+grep -Fq "MD5 校验失败" "$work/malformed-import.log"
+
+# GNU md5sum accepts uppercase hexadecimal digest records; import must too.
+uppercase_archive="$work/uppercase-checksum.zip"
+cp "$archive" "$uppercase_archive"
+uppercase_hash=$(md5sum "$uppercase_archive" | awk '{ print toupper($1) }')
+printf '%s  %s\n' "$uppercase_hash" "$(basename "$uppercase_archive")" > "${uppercase_archive}.md5"
+if ! "$test_project/setup.sh" --driver custom --import "$uppercase_archive" --import-only >"$work/uppercase-import.log" 2>&1; then
+    cat "$work/uppercase-import.log" >&2
+    exit 1
+fi
+grep -Fq "MD5 校验通过" "$work/uppercase-import.log"
 
 grep -Fq -- "--custom-driver" "$project_dir/scripts/prepare-offline.sh"
 grep -Fq -- "--compat-runtime-deb" "$project_dir/scripts/prepare-offline.sh"

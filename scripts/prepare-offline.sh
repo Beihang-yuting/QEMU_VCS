@@ -371,7 +371,11 @@ cd "$PROJECT_DIR"
 rm -rf "$STAGING"
 
 # 生成 md5sum 便于传输后校验
-md5sum "$OUTPUT" > "${OUTPUT}.md5"
+output_dir=$(dirname "$OUTPUT")
+output_base=$(basename "$OUTPUT")
+(
+    cd "$output_dir" && md5sum "$output_base" > "${output_base}.md5"
+)
 
 echo ""
 echo -e "${BOLD}============================================================${NC}"
