@@ -6,7 +6,7 @@
 SHELL := /bin/bash
 
 .PHONY: all help bridge cosim-lib cosim-lib-eth qemu-device run-qemu \
-        validate-pcie-pref64-reserve validate-qemu-time-mode \
+        validate-pcie-pref64-reserve validate-qemu-time-mode validate-mgmt-net \
         test-unit test-integration test \
         clean clean-logs clean-run clean-all info
 
@@ -52,6 +52,20 @@ export PCIE_PREF64_RESERVE
 #             login-multi = NUM_RC 个后台 QEMU, 每 RC 一个控制台 socket(可登录)+独立日志
 #             file        = 无人值守, NUM_RC 个后台 QEMU, 串口只写日志文件
 CONSOLE        ?= login
+# 独立管理网卡：user-mode NAT，只允许 QEMU 宿主机经 127.0.0.1 SSH 到 guest。
+# MGMT_NET=0 可关闭；RC r 的端口为 MGMT_SSH_PORT_BASE+r。
+MGMT_NET           ?= 1
+MGMT_SSH_PORT_BASE ?= 2222
+override MGMT_NET := $(value MGMT_NET)
+override MGMT_SSH_PORT_BASE := $(value MGMT_SSH_PORT_BASE)
+export MGMT_NET MGMT_SSH_PORT_BASE
+ifeq ($(MGMT_NET),1)
+MGMT_NET_ARGS_RC0 := -netdev user,id=mgmtnet0,hostfwd=tcp:127.0.0.1:$(MGMT_SSH_PORT_BASE)-:22 -device e1000e,netdev=mgmtnet0,mac=52:54:00:53:00:01
+MGMT_NET_ARGS_LOOP = -netdev user,id=mgmtnet$$r,hostfwd=tcp:127.0.0.1:$$(( $(MGMT_SSH_PORT_BASE) + r ))-:22 -device e1000e,netdev=mgmtnet$$r,mac=52:54:00:53:$$(printf '%02x:%02x' $$(( (r + 1) / 256 )) $$(( (r + 1) % 256 )))
+else
+MGMT_NET_ARGS_RC0 :=
+MGMT_NET_ARGS_LOOP :=
+endif
 # QEMU 时间模式：realtime 保持现有行为；icount 使用 TCG 指令计数虚拟时间，
 # 使 host 侧等待 VCS Completion 时不推进 guest 虚拟时间。
 QEMU_TIME_MODE ?= realtime
@@ -144,7 +158,18 @@ validate-qemu-time-mode:
 		exit 1; \
 	fi
 
-run-qemu: validate-pcie-pref64-reserve validate-qemu-time-mode
+validate-mgmt-net:
+	@if ! printf '%s\n' "$$MGMT_NET" | grep -Eq '^[01]$$'; then \
+		echo "[错误] MGMT_NET 必须是 0 或 1" >&2; \
+		exit 1; \
+	fi
+	@if ! printf '%s\n' "$$MGMT_SSH_PORT_BASE" | grep -Eq '^[0-9]+$$' || \
+		[ "$$MGMT_SSH_PORT_BASE" -lt 1 ] || [ "$$MGMT_SSH_PORT_BASE" -gt 65535 ]; then \
+		echo "[错误] MGMT_SSH_PORT_BASE 必须是 1..65535" >&2; \
+		exit 1; \
+	fi
+
+run-qemu: validate-pcie-pref64-reserve validate-qemu-time-mode validate-mgmt-net
 	@case '$(NUM_PFS)' in 1|2|3|4|5|6|7|8|9|10|11|12|13|14|15|16) ;; *) echo "[错误] NUM_PFS 必须是 1..16，当前值: $(NUM_PFS)"; exit 1;; esac
 	@[ -f '$(QEMU)' ] || { echo "[错误] QEMU 未找到: $(QEMU)（先 ./setup.sh 建 QEMU）"; exit 1; }
 	@[ -n '$(KERNEL)' ] && [ -f '$(KERNEL)' ] || { echo "[错误] Kernel 未找到 (GUEST_TYPE=$(GUEST_TYPE))"; exit 1; }
@@ -167,6 +192,7 @@ ifeq ($(CONSOLE),login)
 		-kernel $(KERNEL) -drive file=$(ROOTFS),format=raw,if=none,id=rootdisk0 \
 		-device virtio-blk-pci,drive=rootdisk0,addr=0x10 \
 		-append "console=ttyS0 root=/dev/vda rw guest_ip=10.0.0.10" \
+		$(MGMT_NET_ARGS_RC0) \
 		-device "pcie-root-port,id=cosim_rp0,bus=pcie.0,addr=0x3,slot=3,chassis=1,mem-reserve=64M,pref64-reserve=$$PCIE_PREF64_RESERVE" \
 		-device "cosim-pcie-rc,bus=cosim_rp0,addr=0x0,num_pfs=$(NUM_PFS),transport=tcp,port_base=$(PORT_BASE),instance_id=0,mmio_timeout_ms=$(MMIO_TIMEOUT_MS)" \
 		-display none \
@@ -182,6 +208,7 @@ else ifeq ($(CONSOLE),login-multi)
 			-kernel $(KERNEL) -drive file=$(ROOTFS),format=raw,if=none,id=rootdisk$$r \
 			-device virtio-blk-pci,drive=rootdisk$$r,addr=0x10 \
 			-append "console=ttyS0 root=/dev/vda rw guest_ip=10.0.0.$$((10+r))" \
+			$(MGMT_NET_ARGS_LOOP) \
 			-device "pcie-root-port,id=cosim_rp$$r,bus=pcie.0,addr=0x3,slot=3,chassis=$$((r+1)),mem-reserve=64M,pref64-reserve=$$PCIE_PREF64_RESERVE" \
 			-device "cosim-pcie-rc,bus=cosim_rp$$r,addr=0x0,num_pfs=$(NUM_PFS),transport=tcp,port_base=$(PORT_BASE),instance_id=$$r,mmio_timeout_ms=$(MMIO_TIMEOUT_MS)" \
 			-display none \
@@ -217,6 +244,7 @@ else
 			-kernel $(KERNEL) -drive file=$(ROOTFS),format=raw,if=none,id=rootdisk$$r \
 			-device virtio-blk-pci,drive=rootdisk$$r,addr=0x10 \
 			-append "console=ttyS0 root=/dev/vda rw guest_ip=10.0.0.$$((10+r))" \
+			$(MGMT_NET_ARGS_LOOP) \
 			-device "pcie-root-port,id=cosim_rp$$r,bus=pcie.0,addr=0x3,slot=3,chassis=$$((r+1)),mem-reserve=64M,pref64-reserve=$$PCIE_PREF64_RESERVE" \
 			-device "cosim-pcie-rc,bus=cosim_rp$$r,addr=0x0,num_pfs=$(NUM_PFS),transport=tcp,port_base=$(PORT_BASE),instance_id=$$r,mmio_timeout_ms=$(MMIO_TIMEOUT_MS)" \
 			-nographic -serial file:$(LOG_DIR)/qemu_rc$$r.log -monitor none \
@@ -318,6 +346,8 @@ help:
 	@echo "  PCIE_PREF64_RESERVE=256M 每个 cosim Root Port 的 64-bit prefetchable MMIO 预留"
 	@echo "  PORT_BASE=9100         TCP 端口基数（端口=BASE+instance_id*3）"
 	@echo "  CONSOLE=login|login-multi|file  控制台模式(默认 login)"
+	@echo "  MGMT_NET=1              默认加 e1000e 管理网卡；0=关闭（不经过 DUT/VCS）"
+	@echo "  MGMT_SSH_PORT_BASE=2222 管理 SSH 端口基数；RC r 使用 127.0.0.1:(base+r)"
 	@echo "  QEMU_TIME_MODE=realtime|icount QEMU 时间模式(默认 realtime);icount 使用 -accel tcg -icount shift=auto,align=off,sleep=off"
 	@echo "  MMIO_TIMEOUT_MS=180000  MMIO 读等 VCS 应答超时 ms(默认 3min; 0=禁用,永久阻塞)"
 	@echo "  ADVERTISE_HOST         写入描述符的 host（默认本机 IP）"
