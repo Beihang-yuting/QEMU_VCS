@@ -134,4 +134,13 @@ PATH="$work/gcc9-tools:$PATH" CC=gcc-9 "$builder" \
     --use-system-bonding --archive "$work/gcc9-driver.tar.gz" \
     --kernel-build "$work/gcc9-headers" --output "$work/gcc9-bundle"
 test -f "$work/gcc9-bundle/dpu_snd1.ko"
+
+# The driver builder must keep its private source tree under the project
+# build directory.  An imported project can be used by an unprivileged user
+# whose system TMPDIR is unavailable, so the build must not depend on it.
+PATH="$work/gcc9-tools:$PATH" CC=gcc-9 TMPDIR="$work/missing-system-tmp" \
+    "$builder" --use-system-bonding --archive "$work/gcc9-driver.tar.gz" \
+    --kernel-build "$work/gcc9-headers" --output "$work/gcc9-project-tmp-bundle"
+test -f "$work/gcc9-project-tmp-bundle/dpu_snd1.ko"
+test -d "$project_dir/build/tmp"
 echo 'PASS: DPU driver archive validation'

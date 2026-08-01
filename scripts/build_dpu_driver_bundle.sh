@@ -2,6 +2,9 @@
 # Build the supplied DPU driver archive for one exact Guest kernel.
 set -euo pipefail
 
+script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+project_dir=$(dirname "$script_dir")
+
 archive=''
 kernel_build=''
 output=''
@@ -81,7 +84,13 @@ kver=$(sed -n 's/^#define UTS_RELEASE "\(.*\)"$/\1/p' "$utsrelease")
 if [ -n "$compat_runtime_deb" ] && [ ! -f "$compat_runtime_deb" ]; then
     fail "compatibility runtime archive not found: $compat_runtime_deb"
 fi
-work=$(mktemp -d "${TMPDIR:-/tmp}/dpu-driver-build.XXXXXX")
+# The source tree is commonly imported and built by an unprivileged user.
+# Keep all driver build intermediates inside the project instead of relying on
+# a system-wide /tmp that might not be writable in that environment.
+driver_tmp_root="${DPU_DRIVER_TMPDIR:-${project_dir}/build/tmp}"
+mkdir -p "$driver_tmp_root" || fail "cannot create DPU temporary directory: $driver_tmp_root"
+[ -w "$driver_tmp_root" ] || fail "DPU temporary directory is not writable: $driver_tmp_root"
+work=$(mktemp -d "${driver_tmp_root%/}/dpu-driver-build.XXXXXX")
 cleanup() { rm -rf "$work"; }
 trap cleanup EXIT
 
