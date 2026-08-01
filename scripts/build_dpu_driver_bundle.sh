@@ -92,6 +92,42 @@ driver_dir="$work/host-driver-net"
 compiler="${CC:-gcc}"
 command -v "$compiler" >/dev/null 2>&1 || fail "C compiler not found: $compiler"
 
+# Kernel 6.8 headers enable hardening options introduced after GCC 9.  An
+# offline install can deliberately select gcc-9 even when no compatibility
+# libc is needed, so filter only the options that the selected compiler cannot
+# parse.  This wrapper must be installed before the optional libc wrapper
+# below, otherwise the non-libc path leaks the flags directly to gcc-9.
+unsupported_kernel_flags=()
+for kernel_flag in \
+    -mharden-sls=all \
+    -ftrivial-auto-var-init=zero \
+    -fzero-call-used-regs=used-gpr; do
+    if ! printf 'int main(void) { return 0; }\n' | \
+            "$compiler" "$kernel_flag" -x c -c -o /dev/null - >/dev/null 2>&1; then
+        unsupported_kernel_flags+=("$kernel_flag")
+    fi
+done
+
+if [ "${#unsupported_kernel_flags[@]}" -gt 0 ]; then
+    kernel_flag_filter="$work/gcc-kernel-flag-filter"
+    export COSIM_DPU_BASE_COMPILER="$compiler"
+    cat > "$kernel_flag_filter" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+args=()
+for arg in "$@"; do
+    case "$arg" in
+        -mharden-sls=all|-ftrivial-auto-var-init=zero|-fzero-call-used-regs=used-gpr) ;;
+        *) args+=("$arg") ;;
+    esac
+done
+exec "$COSIM_DPU_BASE_COMPILER" "${args[@]}"
+EOF
+    chmod +x "$kernel_flag_filter"
+    echo "Filtering unsupported kernel compiler flags for $compiler: ${unsupported_kernel_flags[*]}"
+    compiler="$kernel_flag_filter"
+fi
+
 driver_cflags="${CFLAGS:-}"
 if "$use_system_bonding"; then
     driver_cflags="${driver_cflags} -UDPU_LACP"

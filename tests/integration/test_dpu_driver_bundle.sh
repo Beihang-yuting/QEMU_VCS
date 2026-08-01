@@ -52,4 +52,86 @@ if ! grep -Fq "output directory is not empty" "$builder"; then
     echo "FAIL: DPU builder does not accept setup.sh empty mktemp output directories" >&2
     exit 1
 fi
+
+# Ubuntu 20.04's gcc-9 cannot parse several hardening options emitted by
+# 6.8 kernel headers.  The builder must interpose a compiler wrapper even
+# without the optional compatibility libc runtime.  Fake make exercises the
+# exact CC= handoff while fake gcc-9 rejects an unfiltered option.
+mkdir -p "$work/gcc9-tools" "$work/gcc9-driver/host-driver-net" \
+    "$work/gcc9-headers/include/generated"
+printf 'obj-m += dpu_snd1.o\n' > "$work/gcc9-driver/host-driver-net/Makefile"
+tar -C "$work/gcc9-driver" -czf "$work/gcc9-driver.tar.gz" host-driver-net
+touch "$work/gcc9-headers/Makefile"
+printf '#define UTS_RELEASE "6.8.0-test"\n' \
+    > "$work/gcc9-headers/include/generated/utsrelease.h"
+
+cat > "$work/gcc9-tools/gcc-9" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+output=''
+next_is_output=false
+for arg in "$@"; do
+    if "$next_is_output"; then
+        output="$arg"
+        next_is_output=false
+        continue
+    fi
+    case "$arg" in
+        -mharden-sls=all|-ftrivial-auto-var-init=zero|-fzero-call-used-regs=used-gpr)
+            echo "gcc-9: error: unrecognized command line option '$arg'" >&2
+            exit 2
+            ;;
+        -o) next_is_output=true ;;
+    esac
+done
+[ -n "$output" ] && printf 'fake gcc-9 object\n' > "$output"
+EOF
+
+cat > "$work/gcc9-tools/make" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+dir=''
+compiler=''
+target=''
+next_is_dir=false
+for arg in "$@"; do
+    if "$next_is_dir"; then
+        dir="$arg"
+        next_is_dir=false
+        continue
+    fi
+    case "$arg" in
+        -C) next_is_dir=true ;;
+        CC=*) compiler=${arg#CC=} ;;
+        clean|modules) target="$arg" ;;
+    esac
+done
+[ -n "$dir" ] && [ -n "$compiler" ]
+if [ "$target" = modules ]; then
+    printf 'int dpu_bundle_test;\n' > "$dir/.gcc9-test.c"
+    "$compiler" -mharden-sls=all -ftrivial-auto-var-init=zero \
+        -fzero-call-used-regs=used-gpr -c "$dir/.gcc9-test.c" \
+        -o "$dir/dpu_snd1.ko"
+fi
+EOF
+
+cat > "$work/gcc9-tools/modinfo" <<'EOF'
+#!/usr/bin/env sh
+if [ "$1" = '-F' ] && [ "$2" = 'vermagic' ]; then
+    echo '6.8.0-test SMP'
+    exit 0
+fi
+exit 1
+EOF
+cat > "$work/gcc9-tools/file" <<'EOF'
+#!/usr/bin/env sh
+echo "$1: ELF 64-bit LSB relocatable, x86-64"
+EOF
+chmod +x "$work/gcc9-tools/gcc-9" "$work/gcc9-tools/make" \
+    "$work/gcc9-tools/modinfo" "$work/gcc9-tools/file"
+
+PATH="$work/gcc9-tools:$PATH" CC=gcc-9 "$builder" \
+    --use-system-bonding --archive "$work/gcc9-driver.tar.gz" \
+    --kernel-build "$work/gcc9-headers" --output "$work/gcc9-bundle"
+test -f "$work/gcc9-bundle/dpu_snd1.ko"
 echo 'PASS: DPU driver archive validation'
