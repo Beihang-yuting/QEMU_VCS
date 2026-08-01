@@ -15,7 +15,11 @@ printf 'ko_dir=cosim-drivers/dpu_snd1\nko_deps=bonding\nko_name=dpu_snd1.ko\nkve
 truncate -s 16M "$rootfs"
 mke2fs -q -F -t ext4 "$rootfs"
 
-"$injector" --rootfs "$rootfs" --bundle "$bundle"
+# Imported projects are often operated by an unprivileged user.  The DPU
+# injector must not depend on a writable system TMPDIR for either its staging
+# tree or its debugfs command file.
+TMPDIR="$work/missing-system-tmp" "$injector" --rootfs "$rootfs" --bundle "$bundle"
+test -d "$project_dir/build/tmp"
 debugfs -R 'stat /lib/modules/cosim-drivers/dpu_snd1/dpu_snd1.ko' "$rootfs" 2>/dev/null | grep -q 'Inode:'
 debugfs -R "dump -p /etc/cosim/driver.conf $work/driver.conf" "$rootfs" >/dev/null 2>&1
 grep -qx 'mode=custom' "$work/driver.conf"
