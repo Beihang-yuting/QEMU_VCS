@@ -182,10 +182,13 @@ class pcie_tl_dpu_501x_profile_test extends uvm_test;
         bit [31:0] expected_ari_next;
         pcie_tl_func_manager two_pf_mgr;
         pcie_tl_func_manager legacy_mgr;
+        pcie_tl_func_manager tag10_mgr;
         int dpu_sriov_dw_base;
         int legacy_sriov_dw_base;
         int active_count_before;
         bit [31:0] proxy_read_data;
+        bit [15:0] tag10_pf_bdf;
+        bit [15:0] tag10_vf_bdf;
 
         phase.raise_objection(this);
 
@@ -233,10 +236,33 @@ class pcie_tl_dpu_501x_profile_test extends uvm_test;
                   32'h1043_0000);
         expect_dw("PF0 Device Capabilities 2", mgr.cfg_read(16'h0100, 12'h094),
                   32'h0000_0016);
+        mgr.cfg_write(16'h0100, 12'h098, 32'h0000_1000, 4'hf);
+        expect_dw("PF0 TAG_BIT=8 masks Device Control 2 10-bit enable",
+                  mgr.cfg_read(16'h0100, 12'h098), 32'h0000_0000);
         expect_dw("PF0 Link Capabilities 2", mgr.cfg_read(16'h0100, 12'h09c),
                   32'h0000_000e);
         expect_dw("PF0 Link Status 2", mgr.cfg_read(16'h0100, 12'h0a0),
                   32'h001e_0000);
+
+        // A 10-bit selection must change both the DPU PF profile and every
+        // VF's generic PCIe capability image, not only the tag allocator.
+        tag10_mgr = pcie_tl_func_manager::type_id::create("tag10_mgr");
+        tag10_mgr.cfg_profile = PCIE_CFG_PROFILE_DPU_20F9_501X;
+        tag10_mgr.set_tag_bit(10);
+        tag10_mgr.build_topology(0, 1, 16, 16'h20f9, 16'h5011, 16'h8689);
+        tag10_pf_bdf = tag10_mgr.pf_ctx[0].bdf;
+        expect_dw("TAG_BIT=10 DPU PF Device Capabilities 2",
+                  tag10_mgr.cfg_read(tag10_pf_bdf, 12'h094), 32'h0000_1016);
+        tag10_mgr.cfg_write(tag10_pf_bdf, 12'h098, 32'h0000_1000, 4'hf);
+        expect_dw("TAG_BIT=10 DPU PF Device Control 2 readback",
+                  tag10_mgr.cfg_read(tag10_pf_bdf, 12'h098), 32'h0000_1000);
+        tag10_mgr.enable_vfs(0, 1);
+        tag10_vf_bdf = tag10_mgr.vf_ctx[0][0].bdf;
+        expect_dw("TAG_BIT=10 DPU VF Device Capabilities 2",
+                  tag10_mgr.cfg_read(tag10_vf_bdf, 12'h064), 32'h0000_1020);
+        tag10_mgr.cfg_write(tag10_vf_bdf, 12'h068, 32'h0000_1000, 4'hf);
+        expect_dw("TAG_BIT=10 DPU VF Device Control 2 readback",
+                  tag10_mgr.cfg_read(tag10_vf_bdf, 12'h068), 32'h0000_1000);
 
         // DPU-only extended capability chain. These checks intentionally use
         // public configuration reads rather than inspecting cfg_space.

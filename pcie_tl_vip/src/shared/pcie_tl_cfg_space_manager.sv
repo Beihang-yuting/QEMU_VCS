@@ -365,7 +365,13 @@ class pcie_tl_cfg_space_manager extends uvm_object;
     //=========================================================================
     // Initialize PCIe Capability structure
     //=========================================================================
-    function void init_pcie_capability(bit [7:0] cap_offset = 8'h40, mps_e mps = MPS_256, mrrs_e mrrs = MRRS_512, rcb_e rcb = RCB_64);
+    function void init_pcie_capability(
+        bit [7:0] cap_offset = 8'h40,
+        mps_e mps = MPS_256,
+        mrrs_e mrrs = MRRS_512,
+        rcb_e rcb = RCB_64,
+        bit enable_10bit_tag = 0
+    );
         pcie_capability pcie_cap;
         bit [31:0] dev_cap, dev_ctrl;
         bit [2:0] mps_enc, mrrs_enc;
@@ -424,9 +430,13 @@ class pcie_tl_cfg_space_manager extends uvm_object;
         // +0x12 Link Status: current speed=1, width=1 (data[16..17])
         pcie_cap.data[16] = 8'h11;
         // +0x14..0x23 Slot/Root (EP 不适用, 全 0: data[18..33])
-        // +0x24 Device Capabilities 2: bit5 = ARI Forwarding Supported (data[34..37])
+        // +0x24 Device Capabilities 2: bit5 = ARI Forwarding Supported;
+        // bit12 = 10-bit Tag Requester Supported (data[34..37]).
         pcie_cap.data[34] = 8'h20;
-        // +0x28 Device Control 2 = 0 (data[38..39]); guest 写 bit5=ARI Forwarding Enable
+        if (enable_10bit_tag)
+            pcie_cap.data[35] |= 8'h10;
+        // +0x28 Device Control 2 = 0 (data[38..39]); bit12 is the 10-bit
+        // Tag Requester Enable and must be writable only when advertised.
         // +0x2C Link Cap2 (data[42..45]); +0x30 Link Ctrl2 (46..47); +0x32 Link Stat2 (48..49)
 
         register_capability(pcie_cap);
@@ -437,6 +447,8 @@ class pcie_tl_cfg_space_manager extends uvm_object;
             field_attrs[cap_offset + 12 + i] = CFG_FIELD_RO;  // Link Cap    (+0x0C)
             field_attrs[cap_offset + 36 + i] = CFG_FIELD_RO;  // Device Cap2 (+0x24)
         end
+        if (!enable_10bit_tag)
+            write_masks[cap_offset + 41] &= 8'hef;  // Device Control 2 bit12
     endfunction
 
     //=========================================================================
@@ -444,7 +456,10 @@ class pcie_tl_cfg_space_manager extends uvm_object;
     // Control registers deliberately retain their default RW attributes so the
     // BIOS and guest driver, rather than this static profile, own their state.
     //=========================================================================
-    function void init_dpu_501x_pcie_capability(bit [7:0] cap_offset = 8'h70);
+    function void init_dpu_501x_pcie_capability(
+        bit [7:0] cap_offset = 8'h70,
+        bit enable_10bit_tag = 0
+    );
         pcie_capability pcie_cap;
 
         pcie_cap = pcie_capability::type_id::create("dpu_501x_pcie_cap");
@@ -465,8 +480,11 @@ class pcie_tl_cfg_space_manager extends uvm_object;
         // +0x12 Link Status = 0x1043
         pcie_cap.data[16] = 8'h43;
         pcie_cap.data[17] = 8'h10;
-        // +0x24 Device Capabilities 2 = 0x00000016
+        // +0x24 Device Capabilities 2 = 0x00000016. TAG_BIT=10 additionally
+        // advertises 10-bit Tag Requester Supported at bit12.
         pcie_cap.data[34] = 8'h16;
+        if (enable_10bit_tag)
+            pcie_cap.data[35] |= 8'h10;
         // +0x2C Link Capabilities 2 = 0x0000000e
         pcie_cap.data[42] = 8'h0e;
         // +0x32 Link Status 2 = 0x001e
@@ -488,6 +506,8 @@ class pcie_tl_cfg_space_manager extends uvm_object;
         field_attrs[cap_offset + 19] = CFG_FIELD_RO;
         field_attrs[cap_offset + 50] = CFG_FIELD_RO;          // Link Status2
         field_attrs[cap_offset + 51] = CFG_FIELD_RO;
+        if (!enable_10bit_tag)
+            write_masks[cap_offset + 41] &= 8'hef;  // Device Control 2 bit12
     endfunction
 
     //=========================================================================

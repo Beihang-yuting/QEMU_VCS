@@ -27,6 +27,10 @@ target_link_libraries(test_transport_tcp cosim_bridge_common cosim_bridge pthrea
 add_test(NAME test_transport_tcp COMMAND test_transport_tcp)
 set_tests_properties(test_transport_tcp PROPERTIES TIMEOUT 30)
 
+add_executable(test_bridge_tag_bits test_bridge_tag_bits.c)
+target_link_libraries(test_bridge_tag_bits cosim_bridge)
+add_test(NAME test_bridge_tag_bits COMMAND test_bridge_tag_bits)
+
 add_executable(test_cosim_topology test_cosim_topology.c)
 target_link_libraries(test_cosim_topology cosim_bridge_common)
 add_test(NAME test_cosim_topology COMMAND test_cosim_topology)

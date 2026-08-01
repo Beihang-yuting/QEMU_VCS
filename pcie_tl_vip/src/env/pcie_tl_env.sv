@@ -72,6 +72,7 @@ class pcie_tl_env extends uvm_env;
     function void build_phase(uvm_phase phase);
         int  nu;            // root (USP) count
         int  n_mgr;         // manager-set count (>=1 so EP-only still has managers)
+        int  tag_bit;       // physical VIP/DUT tag width selected by +TAG_BIT
         bit  ns_multi_ep;   // non-switch multi-EP (num_ep>1) -> ep_agents[] array
         super.build_phase(phase);
 
@@ -81,6 +82,16 @@ class pcie_tl_env extends uvm_env;
         if (!uvm_config_db#(pcie_tl_env_config)::get(this, "", "cfg", cfg)) begin
             cfg = pcie_tl_env_config::type_id::create("cfg");
             `uvm_info("ENV", "No config found in config_db, using defaults", UVM_MEDIUM)
+        end
+
+        // An explicit TAG_BIT overrides test defaults for the physical VIP
+        // requester. No plusarg keeps standalone test behavior unchanged.
+        if ($value$plusargs("TAG_BIT=%d", tag_bit)) begin
+            if (tag_bit != 8 && tag_bit != 10)
+                `uvm_fatal("ENV", $sformatf(
+                    "TAG_BIT must be 8 or 10, got %0d", tag_bit))
+            cfg.extended_tag_enable = (tag_bit == 10);
+            cfg.max_outstanding     = (tag_bit == 10) ? 1024 : 256;
         end
 
         // 2pre. Switch enabled: init switch_cfg defaults FIRST so num_usp/dsp_owner
@@ -167,6 +178,7 @@ class pcie_tl_env extends uvm_env;
         // 4c. SR-IOV mode: create function manager
         if (cfg.sriov_enable) begin
             func_mgr_sriov = pcie_tl_func_manager::type_id::create("func_mgr_sriov");
+            func_mgr_sriov.set_tag_bit(cfg.extended_tag_enable ? 10 : 8);
             func_mgr_sriov.build(cfg.num_pfs, cfg.max_vfs_per_pf,
                                   cfg.pf_vendor_id, cfg.pf_device_id, cfg.vf_device_id);
             if (cfg.default_num_vfs > 0) begin
@@ -878,7 +890,9 @@ class pcie_tl_env extends uvm_env;
         // Config space init (per-root)
         foreach (cfg_mgrs[r]) begin
             cfg_mgrs[r].init_type0_header();
-            cfg_mgrs[r].init_pcie_capability(8'h40, cfg.max_payload_size, cfg.max_read_request_size, cfg.read_completion_boundary);
+            cfg_mgrs[r].init_pcie_capability(
+                8'h40, cfg.max_payload_size, cfg.max_read_request_size,
+                cfg.read_completion_boundary, cfg.extended_tag_enable);
         end
 
         // Link Delay

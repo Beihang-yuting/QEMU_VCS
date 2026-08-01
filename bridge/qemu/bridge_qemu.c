@@ -9,6 +9,27 @@
 static void bridge_consume_vf_config(bridge_ctx_t *ctx);
 static void bridge_consume_vf_event(bridge_ctx_t *ctx);
 
+int bridge_set_tag_bit(bridge_ctx_t *ctx, unsigned int tag_bit) {
+    uint16_t tag_mask;
+
+    if (!ctx) return -1;
+
+    switch (tag_bit) {
+    case 8:
+        tag_mask = 0x00ff;
+        break;
+    case 10:
+        tag_mask = 0x03ff;
+        break;
+    default:
+        return -1;
+    }
+
+    ctx->tag_mask = tag_mask;
+    ctx->next_tag &= tag_mask;
+    return 0;
+}
+
 bridge_ctx_t *bridge_init(const char *shm_name, const char *sock_path) {
     bridge_ctx_t *ctx = calloc(1, sizeof(*ctx));
     if (!ctx) return NULL;
@@ -18,7 +39,7 @@ bridge_ctx_t *bridge_init(const char *shm_name, const char *sock_path) {
     ctx->listen_fd = -1;
     ctx->client_fd = -1;
     ctx->next_tag = 0;
-    ctx->tag_mask = 0x03FF;   /* 10-bit extended tags (1024 outstanding); updated after topology handshake */
+    (void)bridge_set_tag_bit(ctx, 10);
     pthread_mutex_init(&ctx->tlp_mutex, NULL);
 
     if (cosim_shm_create(&ctx->shm, shm_name) < 0) {
@@ -506,7 +527,7 @@ bridge_ctx_t *bridge_init_ex(const transport_cfg_t *cfg) {
     ctx->listen_fd = -1;
     ctx->client_fd = -1;
     ctx->next_tag = 0;
-    ctx->tag_mask = 0x03FF;   /* 10-bit extended tags (1024 outstanding) */
+    (void)bridge_set_tag_bit(ctx, 10);
     pthread_mutex_init(&ctx->tlp_mutex, NULL);
 
     transport_cfg_t server_cfg = *cfg;

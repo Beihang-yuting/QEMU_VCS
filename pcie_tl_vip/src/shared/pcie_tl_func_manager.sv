@@ -116,7 +116,8 @@ class pcie_tl_func_context extends uvm_object;
         bit [15:0] vendor_id,
         bit [15:0] device_id,
         bit [7:0]  header_type = 8'h00,
-        pcie_cfg_profile_e profile = PCIE_CFG_PROFILE_LEGACY
+        pcie_cfg_profile_e profile = PCIE_CFG_PROFILE_LEGACY,
+        int physical_tag_bit = 8
     );
         this.vendor_id = vendor_id;
         this.device_id = device_id;
@@ -141,10 +142,13 @@ class pcie_tl_func_context extends uvm_object;
                 cfg_mgr.init_msix_capability(.cap_offset(8'h60), .table_size(16),
                     .bir(3'd4), .table_off(32'h0000_0000),
                     .pba_off(32'h0000_4000));
-                cfg_mgr.init_dpu_501x_pcie_capability(.cap_offset(8'h70));
+                cfg_mgr.init_dpu_501x_pcie_capability(
+                    .cap_offset(8'h70),
+                    .enable_10bit_tag(physical_tag_bit == 10));
             end else begin
                 cfg_mgr.init_type0_header(vendor_id, device_id, .header_type(header_type));
-                cfg_mgr.init_pcie_capability();
+                cfg_mgr.init_pcie_capability(
+                    .enable_10bit_tag(physical_tag_bit == 10));
                 cfg_mgr.init_pm_capability();
             end
         end
@@ -175,6 +179,7 @@ class pcie_tl_func_manager extends uvm_object;
     int        pf_msix_vectors = 64;
     int        vf_msix_vectors = 8;
     int        tag_width = 1;  // 0=5bit, 1=8bit, 2=10bit
+    int        tag_bit   = 8;  // physical VIP/DUT tag width: 8 or 10
 
     //--- Context arrays ---
     pcie_tl_func_context  pf_ctx[];
@@ -186,6 +191,18 @@ class pcie_tl_func_manager extends uvm_object;
 
     function new(string name = "pcie_tl_func_manager");
         super.new(name);
+    endfunction
+
+    // Keep topology export and all generated function config images bound to
+    // one physical tag-width policy. QEMU software tags are translated by the
+    // CoSim RC driver and are intentionally not constrained here.
+    function void set_tag_bit(int value);
+        if (value != 8 && value != 10) begin
+            `uvm_fatal("FUNC_MGR", $sformatf(
+                "TAG_BIT must be 8 or 10, got %0d", value))
+        end
+        tag_bit   = value;
+        tag_width = (value == 10) ? 2 : 1;
     endfunction
 
     //=========================================================================
@@ -243,7 +260,8 @@ class pcie_tl_func_manager extends uvm_object;
             end
             pf_ctx[pf].init_cfg_space(pf_vendor_id, pf_device_id,
                                       .header_type((num_pfs > 1) ? 8'h80 : 8'h00),
-                                      .profile(cfg_profile));
+                                      .profile(cfg_profile),
+                                      .physical_tag_bit(tag_bit));
             if (cfg_profile == PCIE_CFG_PROFILE_DPU_20F9_501X)
                 pf_ctx[pf].init_dpu_bar_descriptors();
 
@@ -458,7 +476,8 @@ class pcie_tl_func_manager extends uvm_object;
                 vf_ctx[pf][vf].bdf      = vf_bdf;
                 vf_ctx[pf][vf].is_vf    = 1;
                 vf_ctx[pf][vf].enabled  = 0;
-                vf_ctx[pf][vf].init_cfg_space(vendor_id, vf_dev_id);
+                vf_ctx[pf][vf].init_cfg_space(vendor_id, vf_dev_id,
+                                               .physical_tag_bit(tag_bit));
                 if (cfg_profile == PCIE_CFG_PROFILE_DPU_20F9_501X)
                     vf_ctx[pf][vf].init_dpu_bar_descriptors();
                 // MSI-X capability so guest/VFIO can enable per-VF interrupts.
