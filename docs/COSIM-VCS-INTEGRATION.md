@@ -155,3 +155,38 @@ make run-qemu NUM_PFS=4 PCIE_PREF64_RESERVE=256M
 
 `CFG_PROFILE` 是 **VCS-only** plusarg，由 VCS 测试平台解析；QEMU 不解析它。
 `NUM_PFS` 则需要在 `make run-qemu` 和 VCS plusarg 中保持一致。
+
+> `pcie_tl_vip/sim/simv_cosim` 配套的 `pcie_tl_cosim_test` 是独立的
+> **TLM stand-in** 测试，不包含用户的 RTL DUT。它的 `ENV_LOOP` 和 EP driver
+> 会模拟 Completion；仅在命令行加 `+REAL_DUT` 不能把它变成真实 DUT 测试，
+> 还会让同一 Completion 同时经过 TLM 直调和 monitor/rx_loop，形成误导性的
+> `Unexpected Completion`/`no QEMU tag map` 日志。真实 DUT 验证必须使用用户
+> 自己的 top、`SV_IF_MODE` 和 DUT 的 CC/RQ 通道；该模式下 DUT 是 MMIO
+> Completion 的唯一来源。
+
+---
+
+## 9. QEMU iCount 时间模式
+
+默认 `QEMU_TIME_MODE=realtime` 保持原有行为。真实驱动会按 Guest 时间轮询
+DUT 状态时，可选择：
+
+```bash
+make run-qemu QEMU_TIME_MODE=icount
+```
+
+该模式使用：
+
+```text
+-accel tcg -icount shift=auto,align=off,sleep=on
+```
+
+`sleep=on` 保证 VCS 空闲、登录和普通 Guest 程序运行时，Guest 时间继续正常
+推进。QEMU 设备仅在一个需要等待 VCS 响应的 bridge 事务期间暂停 adaptive
+iCount 的 host-time reference，Completion、transport 错误或超时返回后立即
+恢复；posted Memory Write 在 transport send 返回后恢复。因此它不会因为
+VCS 暂时没有请求而永久冻结 Guest，也不会让启动阶段全局快速前进。
+
+`MMIO_TIMEOUT_MS` 仍按宿主机时间计时。iCount 只避免把正常 VCS 仿真延迟
+计入驱动看到的 Guest 时间，不会掩盖丢失的 Completion；无响应 DUT 仍会按
+配置的宿主机超时返回错误。
