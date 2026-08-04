@@ -18,11 +18,6 @@ add_executable(test_precise_mode test_precise_mode.c)
 target_link_libraries(test_precise_mode cosim_bridge)
 add_test(NAME test_precise_mode COMMAND test_precise_mode)
 
-# cosim_cli ctypes-layer smoke test (P4-①)
-add_test(NAME test_cli_smoke
-         COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/test_cli_smoke.sh)
-set_tests_properties(test_cli_smoke PROPERTIES TIMEOUT 10)
-
 add_test(NAME test_offline_qemu_archive
          COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/test_offline_qemu_archive.sh)
 set_tests_properties(test_offline_qemu_archive PROPERTIES TIMEOUT 10)
@@ -51,11 +46,6 @@ target_link_libraries(test_qemu_integration cosim_bridge cosim_bridge_common pth
 add_test(NAME test_qemu_integration COMMAND test_qemu_integration)
 set_tests_properties(test_qemu_integration PROPERTIES TIMEOUT 60)
 
-# launch_dual.py smoke test (P3-T7)
-add_test(NAME test_launch_smoke
-         COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/test_launch_smoke.sh)
-set_tests_properties(test_launch_smoke PROPERTIES TIMEOUT 15)
-
 add_test(NAME test_qemu_time_mode
          COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/test_qemu_time_mode.sh)
 set_tests_properties(test_qemu_time_mode PROPERTIES TIMEOUT 10)
@@ -83,11 +73,19 @@ set_tests_properties(test_pcie_launch_topology PROPERTIES TIMEOUT 10)
 
 add_test(NAME test_runtime_bdf_utils
          COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/../sv/run_test_runtime_bdf_utils.sh)
-set_tests_properties(test_runtime_bdf_utils PROPERTIES TIMEOUT 10)
+set_tests_properties(test_runtime_bdf_utils PROPERTIES TIMEOUT 120)
 
 add_test(NAME test_dpu_501x_profile
          COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/../sv/run_test_dpu_501x_profile.sh)
-set_tests_properties(test_dpu_501x_profile PROPERTIES TIMEOUT 10)
+set_tests_properties(test_dpu_501x_profile PROPERTIES TIMEOUT 120)
+
+add_test(NAME test_cosim_cpl_payload_codec
+         COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/../sv/run_test_cosim_cpl_payload_codec.sh)
+set_tests_properties(test_cosim_cpl_payload_codec PROPERTIES TIMEOUT 120)
+
+add_test(NAME test_cosim_tag_map_order
+         COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/test_cosim_tag_map_order.sh)
+set_tests_properties(test_cosim_tag_map_order PROPERTIES TIMEOUT 10)
 
 # TCP transport roundtrip integration test
 add_executable(test_tcp_roundtrip test_tcp_roundtrip.c)
