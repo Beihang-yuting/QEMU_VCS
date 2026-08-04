@@ -2,6 +2,9 @@
 # Build the supplied DPU driver archive for one exact Guest kernel.
 set -euo pipefail
 
+script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+project_dir=$(dirname "$script_dir")
+
 archive=''
 kernel_build=''
 output=''
@@ -81,7 +84,13 @@ kver=$(sed -n 's/^#define UTS_RELEASE "\(.*\)"$/\1/p' "$utsrelease")
 if [ -n "$compat_runtime_deb" ] && [ ! -f "$compat_runtime_deb" ]; then
     fail "compatibility runtime archive not found: $compat_runtime_deb"
 fi
-work=$(mktemp -d "${TMPDIR:-/tmp}/dpu-driver-build.XXXXXX")
+# The source tree is commonly imported and built by an unprivileged user.
+# Keep all driver build intermediates inside the project instead of relying on
+# a system-wide /tmp that might not be writable in that environment.
+driver_tmp_root="${DPU_DRIVER_TMPDIR:-${project_dir}/build/tmp}"
+mkdir -p "$driver_tmp_root" || fail "cannot create DPU temporary directory: $driver_tmp_root"
+[ -w "$driver_tmp_root" ] || fail "DPU temporary directory is not writable: $driver_tmp_root"
+work=$(mktemp -d "${driver_tmp_root%/}/dpu-driver-build.XXXXXX")
 cleanup() { rm -rf "$work"; }
 trap cleanup EXIT
 
@@ -91,6 +100,42 @@ driver_dir="$work/host-driver-net"
 
 compiler="${CC:-gcc}"
 command -v "$compiler" >/dev/null 2>&1 || fail "C compiler not found: $compiler"
+
+# Kernel 6.8 headers enable hardening options introduced after GCC 9.  An
+# offline install can deliberately select gcc-9 even when no compatibility
+# libc is needed, so filter only the options that the selected compiler cannot
+# parse.  This wrapper must be installed before the optional libc wrapper
+# below, otherwise the non-libc path leaks the flags directly to gcc-9.
+unsupported_kernel_flags=()
+for kernel_flag in \
+    -mharden-sls=all \
+    -ftrivial-auto-var-init=zero \
+    -fzero-call-used-regs=used-gpr; do
+    if ! printf 'int main(void) { return 0; }\n' | \
+            "$compiler" "$kernel_flag" -x c -c -o /dev/null - >/dev/null 2>&1; then
+        unsupported_kernel_flags+=("$kernel_flag")
+    fi
+done
+
+if [ "${#unsupported_kernel_flags[@]}" -gt 0 ]; then
+    kernel_flag_filter="$work/gcc-kernel-flag-filter"
+    export COSIM_DPU_BASE_COMPILER="$compiler"
+    cat > "$kernel_flag_filter" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+args=()
+for arg in "$@"; do
+    case "$arg" in
+        -mharden-sls=all|-ftrivial-auto-var-init=zero|-fzero-call-used-regs=used-gpr) ;;
+        *) args+=("$arg") ;;
+    esac
+done
+exec "$COSIM_DPU_BASE_COMPILER" "${args[@]}"
+EOF
+    chmod +x "$kernel_flag_filter"
+    echo "Filtering unsupported kernel compiler flags for $compiler: ${unsupported_kernel_flags[*]}"
+    compiler="$kernel_flag_filter"
+fi
 
 driver_cflags="${CFLAGS:-}"
 if "$use_system_bonding"; then

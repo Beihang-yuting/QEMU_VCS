@@ -2,6 +2,9 @@
 # Inject a validated custom-driver bundle into one Guest image.
 set -euo pipefail
 
+script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+project_dir=$(dirname "$script_dir")
+
 bundle=''
 rootfs=''
 initramfs=''
@@ -50,7 +53,12 @@ case "$ko_name" in ''|*'/'*|*'..'*) fail "unsafe ko_name: ${ko_name:-<unset>}" ;
 [ "$ko_name" = 'dpu_snd1.ko' ] || fail "unexpected primary module: $ko_name"
 [ -n "$kver" ] || fail 'bundle manifest has no kver'
 
-stage=$(mktemp -d "${TMPDIR:-/tmp}/dpu-driver-inject.XXXXXX")
+# Keep custom-driver staging inside the imported project.  System /tmp can be
+# unavailable to the non-root user that performs offline setup.
+driver_tmp_root="${DPU_DRIVER_TMPDIR:-${project_dir}/build/tmp}"
+mkdir -p "$driver_tmp_root" || fail "cannot create DPU temporary directory: $driver_tmp_root"
+[ -w "$driver_tmp_root" ] || fail "DPU temporary directory is not writable: $driver_tmp_root"
+stage=$(mktemp -d "${driver_tmp_root%/}/dpu-driver-inject.XXXXXX")
 cleanup() { rm -rf "$stage"; }
 trap cleanup EXIT
 mkdir -p "$stage/lib/modules/$ko_dir" "$stage/etc/cosim" "$stage/etc/local.d" \
@@ -95,7 +103,7 @@ printf '%s\n' \
 if [ -n "$rootfs" ]; then
     [ -f "$rootfs" ] || fail "rootfs not found: $rootfs"
     command -v debugfs >/dev/null 2>&1 || fail 'debugfs is required for rootfs injection'
-    commands=$(mktemp)
+    commands=$(mktemp "${driver_tmp_root%/}/dpu-driver-debugfs.XXXXXX")
     trap 'rm -f "$commands"; cleanup' EXIT
     (
         cd "$stage"

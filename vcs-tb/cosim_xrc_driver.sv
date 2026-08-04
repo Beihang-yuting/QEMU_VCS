@@ -164,10 +164,10 @@ class cosim_xrc_driver extends pcie_tl_rc_driver;
         m_rx_fifo = new("m_rx_fifo", this);
 
         // 统一 config space: 建 func_mgr(num_pfs=1 即单func), 走 _bdf 应答 QEMU 枚举。
-        // plusarg 可配: +CFG_PROFILE +NUM_PFS +MAX_VFS +NUM_VFS +VENDOR_ID
-        //              +DEVICE_ID +VF_DEVICE_ID
+        // plusarg 可配: +CFG_PROFILE +NUM_PFS +MAX_VFS +NUM_VFS +TAG_BIT
+        //              +VENDOR_ID +DEVICE_ID +VF_DEVICE_ID
         begin
-            int n_pfs, max_vfs, n_vfs, ven, dev, vfdev, topo, bypass_cfg;
+            int n_pfs, max_vfs, n_vfs, ven, dev, vfdev, topo, bypass_cfg, tag_bit;
             bit bypass_explicit;
             bit max_vfs_explicit;
             bit vendor_id_explicit, device_id_explicit, vf_device_id_explicit;
@@ -178,6 +178,7 @@ class cosim_xrc_driver extends pcie_tl_rc_driver;
             max_vfs_explicit = $value$plusargs("MAX_VFS=%d", max_vfs);
             if (!max_vfs_explicit)                           max_vfs = 0;
             if (!$value$plusargs("NUM_VFS=%d", n_vfs))      n_vfs   = 0;
+            if (!$value$plusargs("TAG_BIT=%d", tag_bit))    tag_bit = 8;
             if (!$value$plusargs("TOPO=%d", topo))          topo    = 0;  // 0=ep_direct 1=switch 2=multi_layer
             vendor_id_explicit = $value$plusargs("VENDOR_ID=%h", ven);
             if (!vendor_id_explicit)                          ven     = 32'h1AF4;
@@ -216,6 +217,9 @@ class cosim_xrc_driver extends pcie_tl_rc_driver;
             if (!cosim_runtime_policy_pkg::cosim_valid_num_pfs(n_pfs))
                 `uvm_fatal(get_name(), $sformatf(
                     "NUM_PFS must be in range 1..16, got %0d", n_pfs))
+            if (tag_bit != 8 && tag_bit != 10)
+                `uvm_fatal(get_name(), $sformatf(
+                    "TAG_BIT must be 8 or 10, got %0d", tag_bit))
             if (n_pfs == 16 &&
                 !cosim_runtime_policy_pkg::cosim_single_bus_profile_fits(
                     n_pfs, max_vfs))
@@ -224,10 +228,11 @@ class cosim_xrc_driver extends pcie_tl_rc_driver;
                     max_vfs))
             func_mgr = pcie_tl_func_manager::type_id::create("func_mgr");
             func_mgr.cfg_profile = cfg_profile;
+            func_mgr.set_tag_bit(tag_bit);
             func_mgr.build_topology(topo, n_pfs, max_vfs, ven[15:0], dev[15:0], vfdev[15:0]);
             `uvm_info(get_name(), $sformatf(
-                "[CFG_PROFILE] resolved name=%s PFs=%0d PF0=%04h:%04h VF=%04h",
-                cfg_profile_name, n_pfs, func_mgr.pf_ctx[0].vendor_id,
+                "[CFG_PROFILE] resolved name=%s TAG_BIT=%0d PFs=%0d PF0=%04h:%04h VF=%04h",
+                cfg_profile_name, tag_bit, n_pfs, func_mgr.pf_ctx[0].vendor_id,
                 func_mgr.pf_ctx[0].device_id, func_mgr.vf_device_id),
                 UVM_LOW)
             config_proxy.func_mgr            = func_mgr;

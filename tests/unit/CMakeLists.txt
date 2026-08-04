@@ -32,6 +32,10 @@ target_link_libraries(test_bridge_wait_hooks cosim_bridge pthread)
 add_test(NAME test_bridge_wait_hooks COMMAND test_bridge_wait_hooks)
 set_tests_properties(test_bridge_wait_hooks PROPERTIES TIMEOUT 10)
 
+add_executable(test_bridge_tag_bits test_bridge_tag_bits.c)
+target_link_libraries(test_bridge_tag_bits cosim_bridge)
+add_test(NAME test_bridge_tag_bits COMMAND test_bridge_tag_bits)
+
 add_executable(test_cosim_topology test_cosim_topology.c)
 target_link_libraries(test_cosim_topology cosim_bridge_common)
 add_test(NAME test_cosim_topology COMMAND test_cosim_topology)

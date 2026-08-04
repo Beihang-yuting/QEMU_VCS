@@ -42,6 +42,9 @@ void bridge_set_wait_hooks(bridge_ctx_t *ctx,
                            void *opaque);
 
 bridge_ctx_t *bridge_init(const char *shm_name, const char *sock_path);
+/* Select the QEMU-side software-tag width. Only 8 and 10 are valid PCIe
+ * modes. Callers must use this API instead of modifying tag_mask directly. */
+int bridge_set_tag_bit(bridge_ctx_t *ctx, unsigned int tag_bit);
 int bridge_connect(bridge_ctx_t *ctx);
 int bridge_send_tlp(bridge_ctx_t *ctx, tlp_entry_t *req);
 int bridge_wait_completion(bridge_ctx_t *ctx, uint16_t tag, cpl_entry_t *cpl);

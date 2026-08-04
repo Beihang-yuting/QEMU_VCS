@@ -6,7 +6,7 @@
 SHELL := /bin/bash
 
 .PHONY: all help bridge cosim-lib cosim-lib-eth qemu-device run-qemu \
-        validate-pcie-pref64-reserve validate-qemu-time-mode validate-mgmt-net \
+        validate-pcie-pref64-reserve validate-qemu-time-mode validate-mgmt-net validate-tag-bit \
         test-unit test-integration test \
         clean clean-logs clean-run clean-all info
 
@@ -42,6 +42,11 @@ endif
 NUM_RC         ?= 1
 # 每个 cosim endpoint 的 PF 数量；VCS +NUM_PFS 必须取相同值。
 NUM_PFS        ?= 1
+# Physical VIP/DUT request-tag width. QEMU retains 10-bit software tags and
+# VCS maps them onto this physical width; pass the same value to simv.
+TAG_BIT        ?= 8
+override TAG_BIT := $(value TAG_BIT)
+export TAG_BIT
 # 每个 cosim Root Port 的 64-bit prefetchable MMIO 预留；DPU profile 的三组 PF BAR 使用此空间。
 PCIE_PREF64_RESERVE ?= 256M
 # Freeze a command-line/environment value before exporting it so embedded Make
@@ -169,7 +174,13 @@ validate-mgmt-net:
 		exit 1; \
 	fi
 
-run-qemu: validate-pcie-pref64-reserve validate-qemu-time-mode validate-mgmt-net
+validate-tag-bit:
+	@if ! printf '%s\n' "$$TAG_BIT" | grep -Eq '^(8|10)$$'; then \
+		echo "[错误] TAG_BIT 必须是 8 或 10，当前值: $$TAG_BIT" >&2; \
+		exit 1; \
+	fi
+
+run-qemu: validate-pcie-pref64-reserve validate-qemu-time-mode validate-mgmt-net validate-tag-bit
 	@case '$(NUM_PFS)' in 1|2|3|4|5|6|7|8|9|10|11|12|13|14|15|16) ;; *) echo "[错误] NUM_PFS 必须是 1..16，当前值: $(NUM_PFS)"; exit 1;; esac
 	@[ -f '$(QEMU)' ] || { echo "[错误] QEMU 未找到: $(QEMU)（先 ./setup.sh 建 QEMU）"; exit 1; }
 	@[ -n '$(KERNEL)' ] && [ -f '$(KERNEL)' ] || { echo "[错误] Kernel 未找到 (GUEST_TYPE=$(GUEST_TYPE))"; exit 1; }
@@ -184,7 +195,7 @@ ifeq ($(CONSOLE),login)
 	  echo "  \"num_rc\": 1,"; \
 	  echo "  \"port_formula\": \"port = port_base + instance_id*3\","; \
 	  echo "  \"rcs\": [ {\"rc\": 0, \"instance_id\": 0, \"port\": $(PORT_BASE)} ],"; \
-	  echo "  \"device\": { \"vendor\": \"$(DEV_VENDOR)\", \"device\": \"$(DEV_DEVICE)\", \"bar0_size\": \"$(DEV_BAR0_SIZE)\", \"num_pfs\": $(NUM_PFS) }"; \
+	  echo "  \"device\": { \"vendor\": \"$(DEV_VENDOR)\", \"device\": \"$(DEV_DEVICE)\", \"bar0_size\": \"$(DEV_BAR0_SIZE)\", \"num_pfs\": $(NUM_PFS), \"tag_bit\": $(TAG_BIT) }"; \
 	  echo "}"; } > $(CONN_JSON)
 	@echo "[cosim] 描述符: $(CONN_JSON)"; cat $(CONN_JSON)
 	@echo "[cosim] 本终端即 guest 控制台(可登录); Ctrl-A C 切 QEMU monitor, Ctrl-A X 退出; VCS 读描述符连过来。"
@@ -228,7 +239,7 @@ else ifeq ($(CONSOLE),login-multi)
 	  printf "  \"rcs\": ["; \
 	  for r in $$(seq 0 $$(($(NUM_RC)-1))); do [ $$r -gt 0 ] && printf ","; printf " {\"rc\": %d, \"instance_id\": %d, \"port\": %d}" $$r $$r $$(($(PORT_BASE)+r*3)); done; \
 	  echo " ],"; \
-	  echo "  \"device\": { \"vendor\": \"$(DEV_VENDOR)\", \"device\": \"$(DEV_DEVICE)\", \"bar0_size\": \"$(DEV_BAR0_SIZE)\", \"num_pfs\": $(NUM_PFS) }"; \
+	  echo "  \"device\": { \"vendor\": \"$(DEV_VENDOR)\", \"device\": \"$(DEV_DEVICE)\", \"bar0_size\": \"$(DEV_BAR0_SIZE)\", \"num_pfs\": $(NUM_PFS), \"tag_bit\": $(TAG_BIT) }"; \
 	  echo "}"; } > $(CONN_JSON); \
 	echo "[cosim] 描述符: $(CONN_JSON)"; cat $(CONN_JSON); \
 	echo "[cosim] 登录各 RC 控制台(每个开一个终端): socat -,raw,echo=0 unix-connect:$(RUN_DIR)/console_rc<N>.sock"; \
@@ -261,7 +272,7 @@ else
 	  printf "  \"rcs\": ["; \
 	  for r in $$(seq 0 $$(($(NUM_RC)-1))); do [ $$r -gt 0 ] && printf ","; printf " {\"rc\": %d, \"instance_id\": %d, \"port\": %d}" $$r $$r $$(($(PORT_BASE)+r*3)); done; \
 	  echo " ],"; \
-	  echo "  \"device\": { \"vendor\": \"$(DEV_VENDOR)\", \"device\": \"$(DEV_DEVICE)\", \"bar0_size\": \"$(DEV_BAR0_SIZE)\", \"num_pfs\": $(NUM_PFS) }"; \
+	  echo "  \"device\": { \"vendor\": \"$(DEV_VENDOR)\", \"device\": \"$(DEV_DEVICE)\", \"bar0_size\": \"$(DEV_BAR0_SIZE)\", \"num_pfs\": $(NUM_PFS), \"tag_bit\": $(TAG_BIT) }"; \
 	  echo "}"; } > $(CONN_JSON); \
 	echo "[cosim] 描述符: $(CONN_JSON)"; cat $(CONN_JSON); \
 	echo "[cosim] VCS 侧读它连过来;Ctrl-C 停。"; \

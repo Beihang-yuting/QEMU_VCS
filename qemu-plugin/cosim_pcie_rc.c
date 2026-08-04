@@ -1461,6 +1461,15 @@ static void cosim_pcie_rc_realize(PCIDevice *pci_dev, Error **errp)
     }
 
     bridge_ctx_t *ctx = (bridge_ctx_t *)s->bridge_ctx;
+    /* QEMU software tags remain 10-bit. The VCS RC proxy maps them onto the
+     * selected 8/10-bit physical VIP/DUT tag pool. Future PF devices use this
+     * public API instead of directly modifying bridge_ctx_t internals. */
+    if (bridge_set_tag_bit(ctx, 10) < 0) {
+        error_setg(errp, "cosim: failed to select 10-bit QEMU bridge tags");
+        bridge_destroy(ctx);
+        s->bridge_ctx = NULL;
+        return;
+    }
     ctx->debug = s->debug;  /* propagate runtime debug flag to bridge */
 
     /* ======== 第二步: 查询 VCS 拓扑并建立 PF BAR profile ======== */
