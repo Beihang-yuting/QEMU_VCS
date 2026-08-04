@@ -68,6 +68,10 @@ add_test(NAME test_guest_ssh_provisioning
          COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/test_guest_ssh_provisioning.sh)
 set_tests_properties(test_guest_ssh_provisioning PROPERTIES TIMEOUT 10)
 
+add_test(NAME test_inject_modules_debugfs_paths
+         COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/test_inject_modules_debugfs_paths.sh)
+set_tests_properties(test_inject_modules_debugfs_paths PROPERTIES TIMEOUT 30)
+
 # QEMU PCIe topology and REAL_DUT config-bypass source policy.
 add_test(NAME test_pcie_launch_topology
          COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/test_pcie_launch_topology.sh)
