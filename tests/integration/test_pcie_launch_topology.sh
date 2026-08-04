@@ -224,8 +224,8 @@ require_dpu_profile_pattern 'PF device identity default' \
     "dev[[:space:]]*=[[:space:]]*16'h5011[[:space:]]*;"
 require_dpu_profile_pattern 'VF device identity default' \
     "vfdev[[:space:]]*=[[:space:]]*16'h8689[[:space:]]*;"
-require_profile_pattern 'profile propagation before topology build' \
-    'func_mgr[[:space:]]*\.[[:space:]]*cfg_profile[[:space:]]*=[[:space:]]*cfg_profile[[:space:]]*;[[:space:]]*func_mgr[[:space:]]*\.[[:space:]]*build_topology[[:space:]]*\('
+require_profile_pattern 'profile and tag-bit propagation before topology build' \
+    'func_mgr[[:space:]]*\.[[:space:]]*cfg_profile[[:space:]]*=[[:space:]]*cfg_profile[[:space:]]*;.*func_mgr[[:space:]]*\.[[:space:]]*set_tag_bit[[:space:]]*\([[:space:]]*tag_bit[[:space:]]*\)[[:space:]]*;.*func_mgr[[:space:]]*\.[[:space:]]*build_topology[[:space:]]*\('
 
 if ! grep -Fq '$test$plusargs("AUTO_START_COSIM")' "$xrc_driver"; then
     echo 'FAIL: VCS has no AUTO_START_COSIM alias for automated TCP startup' >&2
