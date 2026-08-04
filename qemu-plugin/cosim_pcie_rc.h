@@ -103,6 +103,13 @@ struct CosimPCIeRC {
     /* Bridge 上下文 — 使用 opaque 指针避免在 QEMU 编译环境中引入 bridge 头文件 */
     void *bridge_ctx;
 
+    /* Adaptive-iCount gate owned by PF0. Blocking VCS bridge operations stop
+     * the host-time reference used for adaptive catch-up; nested calls share
+     * one outermost disable/enable pair. */
+    uint32_t vcs_wait_depth;
+    bool     vcs_wait_ticks_owned;
+    int64_t  vcs_wait_started_ns;
+
     /* P2: IRQ/DMA 轮询线程（opaque pointer 到 irq_poller_t） */
     void *irq_poller;
 

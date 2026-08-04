@@ -60,6 +60,10 @@ add_test(NAME test_qemu_time_mode
          COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/test_qemu_time_mode.sh)
 set_tests_properties(test_qemu_time_mode PROPERTIES TIMEOUT 10)
 
+add_test(NAME test_qemu_wait_gate_source
+         COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/test_qemu_wait_gate_source.sh)
+set_tests_properties(test_qemu_wait_gate_source PROPERTIES TIMEOUT 10)
+
 add_test(NAME test_qemu_management_nic
          COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/test_qemu_management_nic.sh)
 set_tests_properties(test_qemu_management_nic PROPERTIES TIMEOUT 10)

@@ -16,6 +16,9 @@
 #include "hw/pci/pcie.h"        /* pcie_ari_init */
 #include "hw/qdev-properties.h"
 #include "qapi/error.h"
+#include "qemu/timer.h"
+#include "sysemu/cpu-timers.h"
+#include "sysemu/runstate.h"
 
 /* Debug 打印：运行时通过 -device cosim-pcie-rc,...,debug=on 开启 */
 #define COSIM_DPRINTF(s, fmt, ...) do { \
@@ -29,6 +32,59 @@
 #include "hw/net/cosim_mmio_be.h"
 
 /* ========== MMIO 操作 ========== */
+
+/* A VCS/DUT round trip can consume seconds of host time while the vCPU is
+ * blocked in a device callback. The guest executes no instructions during
+ * that interval, but adaptive iCount would otherwise compare itself against
+ * an advancing QEMU_CLOCK_VIRTUAL_RT and accelerate afterwards to catch up.
+ * Stop that host-time reference for only the outermost bridge wait. */
+static void cosim_vcs_wait_begin(void *opaque)
+{
+    CosimPCIeRC *s = opaque;
+
+    g_assert(s != NULL);
+    g_assert(bql_locked());
+    if (s->vcs_wait_depth++ != 0) {
+        return;
+    }
+
+    s->vcs_wait_ticks_owned = false;
+    if (!runstate_is_running()) {
+        return;
+    }
+
+    s->vcs_wait_started_ns = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
+    cpu_disable_ticks();
+    s->vcs_wait_ticks_owned = true;
+    COSIM_DPRINTF(s, "VCS wait: adaptive host-time reference frozen\n");
+}
+
+static void cosim_vcs_wait_end(void *opaque)
+{
+    CosimPCIeRC *s = opaque;
+
+    g_assert(s != NULL);
+    g_assert(bql_locked());
+    if (s->vcs_wait_depth == 0) {
+        qemu_log_mask(LOG_GUEST_ERROR, "cosim: unbalanced VCS wait end\n");
+        return;
+    }
+    if (--s->vcs_wait_depth != 0) {
+        return;
+    }
+
+    if (s->vcs_wait_ticks_owned) {
+        int64_t elapsed = qemu_clock_get_ns(QEMU_CLOCK_REALTIME) -
+                          s->vcs_wait_started_ns;
+        if (runstate_is_running()) {
+            cpu_enable_ticks();
+        }
+        s->vcs_wait_ticks_owned = false;
+        COSIM_DPRINTF(s,
+                      "VCS wait: adaptive host-time reference resumed after %.3f ms\n",
+                      (double)elapsed / 1000000.0);
+    }
+}
 
 /* Core MMIO forward: turn QEMU's 1/2/4/8B access into a DWORD-aligned PCIe
  * request with correct first/last byte enables.  An unaligned 8B access may
@@ -1291,6 +1347,9 @@ static void cosim_pcie_rc_realize(PCIDevice *pci_dev, Error **errp)
 {
     CosimPCIeRC *s = COSIM_PCIE_RC(pci_dev);
     s->num_bars = 0;
+    s->vcs_wait_depth = 0;
+    s->vcs_wait_ticks_owned = false;
+    s->vcs_wait_started_ns = 0;
 
     /* Mark the PF multifunction so QEMU allows adding VF stub PCIDevices
      * (func 1+) to this slot on SR-IOV enable. pci_init_multifunction() gates
@@ -1602,6 +1661,14 @@ static void cosim_pcie_rc_realize(PCIDevice *pci_dev, Error **errp)
         qemu_log("cosim: primary PF0 realized, %u PF(s) total\n", s->num_pfs);
     }
 
+    /* Register only after all realize-time bridge traffic and sibling creation
+     * have completed. Runtime config/MMIO callbacks hold BQL, as required by
+     * cpu_disable_ticks()/cpu_enable_ticks(). */
+    if (icount_enabled()) {
+        bridge_set_wait_hooks(ctx, cosim_vcs_wait_begin,
+                              cosim_vcs_wait_end, s);
+    }
+
     /* Signal VCS that device realize completed (BQL about to be released). A VCS
      * inbound-DMA before realize returns would deadlock pci_dma_write on the BQL
      * held during blocked config discovery; the VCS side waits for this. */
@@ -1646,7 +1713,14 @@ static void cosim_pcie_rc_exit(PCIDevice *pci_dev)
         s->msi_bh = NULL;
     }
     if (s->bridge_ctx) {
-        bridge_destroy((bridge_ctx_t *)s->bridge_ctx);
+        bridge_ctx_t *ctx = (bridge_ctx_t *)s->bridge_ctx;
+        bridge_set_wait_hooks(ctx, NULL, NULL, NULL);
+        if (s->vcs_wait_ticks_owned && runstate_is_running()) {
+            cpu_enable_ticks();
+        }
+        s->vcs_wait_ticks_owned = false;
+        s->vcs_wait_depth = 0;
+        bridge_destroy(ctx);
         s->bridge_ctx = NULL;
     }
     msi_uninit(pci_dev);
