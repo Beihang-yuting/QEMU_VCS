@@ -6,6 +6,8 @@
  *
  * Compile AFTER: axis_pkg, pcie_tl_pkg, xilinx_pcie_adapter_pkg, cosim_bridge_pkg.
  */
+`include "cosim_xrc_utils_pkg.sv"
+
 package cosim_xrc_pkg;
     import uvm_pkg::*;
     import pcie_tl_pkg::*;

@@ -92,6 +92,10 @@ class cosim_xrc_driver extends pcie_tl_rc_driver;
     // ---- Tag mapping: QEMU 8-bit tag <-> VIP tag ----
     bit [9:0] vip_tag_to_qemu_tag[int];        // 10-bit QEMU tag (extended tag)
     int       qemu_tag_to_vip_tag[bit [9:0]];
+    // QEMU tag staged by request-object instance ID until the base driver
+    // allocates the corresponding VIP tag. Keying by object avoids cross-talk
+    // if another send_tlp task runs while this request waits for FC/BW credit.
+    bit [9:0] pending_qemu_tag_by_inst[int];
 
     // ---- DPI scratch (class members = static storage; VCS Q-2020 safe) ----
     byte unsigned    dpi_type;
@@ -127,6 +131,19 @@ class cosim_xrc_driver extends pcie_tl_rc_driver;
 
     function new(string name = "cosim_xrc_driver", uvm_component parent = null);
         super.new(name, parent);
+    endfunction
+
+    virtual function void on_tag_assigned(pcie_tl_tlp tlp);
+        int inst_id;
+
+        super.on_tag_assigned(tlp);
+        inst_id = tlp.get_inst_id();
+        if (!pending_qemu_tag_by_inst.exists(inst_id))
+            return;
+
+        vip_tag_to_qemu_tag[int'(tlp.tag)] = pending_qemu_tag_by_inst[inst_id];
+        qemu_tag_to_vip_tag[pending_qemu_tag_by_inst[inst_id]] = int'(tlp.tag);
+        pending_qemu_tag_by_inst.delete(inst_id);
     endfunction
 
     // -----------------------------------------------------------------------
@@ -1153,11 +1170,13 @@ class cosim_xrc_driver extends pcie_tl_rc_driver;
 
             begin
                 bit [9:0] qemu_tag_10 = dpi_tag[9:0];   // 10-bit QEMU tag
+                int request_inst_id = vip_tlp.get_inst_id();
+                if (vip_tlp.requires_completion())
+                    pending_qemu_tag_by_inst[request_inst_id] = qemu_tag_10;
                 send_tlp(vip_tlp);   // adapter.send -> CQ channel -> DUT
-                if (vip_tlp.requires_completion()) begin
-                    vip_tag_to_qemu_tag[int'(vip_tlp.tag)] = qemu_tag_10;
-                    qemu_tag_to_vip_tag[qemu_tag_10]       = int'(vip_tlp.tag);
-                end
+                // Normally deleted by on_tag_assigned() before adapter.send;
+                // keep cleanup here for future send paths that skip allocation.
+                pending_qemu_tag_by_inst.delete(request_inst_id);
             end
             total_tlp_count++;
         end
@@ -1231,14 +1250,14 @@ class cosim_xrc_driver extends pcie_tl_rc_driver;
         qemu_tag_to_vip_tag.delete(qemu_tag[9:0]);
 
         for (int i = 0; i < 16; i++) bridge_vcs_set_cpl_data_rc(rc_index, i, 0);
-        // Every DWORD is converted from VIP payload order to the little-endian
-        // host word expected by the bridge.  QEMU may now issue an unaligned
-        // 8B MMIO read (three request DWORDs), so returning only payload[0:3]
-        // would silently truncate the high bytes.
+        // VIP payload bytes are already in ascending memory-address order.
+        // Pack them as a little-endian host word for bridge_vcs_set_cpl_data_rc;
+        // reversing the bytes here turns 0x00000008 into 0x08000000 in QEMU.
+        // QEMU may issue an unaligned 8B MMIO read (three request DWORDs), so
+        // returning only payload[0:3] would silently truncate the high bytes.
         for (int dw = 0; dw < 16 && dw * 4 < cpl.payload.size(); dw++) begin
-            rdata = 0;
-            for (int b = 0; b < 4 && dw * 4 + b < cpl.payload.size(); b++)
-                rdata[((3-b)*8) +: 8] = cpl.payload[dw * 4 + b];
+            rdata = cosim_xrc_utils_pkg::cosim_pack_cpl_dword_le(
+                cpl.payload, dw * 4);
             bridge_vcs_set_cpl_data_rc(rc_index, dw, rdata);
         end
         if (bridge_vcs_send_cpl_scalar_rc(rc_index, qemu_tag, 1) != 0)

@@ -27,6 +27,13 @@ class pcie_tl_base_driver extends uvm_driver #(pcie_tl_tlp);
         super.new(name, parent);
     endfunction
 
+    // Called synchronously after a non-posted request receives its VIP tag and
+    // before any ordering/flow-control wait or adapter send. Derived bridges
+    // can publish an external-to-VIP tag mapping without racing a fast DUT
+    // Completion. The base implementation intentionally does nothing.
+    virtual function void on_tag_assigned(pcie_tl_tlp tlp);
+    endfunction
+
     //=========================================================================
     // Main run phase
     //=========================================================================
@@ -58,6 +65,7 @@ class pcie_tl_base_driver extends uvm_driver #(pcie_tl_tlp);
             // Global registry for SV_IF/adapter mode, where the monitor (not the
             // env/driver completion path) folds the returning CplD.
             pcie_rb_registry::register(tlp);
+            on_tag_assigned(tlp);
         end
 
         // 2. Ordering engine enqueue + wait
