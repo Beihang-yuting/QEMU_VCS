@@ -28,7 +28,10 @@ for console in login login-multi file; do
 
     icount="$("${make_cmd[@]}" CONSOLE="$console" QEMU_TIME_MODE=icount)"
     assert_exactly_once '-accel tcg' "$icount"
-    assert_exactly_once '-icount shift=auto,align=off,sleep=off' "$icount"
+    assert_exactly_once '-icount shift=auto,align=off,sleep=on' "$icount"
+    if grep -Fq -- '-icount shift=auto,align=off,sleep=off' <<<"$icount"; then
+        fail "legacy global sleep=off mode remains enabled for CONSOLE=$console"
+    fi
 done
 
 make -s -C "$repo" validate-qemu-time-mode QEMU_TIME_MODE=realtime

@@ -75,7 +75,7 @@ QEMU_TIME_MODE ?= realtime
 override QEMU_TIME_MODE := $(value QEMU_TIME_MODE)
 export QEMU_TIME_MODE
 ifeq ($(QEMU_TIME_MODE),icount)
-QEMU_TIME_ARGS := -accel tcg -icount shift=auto,align=off,sleep=off
+QEMU_TIME_ARGS := -accel tcg -icount shift=auto,align=off,sleep=on
 else
 QEMU_TIME_ARGS :=
 endif
@@ -348,7 +348,7 @@ help:
 	@echo "  CONSOLE=login|login-multi|file  控制台模式(默认 login)"
 	@echo "  MGMT_NET=1              默认加 e1000e 管理网卡；0=关闭（不经过 DUT/VCS）"
 	@echo "  MGMT_SSH_PORT_BASE=2222 管理 SSH 端口基数；RC r 使用 127.0.0.1:(base+r)"
-	@echo "  QEMU_TIME_MODE=realtime|icount QEMU 时间模式(默认 realtime);icount 使用 -accel tcg -icount shift=auto,align=off,sleep=off"
+	@echo "  QEMU_TIME_MODE=realtime|icount QEMU 时间模式(默认 realtime);icount 使用 -accel tcg -icount shift=auto,align=off,sleep=on"
 	@echo "  MMIO_TIMEOUT_MS=180000  MMIO 读等 VCS 应答超时 ms(默认 3min; 0=禁用,永久阻塞)"
 	@echo "  ADVERTISE_HOST         写入描述符的 host（默认本机 IP）"
 	@echo "  GUEST_TYPE=ubuntu|debian  Guest 系统（默认 ubuntu）"
