@@ -9,6 +9,26 @@
 static void bridge_consume_vf_config(bridge_ctx_t *ctx);
 static void bridge_consume_vf_event(bridge_ctx_t *ctx);
 
+static void bridge_wait_begin(bridge_ctx_t *ctx) {
+    if (ctx && ctx->wait_begin)
+        ctx->wait_begin(ctx->wait_hook_opaque);
+}
+
+static void bridge_wait_end(bridge_ctx_t *ctx) {
+    if (ctx && ctx->wait_end)
+        ctx->wait_end(ctx->wait_hook_opaque);
+}
+
+void bridge_set_wait_hooks(bridge_ctx_t *ctx,
+                           bridge_wait_hook_fn begin,
+                           bridge_wait_hook_fn end,
+                           void *opaque) {
+    if (!ctx) return;
+    ctx->wait_begin = begin;
+    ctx->wait_end = end;
+    ctx->wait_hook_opaque = opaque;
+}
+
 bridge_ctx_t *bridge_init(const char *shm_name, const char *sock_path) {
     bridge_ctx_t *ctx = calloc(1, sizeof(*ctx));
     if (!ctx) return NULL;
@@ -149,12 +169,11 @@ int bridge_wait_completion(bridge_ctx_t *ctx, uint16_t tag, cpl_entry_t *cpl) {
 
 int bridge_send_tlp_and_wait(bridge_ctx_t *ctx, tlp_entry_t *req, cpl_entry_t *cpl) {
     pthread_mutex_lock(&ctx->tlp_mutex);
+    bridge_wait_begin(ctx);
     int ret = bridge_send_tlp(ctx, req);
-    if (ret < 0) {
-        pthread_mutex_unlock(&ctx->tlp_mutex);
-        return ret;
-    }
-    ret = bridge_wait_completion(ctx, req->tag, cpl);
+    if (ret >= 0)
+        ret = bridge_wait_completion(ctx, req->tag, cpl);
+    bridge_wait_end(ctx);
     pthread_mutex_unlock(&ctx->tlp_mutex);
     return ret;
 }
@@ -198,19 +217,20 @@ int bridge_wait_completion_timed(bridge_ctx_t *ctx, uint16_t tag,
 int bridge_send_tlp_and_wait_timed(bridge_ctx_t *ctx, tlp_entry_t *req,
                                    cpl_entry_t *cpl, int timeout_ms) {
     pthread_mutex_lock(&ctx->tlp_mutex);
+    bridge_wait_begin(ctx);
     int ret = bridge_send_tlp(ctx, req);
-    if (ret < 0) {
-        pthread_mutex_unlock(&ctx->tlp_mutex);
-        return ret;
-    }
-    ret = bridge_wait_completion_timed(ctx, req->tag, cpl, timeout_ms);
+    if (ret >= 0)
+        ret = bridge_wait_completion_timed(ctx, req->tag, cpl, timeout_ms);
+    bridge_wait_end(ctx);
     pthread_mutex_unlock(&ctx->tlp_mutex);
     return ret;
 }
 
 int bridge_send_tlp_fire(bridge_ctx_t *ctx, tlp_entry_t *req) {
     pthread_mutex_lock(&ctx->tlp_mutex);
+    bridge_wait_begin(ctx);
     int ret = bridge_send_tlp(ctx, req);
+    bridge_wait_end(ctx);
     pthread_mutex_unlock(&ctx->tlp_mutex);
     return ret;
 }
@@ -431,11 +451,12 @@ static void bridge_consume_vf_event(bridge_ctx_t *ctx) {
  * competes here. */
 void bridge_drain_vf_pending(bridge_ctx_t *ctx, int timeout_ms) {
     if (!ctx || !ctx->transport || !ctx->transport->recv_sync_timed) return;
+    bridge_wait_begin(ctx);
     int guard = 64;
     while (guard-- > 0) {
         sync_msg_t msg;
         int ret = ctx->transport->recv_sync_timed(ctx->transport, &msg, timeout_ms);
-        if (ret != 0) return;   /* timeout (1) or error (-1): nothing pending */
+        if (ret != 0) goto out; /* timeout (1) or error (-1): nothing pending */
         if (msg.type == SYNC_MSG_VF_CONFIG) { bridge_consume_vf_config(ctx); continue; }
         if (msg.type == SYNC_MSG_VF_EVENT)  { bridge_consume_vf_event(ctx);  continue; }
         if (msg.type == SYNC_MSG_CPL_READY) {
@@ -444,8 +465,10 @@ void bridge_drain_vf_pending(bridge_ctx_t *ctx, int timeout_ms) {
             ctx->transport->recv_cpl(ctx->transport, &cpl);
             continue;
         }
-        return;  /* unknown type — stop rather than mis-parse */
+        goto out;  /* unknown type — stop rather than mis-parse */
     }
+out:
+    bridge_wait_end(ctx);
 }
 
 int bridge_send_vf_config(bridge_ctx_t *ctx, const vf_config_t *cfg) {

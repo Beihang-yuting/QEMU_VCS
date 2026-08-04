@@ -8,6 +8,8 @@
 #include "trace_log.h"
 #include <pthread.h>
 
+typedef void (*bridge_wait_hook_fn)(void *opaque);
+
 typedef struct {
     cosim_shm_t shm;
     int         listen_fd;
@@ -22,6 +24,9 @@ typedef struct {
     struct cosim_transport *transport;  /* NULL = legacy SHM mode */
     pthread_mutex_t tlp_mutex;         /* protects send_tlp + wait_completion */
     int             debug;             /* runtime debug print toggle */
+    bridge_wait_hook_fn wait_begin;     /* optional blocking-operation hook */
+    bridge_wait_hook_fn wait_end;
+    void               *wait_hook_opaque;
     /* VF config sync (VCS/DUT authoritative → QEMU applies). Received inline
      * on the ctrl channel during a CfgWr completion wait; dispatched to the
      * device via vf_config_cb if registered, else stashed for polling. */
@@ -30,6 +35,11 @@ typedef struct {
     void          (*vf_config_cb)(const vf_config_t *cfg, void *user);
     void           *vf_config_user;
 } bridge_ctx_t;
+
+void bridge_set_wait_hooks(bridge_ctx_t *ctx,
+                           bridge_wait_hook_fn begin,
+                           bridge_wait_hook_fn end,
+                           void *opaque);
 
 bridge_ctx_t *bridge_init(const char *shm_name, const char *sock_path);
 int bridge_connect(bridge_ctx_t *ctx);
