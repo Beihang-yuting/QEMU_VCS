@@ -64,6 +64,10 @@ add_test(NAME test_qemu_management_nic
          COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/test_qemu_management_nic.sh)
 set_tests_properties(test_qemu_management_nic PROPERTIES TIMEOUT 10)
 
+add_test(NAME test_guest_ssh_provisioning
+         COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/test_guest_ssh_provisioning.sh)
+set_tests_properties(test_guest_ssh_provisioning PROPERTIES TIMEOUT 10)
+
 # QEMU PCIe topology and REAL_DUT config-bypass source policy.
 add_test(NAME test_pcie_launch_topology
          COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/test_pcie_launch_topology.sh)
