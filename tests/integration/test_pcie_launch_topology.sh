@@ -136,6 +136,10 @@ if ! grep -Eq '^run-qemu:[[:space:]]+validate-pcie-pref64-reserve([[:space:]]|$)
 fi
 
 qemu_device_body=$(sed -n '/^qemu-device:/,/^# host_mem/p' "$makefile")
+if ! grep -Eq '^qemu-device:[[:space:]]+bridge([[:space:]]|$)' "$makefile"; then
+    echo "FAIL: qemu-device does not rebuild its bridge library dependency" >&2
+    exit 1
+fi
 for sync_cmd in \
     'cp "$(PROJECT_DIR)/qemu-plugin/cosim_pcie_rc.c" "$(QEMU_SRC_DIR)/hw/net/cosim_pcie_rc.c"' \
     'cp "$(PROJECT_DIR)/qemu-plugin/cosim_pcie_rc.h" "$(QEMU_SRC_DIR)/include/hw/net/cosim_pcie_rc.h"' \

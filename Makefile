@@ -126,7 +126,7 @@ cosim-lib-eth:
 QEMU_SRC_DIR = $(PROJECT_DIR)/third_party/qemu
 QEMU_BUILD   = $(QEMU_SRC_DIR)/build
 
-qemu-device:
+qemu-device: bridge
 	@[ -f "$(QEMU_BUILD)/build.ninja" ] || { echo "[错误] 无 qemu build: $(QEMU_BUILD)（先 ./setup.sh 建 QEMU）"; exit 1; }
 	@cp "$(PROJECT_DIR)/qemu-plugin/cosim_pcie_rc.c" "$(QEMU_SRC_DIR)/hw/net/cosim_pcie_rc.c"
 	@cp "$(PROJECT_DIR)/qemu-plugin/cosim_pcie_rc.h" "$(QEMU_SRC_DIR)/include/hw/net/cosim_pcie_rc.h"
