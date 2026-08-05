@@ -33,7 +33,7 @@ fi
 
 output="$(COSIM_GUEST_SSH_PASSWORD='not-to-be-printed' \
     "$script" --dry-run --rootfs "$tmp/rootfs.ext4" --user ryan)"
-assert_contains 'openssh-server sudo' "$output"
+assert_contains 'openssh-server sudo build-essential' "$output"
 assert_contains 'Driver=e1000e' "$output"
 assert_contains 'PasswordAuthentication yes' "$output"
 [[ "$output" != *not-to-be-printed* ]] || fail 'password leaked to output'

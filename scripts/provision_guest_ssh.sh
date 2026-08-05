@@ -22,8 +22,9 @@ Usage:
   COSIM_GUEST_SSH_PASSWORD=... scripts/provision_guest_ssh.sh --rootfs IMAGE [--user USER]
   COSIM_GUEST_SSH_PASSWORD=... scripts/provision_guest_ssh.sh --dry-run --rootfs IMAGE [--user USER]
 
-Provision a Debian/Ubuntu Guest image with openssh-server, sudo, DHCP for the
-QEMU e1000e management NIC, and a non-root management user.
+Provision a Debian/Ubuntu Guest image with openssh-server, sudo,
+build-essential, DHCP for the QEMU e1000e management NIC, and a non-root
+management user.
 
 The password is read only from COSIM_GUEST_SSH_PASSWORD and is never printed.
 --dry-run validates arguments and prints the planned package/configuration
@@ -92,7 +93,7 @@ password="${COSIM_GUEST_SSH_PASSWORD:-}"
 
 if "$dry_run"; then
     cat <<EOF
-Would install: openssh-server sudo
+Would install: openssh-server sudo build-essential
 Would write: /etc/systemd/network/10-cosim-management.network
 [Match]
 Driver=e1000e
@@ -140,7 +141,7 @@ run_root chmod 0755 "$mount_dir/usr/sbin/policy-rc.d"
 
 run_root chroot "$mount_dir" /usr/bin/env DEBIAN_FRONTEND=noninteractive apt-get update
 run_root chroot "$mount_dir" /usr/bin/env DEBIAN_FRONTEND=noninteractive \
-    apt-get install -y --no-install-recommends openssh-server sudo
+    apt-get install -y --no-install-recommends openssh-server sudo build-essential
 run_root rm -f "$mount_dir/usr/sbin/policy-rc.d"
 
 if ! run_root chroot "$mount_dir" id -u "$guest_user" >/dev/null 2>&1; then
