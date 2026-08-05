@@ -71,9 +71,9 @@ else
 MGMT_NET_ARGS_RC0 :=
 MGMT_NET_ARGS_LOOP :=
 endif
-# QEMU 时间模式：realtime 保持现有行为；icount 使用 TCG 指令计数虚拟时间，
-# 使 host 侧等待 VCS Completion 时不推进 guest 虚拟时间。
-QEMU_TIME_MODE ?= realtime
+# QEMU 时间模式：默认 icount，使用 TCG 指令计数虚拟时间，使 host 侧等待
+# VCS Completion 时不推进 guest 虚拟时间；可显式指定 realtime 回退。
+QEMU_TIME_MODE ?= icount
 # Preserve a command-line/environment value literally before using it in a
 # conditional or a shell recipe.  This prevents an embedded Make function from
 # being evaluated while the mode is validated.
@@ -359,7 +359,7 @@ help:
 	@echo "  CONSOLE=login|login-multi|file  控制台模式(默认 login)"
 	@echo "  MGMT_NET=1              默认加 e1000e 管理网卡；0=关闭（不经过 DUT/VCS）"
 	@echo "  MGMT_SSH_PORT_BASE=2222 管理 SSH 端口基数；RC r 使用 127.0.0.1:(base+r)"
-	@echo "  QEMU_TIME_MODE=realtime|icount QEMU 时间模式(默认 realtime);icount 使用 -accel tcg -icount shift=auto,align=off,sleep=on"
+	@echo "  QEMU_TIME_MODE=icount|realtime QEMU 时间模式(默认 icount);realtime 可显式回退"
 	@echo "  MMIO_TIMEOUT_MS=180000  MMIO 读等 VCS 应答超时 ms(默认 3min; 0=禁用,永久阻塞)"
 	@echo "  ADVERTISE_HOST         写入描述符的 host（默认本机 IP）"
 	@echo "  GUEST_TYPE=ubuntu|debian  Guest 系统（默认 ubuntu）"

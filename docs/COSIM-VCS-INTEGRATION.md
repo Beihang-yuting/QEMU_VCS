@@ -168,12 +168,14 @@ make run-qemu NUM_PFS=4 PCIE_PREF64_RESERVE=256M
 
 ## 9. QEMU iCount 时间模式
 
-默认 `QEMU_TIME_MODE=realtime` 保持原有行为。真实驱动会按 Guest 时间轮询
-DUT 状态时，可选择：
+默认启用 `QEMU_TIME_MODE=icount`，真实驱动按 Guest 时间轮询 DUT 状态时，
+VCS 的响应延迟不会被错误计入 Guest 时间。默认启动直接使用：
 
 ```bash
-make run-qemu QEMU_TIME_MODE=icount
+make run-qemu
 ```
+
+如需恢复原有实时模式，可显式指定 `QEMU_TIME_MODE=realtime`。
 
 该模式使用：
 
