@@ -146,6 +146,14 @@ class cosim_xrc_driver extends pcie_tl_rc_driver;
         pending_qemu_tag_by_inst.delete(inst_id);
     endfunction
 
+    virtual function bit handle_completion(pcie_tl_cpl_tlp cpl);
+        // The generic env also invokes this callback after publishing to the
+        // monitor.  During cosim, rx_loop owns the one real base-class consume.
+        if (cosim_active)
+            return 1;
+        return super.handle_completion(cpl);
+    endfunction
+
     // -----------------------------------------------------------------------
     // build_phase: resolve rc_index, create the config proxy.
     //   rc_index source (in priority order):
