@@ -116,10 +116,18 @@ fi
 mapfile -t inject_events <"$inject_log"
 write_index=-1
 closure_index=-1
+first_read_index=-1
+last_read_index=-1
 install_index=-1
 for index in "${!inject_events[@]}"; do
     case "${inject_events[$index]}" in
         debugfs-write) write_index=$index ;;
+        debugfs-read)
+            if (( first_read_index < 0 )); then
+                first_read_index=$index
+            fi
+            last_read_index=$index
+            ;;
         e2fsck)
             if (( index > write_index )); then
                 closure_index=$index
@@ -131,8 +139,10 @@ done
 (( write_index >= 0 )) || fail 'module injection did not invoke writable debugfs'
 (( closure_index > write_index )) ||
     fail 'filesystem was not safely closed after writable debugfs injection'
-(( install_index > closure_index )) ||
-    fail 'debug utilities were not installed after module injection and filesystem closure'
+(( first_read_index > closure_index )) ||
+    fail 'final read-only verification did not follow filesystem closure'
+(( install_index > last_read_index )) ||
+    fail 'debug utilities were installed before final read-only verification completed'
 [[ "$(grep -c '^mktemp:' "$inject_log")" -eq 2 ]] ||
     fail 'module injector did not create both temporaries with explicit templates'
 leftover="$(find "$expected_build_tmp" -mindepth 1 -maxdepth 1 \
