@@ -20,6 +20,13 @@ assert_contains() {
     grep -Fq -- "$needle" <<<"$haystack" || fail "$description (missing: $needle)"
 }
 
+assert_not_contains() {
+    local needle="$1" haystack="$2" description="$3"
+    if grep -Fq -- "$needle" <<<"$haystack"; then
+        fail "$description (unexpected: $needle)"
+    fi
+}
+
 assert_file() {
     [ -f "$1" ] || fail "$2 (missing: $1)"
 }
@@ -46,6 +53,18 @@ snapshot_tree() {
                 fi
             done
     )
+}
+
+snapshot_optional_tree() {
+    local root="$1"
+    if [ -d "$root" ]; then
+        printf 'present\n'
+        snapshot_tree "$root"
+    elif [ -e "$root" ] || [ -L "$root" ]; then
+        printf 'other\t%s\n' "$(stat -c '%F' -- "$root")"
+    else
+        printf 'absent\n'
+    fi
 }
 
 # Public selectors and Make defaults.
@@ -91,6 +110,233 @@ grep -Fq 'guest/images/ubuntu' "$repo/setup.sh" || \
 
 grep -Fq 'ubuntu|ubuntu-server)' "$repo/scripts/build_cosim_nic.sh" || \
     fail 'cosim_nic does not share Ubuntu kernel/header selection with ubuntu-server'
+
+# The real Ubuntu Server builder must expose a complete, side-effect-free plan
+# before Task 8 exercises the privileged/network build on the simulation host.
+builder="$repo/scripts/build_rootfs_ubuntu_server.sh"
+if [ ! -x "$builder" ]; then
+    fail 'Ubuntu Server rootfs builder is missing or not executable'
+else
+    builder_fakebin="$work/builder-fakebin"
+    mkdir -p "$builder_fakebin"
+    printf '#!/usr/bin/env bash\n: > "$BLOCKED_SENTINEL"\nexit 97\n' \
+        > "$builder_fakebin/blocked"
+    chmod +x "$builder_fakebin/blocked"
+    for command_name in \
+        sudo mount umount debootstrap apt apt-get curl wget truncate \
+        mkfs.ext4 chroot tar depmod e2fsck; do
+        ln -s blocked "$builder_fakebin/$command_name"
+    done
+
+    snapshot_optional_tree "$repo/build/tmp" > "$work/builder-tree-before"
+    builder_output_dir="$work/images/ubuntu-server"
+    blocked_sentinel="$work/builder-blocked-command"
+    if ! builder_output="$(COSIM_GUEST_SSH_PASSWORD=not-printed \
+            BLOCKED_SENTINEL="$blocked_sentinel" \
+            PATH="$builder_fakebin:$PATH" \
+            "$builder" --dry-run "$builder_output_dir" 2>&1)"; then
+        fail "Ubuntu Server builder dry-run failed: $builder_output"
+    fi
+
+    for expected in \
+        'noble' '8G' '6.8.0-107-generic' \
+        'ubuntu-minimal' 'ubuntu-standard' 'build-essential' \
+        'linux-headers-6.8.0-107-generic' 'libreadline-dev' \
+        '/opt/dpu-debugutils' \
+        'apt-daily.timer' 'apt-daily-upgrade.timer' \
+        'unattended-upgrades.service' \
+        'debootstrap --variant=minbase' \
+        'http://archive.ubuntu.com/ubuntu noble main universe' \
+        'http://archive.ubuntu.com/ubuntu noble-updates main universe' \
+        'http://security.ubuntu.com/ubuntu noble-security main universe' \
+        'PasswordAuthentication yes' 'PermitRootLogin no' \
+        'systemd-networkd.service' 'serial-getty@ttyS0.service' \
+        'Driver=e1000e' 'depmod -b ROOT 6.8.0-107-generic' \
+        '/lib/modules/6.8.0-107-generic/build/Makefile' \
+        'stage_guest_debugutils.sh --include-source' \
+        '/usr/local/bin/pci_debug' '/usr/local/bin/reg_display' \
+        'Cleanup order: /dev/pts -> /dev -> /proc -> /sys -> root' \
+        "Output directory: $builder_output_dir" \
+        "Output rootfs: $builder_output_dir/rootfs.ext4" \
+        "Output kernel: $builder_output_dir/vmlinuz"; do
+        assert_contains "$expected" "$builder_output" \
+            "Ubuntu Server builder dry-run omits $expected"
+    done
+    assert_not_contains 'not-printed' "$builder_output" \
+        'Ubuntu Server builder dry-run disclosed the SSH password'
+    [ ! -e "$builder_output_dir" ] || \
+        fail 'Ubuntu Server builder dry-run created its output directory'
+    [ ! -e "$blocked_sentinel" ] || \
+        fail 'Ubuntu Server builder dry-run invoked a blocked privileged/network command'
+    snapshot_optional_tree "$repo/build/tmp" > "$work/builder-tree-after"
+    assert_same "$work/builder-tree-before" "$work/builder-tree-after" \
+        'Ubuntu Server builder dry-run changed repo build/tmp'
+
+    if COSIM_GUEST_SSH_PASSWORD=not-printed \
+            BLOCKED_SENTINEL="$work/builder-blocked-unknown" \
+            PATH="$builder_fakebin:$PATH" \
+            "$builder" --unknown >/dev/null 2>&1; then
+        fail 'Ubuntu Server builder accepted an unknown option'
+    fi
+    [ ! -e "$work/builder-blocked-unknown" ] || \
+        fail 'builder unknown-option validation invoked a blocked command'
+    if COSIM_GUEST_SSH_PASSWORD=not-printed \
+            BLOCKED_SENTINEL="$work/builder-blocked-extra" \
+            PATH="$builder_fakebin:$PATH" \
+            "$builder" --dry-run "$builder_output_dir" extra >/dev/null 2>&1; then
+        fail 'Ubuntu Server builder accepted an extra positional argument'
+    fi
+    [ ! -e "$work/builder-blocked-extra" ] || \
+        fail 'builder extra-argument validation invoked a blocked command'
+
+    builder_source="$(<"$builder")"
+    assert_contains 'set -euo pipefail' "$builder_source" \
+        'builder does not enable strict Bash mode'
+    assert_contains '[[ "${EUID}" -eq 0 ]] || fail' "$builder_source" \
+        'builder has no explicit root-only guard'
+    assert_contains '${PROJECT_DIR}/build/tmp' "$builder_source" \
+        'builder work path is not rooted in repo build/tmp'
+    assert_contains 'mktemp -d "${BUILD_TMP}/ubuntu-server.XXXXXX"' "$builder_source" \
+        'builder does not use a constrained mktemp work directory'
+    assert_contains 'chmod 0700 "${WORK_DIR}"' "$builder_source" \
+        'builder does not lock down its work directory'
+    assert_contains 'truncate -s "${ROOTFS_SIZE}"' "$builder_source" \
+        'builder does not create a sparse 8G image with truncate'
+    assert_not_contains 'dd if=' "$builder_source" \
+        'builder allocates the image with dd'
+    assert_contains 'debootstrap --variant=minbase "${SUITE}" "${MOUNT_DIR}" "${ARCHIVE_MIRROR}"' \
+        "$builder_source" 'builder debootstrap contract changed'
+    assert_contains '"${PROJECT_DIR}/scripts/setup-ubuntu-kernel.sh" "${KVER}"' \
+        "$builder_source" 'builder does not request the exact legacy Ubuntu kernel asset'
+    assert_contains 'depmod -b "${MOUNT_DIR}" "${KVER}"' "$builder_source" \
+        'builder does not regenerate metadata for the exact kernel version'
+    assert_contains '[[ -f "${MODULE_DIR}/build/Makefile" ]]' "$builder_source" \
+        'builder does not require the exact headers build Makefile'
+    assert_contains '"${PROJECT_DIR}/scripts/stage_guest_debugutils.sh"' "$builder_source" \
+        'builder does not reuse the debugutils staging helper'
+    assert_contains '--include-source' "$builder_source" \
+        'builder does not stage debugutils source'
+    assert_contains 'cp --sparse=always' "$builder_source" \
+        'builder publication can inflate the sparse rootfs'
+    assert_contains 'systemctl mask cloud-init.service cloud-init-local.service cloud-config.service cloud-final.service' \
+        "$builder_source" 'builder does not mask cloud-init units'
+    assert_contains 'systemctl mask apt-daily.timer apt-daily-upgrade.timer unattended-upgrades.service' \
+        "$builder_source" 'builder does not mask apt background units'
+    assert_contains 'mount -o loop,nosuid,nodev' "$builder_source" \
+        'builder root mount lacks safe options or is not executable'
+    assert_contains 'trap cleanup EXIT' "$builder_source" \
+        'builder has no EXIT cleanup trap'
+    assert_contains 'trap handle_int INT' "$builder_source" \
+        'builder has no independent INT trap'
+    assert_contains 'trap handle_term TERM' "$builder_source" \
+        'builder has no independent TERM trap'
+    assert_contains 'tracked_mount mounted_root "${MOUNT_DIR}" mount -o loop,nosuid,nodev' \
+        "$builder_source" 'root mount is not signal-safe and tracked'
+    assert_contains 'tracked_mount mounted_sys "${MOUNT_DIR}/sys" mount -t sysfs' \
+        "$builder_source" 'sys mount is not signal-safe and tracked'
+    assert_contains 'tracked_mount mounted_proc "${MOUNT_DIR}/proc" mount -t proc' \
+        "$builder_source" 'proc mount is not signal-safe and tracked'
+    assert_contains 'tracked_mount mounted_dev "${MOUNT_DIR}/dev" mount --bind /dev' \
+        "$builder_source" 'dev mount is not signal-safe and tracked'
+    assert_contains 'tracked_mount mounted_devpts "${MOUNT_DIR}/dev/pts" mount -t devpts' \
+        "$builder_source" 'devpts mount is not signal-safe and tracked'
+    expected_unmounts=$'unmount_if_mounted mounted_devpts "${MOUNT_DIR}/dev/pts"\nunmount_if_mounted mounted_dev "${MOUNT_DIR}/dev"\nunmount_if_mounted mounted_proc "${MOUNT_DIR}/proc"\nunmount_if_mounted mounted_sys "${MOUNT_DIR}/sys"\nunmount_if_mounted mounted_root "${MOUNT_DIR}"'
+    assert_contains "$expected_unmounts" "$builder_source" \
+        'builder cleanup does not use the required reverse unmount order'
+    assert_not_contains 'cosim_nic' "$builder_source" \
+        'builder installs or autoloads the custom cosim_nic driver'
+
+    expected_packages=$'ubuntu-minimal\nubuntu-standard\nsystemd\nsystemd-sysv\nopenssh-server\nsudo\nbuild-essential\ngit\nbc\nflex\nbison\npkg-config\nlibelf-dev\nlibreadline-dev\nlinux-headers-6.8.0-107-generic\npciutils\nkmod\niproute2\niputils-ping\nethtool\ntcpdump\ncurl\nwget\nvim-tiny\nless\nfile\nca-certificates'
+    builder_packages="$(awk '
+        /^PACKAGES=\($/ { capturing = 1; next }
+        capturing && /^\)$/ { exit }
+        capturing {
+            gsub(/^[[:space:]]+|[[:space:]]+$/, "")
+            gsub(/^"|"$/, "")
+            if (length) print
+        }
+    ' "$builder")"
+    if [ "$builder_packages" != "$expected_packages" ]; then
+        fail 'builder package list does not exactly match the Ubuntu Server contract'
+    fi
+
+    # Reproduce the mount-return signal window without privileges.  The fifth
+    # fake mount records the target, signals its parent, then returns failure;
+    # tracked_mount must use mountpoint to retain the state, defer TERM until
+    # the flag is set, and let EXIT cleanup unmount all five targets in reverse.
+    builder_library="$work/builder-library.sh"
+    if awk '
+        /^# === builder main ===$/ { found = 1; exit }
+        { print }
+        END { if (!found) exit 1 }
+    ' "$builder" > "$builder_library"; then
+        signal_fakebin="$work/signal-fakebin"
+        signal_root="$work/signal-root"
+        mkdir -p "$signal_fakebin" \
+            "$signal_root/sys" "$signal_root/proc" \
+            "$signal_root/dev/pts"
+        printf '0\n' > "$work/mount-count"
+        : > "$work/mounted-targets"
+        : > "$work/unmount-log"
+        cat > "$signal_fakebin/mount" <<'FAKE_MOUNT'
+#!/usr/bin/env bash
+count=$(( $(<"$MOUNT_COUNT") + 1 ))
+printf '%s\n' "$count" > "$MOUNT_COUNT"
+target=''
+for target in "$@"; do :; done
+printf '%s\n' "$target" >> "$MOUNTED_TARGETS"
+if [ "$count" -eq 5 ]; then
+    kill -TERM "$PPID"
+    exit 32
+fi
+exit 0
+FAKE_MOUNT
+        cat > "$signal_fakebin/mountpoint" <<'FAKE_MOUNTPOINT'
+#!/usr/bin/env bash
+target="${!#}"
+grep -Fxq -- "$target" "$MOUNTED_TARGETS"
+FAKE_MOUNTPOINT
+        cat > "$signal_fakebin/umount" <<'FAKE_UMOUNT'
+#!/usr/bin/env bash
+printf '%s\n' "$1" >> "$UNMOUNT_LOG"
+exit 0
+FAKE_UMOUNT
+        chmod +x "$signal_fakebin/mount" \
+            "$signal_fakebin/mountpoint" "$signal_fakebin/umount"
+
+        signal_status=0
+        (
+            export MOUNT_COUNT="$work/mount-count"
+            export MOUNTED_TARGETS="$work/mounted-targets"
+            export UNMOUNT_LOG="$work/unmount-log"
+            PATH="$signal_fakebin:$PATH"
+            # shellcheck source=/dev/null
+            source "$builder_library"
+            MOUNT_DIR="$signal_root"
+            trap cleanup EXIT
+            trap handle_int INT
+            trap handle_term TERM
+            tracked_mount mounted_root "$signal_root" mount root-image "$signal_root"
+            tracked_mount mounted_sys "$signal_root/sys" mount sysfs "$signal_root/sys"
+            tracked_mount mounted_proc "$signal_root/proc" mount proc "$signal_root/proc"
+            tracked_mount mounted_dev "$signal_root/dev" mount dev "$signal_root/dev"
+            tracked_mount mounted_devpts "$signal_root/dev/pts" mount devpts "$signal_root/dev/pts"
+        ) || signal_status=$?
+        [ "$signal_status" -eq 143 ] ||
+            fail "TERM during mount transition returned $signal_status instead of 143"
+        cat > "$work/expected-unmount-log" <<EOF
+$signal_root/dev/pts
+$signal_root/dev
+$signal_root/proc
+$signal_root/sys
+$signal_root
+EOF
+        assert_same "$work/expected-unmount-log" "$work/unmount-log" \
+            'TERM mount cleanup did not unmount every tracked target in reverse order'
+    else
+        fail 'builder has no sourceable boundary for mount-transition behavior testing'
+    fi
+fi
 
 # Import an offline fixture into an isolated project and verify both the new
 # profile-relative destination and the unchanged legacy destinations.
