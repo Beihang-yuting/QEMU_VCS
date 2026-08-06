@@ -940,8 +940,8 @@ install -m 0755 \
 [[ -d "${MOUNT_DIR}/opt/dpu-debugutils" ]] || fail 'debug utility source was not staged'
 
 depmod -b "${MOUNT_DIR}" "${KVER}"
-[[ -f "${MODULE_DIR}/build/Makefile" ]] ||
-    fail "missing exact kernel headers: /lib/modules/${KVER}/build/Makefile"
+chroot "${MOUNT_DIR}" test -f "/lib/modules/${KVER}/build/Makefile" ||
+    fail "missing exact Guest kernel headers: /lib/modules/${KVER}/build/Makefile"
 if [[ -e "${MODULE_DIR}/source" || -L "${MODULE_DIR}/source" ]]; then
     [[ -f "${MODULE_DIR}/source/Makefile" ]] ||
         fail "invalid kernel source link for ${KVER}"

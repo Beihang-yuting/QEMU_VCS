@@ -245,8 +245,8 @@ EARLY_DIRNAME
         "$builder_source" 'builder does not request the exact legacy Ubuntu kernel asset'
     assert_contains 'depmod -b "${MOUNT_DIR}" "${KVER}"' "$builder_source" \
         'builder does not regenerate metadata for the exact kernel version'
-    assert_contains '[[ -f "${MODULE_DIR}/build/Makefile" ]]' "$builder_source" \
-        'builder does not require the exact headers build Makefile'
+    assert_contains 'chroot "${MOUNT_DIR}" test -f "/lib/modules/${KVER}/build/Makefile"' \
+        "$builder_source" 'builder does not validate the headers from the Guest root'
     assert_contains '"${PROJECT_DIR}/scripts/stage_guest_debugutils.sh"' "$builder_source" \
         'builder does not reuse the debugutils staging helper'
     assert_contains '--include-source' "$builder_source" \
@@ -482,6 +482,91 @@ APT_GET
             fail "explicit systemd-resolved apt install failed with status $apt_install_status"
         [ -e "$apt_install_case/install-ok" ] ||
             fail 'apt fixture did not observe explicit systemd-resolved installation'
+
+        header_case="$work/header-symlink-case"
+        header_fakebin="$header_case/fakebin"
+        header_root="$header_case/root"
+        header_kver=cosim-absolute-link-test
+        header_guest_target="/usr/src/linux-headers-$header_kver"
+        header_snippet="$header_case/header-snippet.sh"
+        mkdir -p "$header_fakebin" \
+            "$header_root/lib/modules/$header_kver" \
+            "$header_root$header_guest_target"
+        [ ! -e "$header_guest_target/Makefile" ] ||
+            fail 'header symlink fixture unexpectedly exists on the host'
+        : > "$header_root$header_guest_target/Makefile"
+        ln -s "$header_guest_target" \
+            "$header_root/lib/modules/$header_kver/build"
+        if ! awk '
+            /^depmod -b "\$\{MOUNT_DIR\}" "\$\{KVER\}"$/ {
+                capturing = 1
+            }
+            capturing { print }
+            capturing && /fail "linux-headers-\$\{KVER\} is not installed"/ {
+                found = 1
+                exit
+            }
+            END { if (!found) exit 1 }
+        ' "$builder" > "$header_snippet"; then
+            fail 'could not extract the builder kernel-header verification sequence'
+        fi
+        cat > "$header_fakebin/depmod" <<'HEADER_DEPMOD'
+#!/usr/bin/env bash
+[ "$#" -eq 3 ] && [ "$1" = -b ] &&
+        [ "$2" = "$HEADER_ROOT" ] && [ "$3" = "$HEADER_KVER" ] || exit 93
+: > "$HEADER_DEPMOD_OK"
+HEADER_DEPMOD
+        cat > "$header_fakebin/chroot" <<'HEADER_CHROOT'
+#!/usr/bin/env bash
+guest_root="$1"
+shift
+case "$1" in
+    test)
+        [ "$#" -eq 3 ] && [ "$2" = -f ] &&
+                [ "$3" = "/lib/modules/$HEADER_KVER/build/Makefile" ] || exit 94
+        build_link="$guest_root/lib/modules/$HEADER_KVER/build"
+        [ -L "$build_link" ] || exit 95
+        link_target="$(readlink -- "$build_link")"
+        [ "$link_target" = "/usr/src/linux-headers-$HEADER_KVER" ] || exit 96
+        [ -f "$guest_root$link_target/Makefile" ] || exit 97
+        : > "$HEADER_CHROOT_OK"
+        ;;
+    dpkg-query)
+        package=''
+        for package in "$@"; do :; done
+        [ "$package" = "linux-headers-$HEADER_KVER" ] || exit 98
+        : > "$HEADER_DPKG_OK"
+        printf '%s\n' 'install ok installed'
+        ;;
+    *) exit 99 ;;
+esac
+HEADER_CHROOT
+        chmod +x "$header_fakebin/depmod" "$header_fakebin/chroot"
+
+        header_status=0
+        (
+            export HEADER_ROOT="$header_root"
+            export HEADER_KVER="$header_kver"
+            export HEADER_DEPMOD_OK="$header_case/depmod-ok"
+            export HEADER_CHROOT_OK="$header_case/chroot-ok"
+            export HEADER_DPKG_OK="$header_case/dpkg-ok"
+            PATH="$header_fakebin:$PATH"
+            # shellcheck source=/dev/null
+            source "$builder_library"
+            KVER="$header_kver"
+            MOUNT_DIR="$header_root"
+            MODULE_DIR="$header_root/lib/modules/$header_kver"
+            # shellcheck source=/dev/null
+            source "$header_snippet"
+            : > "$header_case/verification-ok"
+        ) > "$header_case/output" 2>&1 || header_status=$?
+        [ "$header_status" -eq 0 ] ||
+            fail "Guest absolute header symlink validation failed with status $header_status"
+        [ -e "$header_case/depmod-ok" ] &&
+                [ -e "$header_case/chroot-ok" ] &&
+                [ -e "$header_case/dpkg-ok" ] &&
+                [ -e "$header_case/verification-ok" ] ||
+            fail 'Guest header symlink fixture did not complete every exact-KVER check'
 
         password_case="$work/password-case"
         password_fakebin="$password_case/fakebin"
