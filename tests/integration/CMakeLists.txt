@@ -92,3 +92,7 @@ add_executable(test_tcp_roundtrip test_tcp_roundtrip.c)
 target_link_libraries(test_tcp_roundtrip cosim_bridge_common cosim_bridge pthread)
 add_test(NAME test_tcp_roundtrip COMMAND test_tcp_roundtrip)
 set_tests_properties(test_tcp_roundtrip PROPERTIES TIMEOUT 30)
+
+add_test(NAME test_dpu_debugutils_build
+         COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/test_dpu_debugutils_build.sh)
+set_tests_properties(test_dpu_debugutils_build PROPERTIES TIMEOUT 60)
