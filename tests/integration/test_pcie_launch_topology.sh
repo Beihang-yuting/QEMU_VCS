@@ -3,8 +3,29 @@ set -euo pipefail
 
 project_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 makefile="$project_dir/Makefile"
+setup_script="$project_dir/setup.sh"
 xrc_driver=${XRC_DRIVER:-"$project_dir/vcs-tb/cosim_xrc_driver.sv"}
 qemu_rc="$project_dir/qemu-plugin/cosim_pcie_rc.c"
+qemu_mmio_header="$project_dir/qemu-plugin/cosim_mmio_be.h"
+make_mmio_sync_line=$'\t@cp "$(PROJECT_DIR)/qemu-plugin/cosim_mmio_be.h" "$(QEMU_SRC_DIR)/include/hw/net/cosim_mmio_be.h"'
+setup_mmio_sync_line='        cp "${PROJECT_DIR}/qemu-plugin/cosim_mmio_be.h" "${QEMU_DIR}/include/hw/net/"'
+
+has_exact_line() {
+    local content=$1
+    local expected=$2
+
+    grep -Fxq -- "$expected" <<<"$content"
+}
+
+qemu_mmio_injection_contract_is_valid() {
+    local make_body=$1
+    local setup_body=$2
+
+    [[ -f "$qemu_mmio_header" ]] &&
+        grep -Fxq '#include "hw/net/cosim_mmio_be.h"' "$qemu_rc" &&
+        has_exact_line "$make_body" "$make_mmio_sync_line" &&
+        has_exact_line "$setup_body" "$setup_mmio_sync_line"
+}
 
 require_profile_pattern() {
     local description=$1
@@ -136,6 +157,9 @@ if ! grep -Eq '^run-qemu:[[:space:]]+validate-pcie-pref64-reserve([[:space:]]|$)
 fi
 
 qemu_device_body=$(sed -n '/^qemu-device:/,/^# host_mem/p' "$makefile")
+setup_qemu_injection_body=$(sed -n \
+    '/^    if \[ "$NEED_QEMU" = true \] && \[ -d "$QEMU_DIR" \]; then$/,/^        MESON_FILE=/p' \
+    "$setup_script")
 if ! grep -Eq '^qemu-device:[[:space:]]+bridge([[:space:]]|$)' "$makefile"; then
     echo "FAIL: qemu-device does not rebuild its bridge library dependency" >&2
     exit 1
@@ -149,6 +173,29 @@ for sync_cmd in \
         exit 1
     fi
 done
+if ! qemu_mmio_injection_contract_is_valid \
+        "$qemu_device_body" "$setup_qemu_injection_body"; then
+    if [[ ! -f "$qemu_mmio_header" ]]; then
+        echo "FAIL: tracked qemu-plugin/cosim_mmio_be.h is missing" >&2
+    elif ! grep -Fxq '#include "hw/net/cosim_mmio_be.h"' "$qemu_rc"; then
+        echo "FAIL: cosim_pcie_rc.c does not actively include hw/net/cosim_mmio_be.h" >&2
+    elif ! has_exact_line "$qemu_device_body" "$make_mmio_sync_line"; then
+        echo "FAIL: qemu-device does not actively sync cosim_mmio_be.h" >&2
+    else
+        echo "FAIL: setup QEMU injection block does not actively sync cosim_mmio_be.h" >&2
+    fi
+    exit 1
+fi
+setup_without_mmio=${setup_qemu_injection_body/"$setup_mmio_sync_line"/}
+if [[ "$setup_without_mmio" == "$setup_qemu_injection_body" ]]; then
+    echo "FAIL: setup cosim_mmio_be.h deletion mutation could not be constructed" >&2
+    exit 1
+fi
+if qemu_mmio_injection_contract_is_valid \
+        "$qemu_device_body" "$setup_without_mmio"; then
+    echo "FAIL: setup cosim_mmio_be.h deletion mutation was incorrectly accepted" >&2
+    exit 1
+fi
 
 if [[ -n "${PCIE_PKG_FILELIST_OVERRIDE:-}" ]]; then
     pcie_pkg_filelists=("$PCIE_PKG_FILELIST_OVERRIDE")

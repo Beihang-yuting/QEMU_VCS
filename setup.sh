@@ -2023,6 +2023,7 @@ if [ "$NEED_QEMU" = true ]; then
         # RC 设备（config-bypass 单设备；SR-IOV PF/VF 已合并进 cosim_pcie_rc.c）
         cp "${PROJECT_DIR}/qemu-plugin/cosim_pcie_rc.c" "${QEMU_DIR}/hw/net/"
         cp "${PROJECT_DIR}/qemu-plugin/cosim_pcie_rc.h" "${QEMU_DIR}/include/hw/net/"
+        cp "${PROJECT_DIR}/qemu-plugin/cosim_mmio_be.h" "${QEMU_DIR}/include/hw/net/"
 
         # 共享头文件（topology 等）
         cp "${PROJECT_DIR}/bridge/common/cosim_topology.h" "${QEMU_DIR}/include/hw/net/"
