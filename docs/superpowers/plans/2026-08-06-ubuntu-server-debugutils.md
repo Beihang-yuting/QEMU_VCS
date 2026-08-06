@@ -719,11 +719,17 @@ try to extract `setup.sh` from the zip.
 verify="$out/import-check"
 project="$verify/project"
 archive="$out/qemu-vcs-offline-ubuntu-server-debugutils-20260806.zip"
+listing="$verify/archive-list.txt"
 if [[ "$archive" != /* || "$verify" != /* ]]; then
   echo "archive and relocated project paths must be absolute" >&2
   exit 1
 fi
-if unzip -Z1 "$archive" | grep -Fxq setup.sh; then
+mkdir -p "$verify" || exit 1
+if ! unzip -Z1 "$archive" >"$listing"; then
+  echo "failed to read data-only archive listing: $archive" >&2
+  exit 1
+fi
+if grep -Fxq setup.sh "$listing"; then
   echo "data-only archive unexpectedly contains setup.sh" >&2
   exit 1
 fi

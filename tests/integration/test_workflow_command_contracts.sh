@@ -24,15 +24,12 @@ fail() {
     failures=$((failures + 1))
 }
 
-get_section() {
-    local result_name=$1
-    local file=$2
-    local start=$3
-    local end=$4
-    local description=$5
-    local section
+extract_unique_section() {
+    local content=$1
+    local start=$2
+    local end=$3
 
-    if ! section=$(awk -v start="$start" -v end="$end" '
+    awk -v start="$start" -v end="$end" '
         $0 == start {
             starts++
             active = 1
@@ -48,22 +45,45 @@ get_section() {
             if (starts != 1 || ends != 1 || active)
                 exit 1
         }
-    ' "$file"); then
+    ' <<<"$content"
+}
+
+get_section() {
+    local result_name=$1
+    local file=$2
+    local start=$3
+    local end=$4
+    local description=$5
+    local section
+
+    if ! section=$(extract_unique_section "$(<"$file")" "$start" "$end"); then
         fail "$description must occur exactly once"
         section=
     fi
     printf -v "$result_name" '%s' "$section"
 }
 
-get_fenced_block() {
+get_content_section() {
     local result_name=$1
-    local section=$2
-    local opening_fence=$3
-    local anchor=$4
+    local content=$2
+    local start=$3
+    local end=$4
     local description=$5
-    local block
+    local section
 
-    if ! block=$(awk -v opening="$opening_fence" -v anchor="$anchor" '
+    if ! section=$(extract_unique_section "$content" "$start" "$end"); then
+        fail "$description must occur exactly once"
+        section=
+    fi
+    printf -v "$result_name" '%s' "$section"
+}
+
+extract_unique_fenced_block() {
+    local section=$1
+    local opening_fence=$2
+    local anchor=$3
+
+    awk -v opening="$opening_fence" -v anchor="$anchor" '
         $0 == opening {
             inside = 1
             current = ""
@@ -83,7 +103,18 @@ get_fenced_block() {
                 exit 1
             printf "%s", selected
         }
-    ' <<<"$section"); then
+    ' <<<"$section"
+}
+
+get_fenced_block() {
+    local result_name=$1
+    local section=$2
+    local opening_fence=$3
+    local anchor=$4
+    local description=$5
+    local block
+
+    if ! block=$(extract_unique_fenced_block "$section" "$opening_fence" "$anchor"); then
         fail "$description must identify exactly one fenced command block"
         block=
     fi
@@ -141,6 +172,9 @@ autostart_line='  +UVM_TESTNAME=pcie_tl_cosim_test +COSIM +COSIM_AUTOSTART \'
 no_autostart_line='  +UVM_TESTNAME=pcie_tl_cosim_test +COSIM \'
 
 task10_archive_assignment='archive="$out/qemu-vcs-offline-ubuntu-server-debugutils-20260806.zip"'
+task10_step3_heading='- [ ] **Step 3: Import under another absolute path**'
+task10_stepx_heading='- [ ] **Step X: Import under another absolute path**'
+task10_step4_heading='- [ ] **Step 4: Record evidence**'
 task10_import_line='./setup.sh --import "$archive" --import-only'
 task10_old_extract_line='unzip -q "$archive" setup.sh'
 task10_quoted_extract_line='unzip -q "$archive" "setup.sh"'
@@ -155,7 +189,13 @@ task10_absolute_path_check='if [[ "$archive" != /* || "$verify" != /* ]]; then
   echo "archive and relocated project paths must be absolute" >&2
   exit 1
 fi'
-task10_data_only_check='if unzip -Z1 "$archive" | grep -Fxq setup.sh; then
+task10_listing_assignment='listing="$verify/archive-list.txt"'
+task10_listing_read_check='if ! unzip -Z1 "$archive" >"$listing"; then
+  echo "failed to read data-only archive listing: $archive" >&2
+  exit 1
+fi'
+task10_unchecked_listing_read='unzip -Z1 "$archive" >"$listing"'
+task10_data_only_check='if grep -Fxq setup.sh "$listing"; then
   echo "data-only archive unexpectedly contains setup.sh" >&2
   exit 1
 fi'
@@ -188,17 +228,31 @@ task10_relocated_import_block_is_valid() {
     has_exact_line "$block" 'verify="$out/import-check"' &&
         has_exact_line "$block" 'project="$verify/project"' &&
         has_exact_line "$block" "$task10_archive_assignment" &&
-        grep -Fq -- "$task10_absolute_path_check" <<<"$block" &&
-        grep -Fq -- "$task10_data_only_check" <<<"$block" &&
+        [[ "$block" == *"$task10_absolute_path_check"* ]] &&
+        has_exact_line "$block" "$task10_listing_assignment" &&
+        has_exact_line "$block" 'mkdir -p "$verify" || exit 1' &&
+        [[ "$block" == *"$task10_listing_read_check"* ]] &&
+        [[ "$block" == *"$task10_data_only_check"* ]] &&
         has_exact_line "$block" 'source_commit=$(git rev-parse HEAD)' &&
         has_exact_line "$block" "$task10_project_tar_assignment" &&
-        grep -Fq -- "$task10_fresh_project_check" <<<"$block" &&
+        [[ "$block" == *"$task10_fresh_project_check"* ]] &&
         has_exact_line "$block" 'mkdir -p "$project" || exit 1' &&
         has_exact_line "$block" "$task10_git_archive_line" &&
         has_exact_line "$block" "$task10_tar_extract_line" &&
         has_exact_line "$block" 'cd "$project" || exit 1' &&
         has_exact_line "$block" "$task10_import_line" &&
         ! grep -Eq '^[[:space:]]*unzip[[:space:]].*setup\.sh' <<<"$block"
+}
+
+task10_step3_contract_is_valid() {
+    local task10_section=$1
+    local step3_section block
+
+    step3_section=$(extract_unique_section "$task10_section" \
+        "$task10_step3_heading" "$task10_step4_heading") || return 1
+    block=$(extract_unique_fenced_block "$step3_section" \
+        '```bash' 'verify="$out/import-check"') || return 1
+    task10_relocated_import_block_is_valid "$block"
 }
 
 require_driver_block() {
@@ -243,6 +297,28 @@ expect_insertion_rejected() {
     mutated=${original/"$anchor"/"$anchor"$'\n'"$insertion"}
     if "$checker" "$mutated"; then
         fail "$description insertion mutation was incorrectly accepted"
+    fi
+}
+
+expect_fenced_block_misplacement_rejected() {
+    local checker=$1
+    local original=$2
+    local destination_heading=$3
+    local block=$4
+    local description=$5
+    local fenced without_block mutated
+
+    fenced=$'```bash\n'"$block"$'\n```'
+    if ! grep -Fq -- "$fenced" <<<"$original" ||
+            ! grep -Fq -- "$destination_heading" <<<"$original"; then
+        return 0
+    fi
+    without_block=${original/"$fenced"/}
+    mutated=${without_block/"$destination_heading"/"$fenced"$'\n\n'"$destination_heading"}
+    if [[ "$mutated" == "$original" ]]; then
+        fail "$description mutation could not be constructed"
+    elif "$checker" "$mutated"; then
+        fail "$description misplaced-block mutation was incorrectly accepted"
     fi
 }
 
@@ -321,11 +397,19 @@ get_section plan_task10 \
     '## Task 10: Produce and relocate-test the offline archive' \
     '## Task 11: Final regression review and publication' \
     'Task 10 in the current Ubuntu Server plan'
-get_fenced_block task10_relocated_import_block \
-    "$plan_task10" '```bash' 'verify="$out/import-check"' \
-    'the Task 10 Step 3 relocated-import command'
-if ! task10_relocated_import_block_is_valid "$task10_relocated_import_block"; then
-    fail 'Task 10 Step 3 fenced block must import the absolute data-only archive from a complete exact-commit relocated project tree and forbid extracting setup.sh from the zip'
+get_content_section plan_task10_step3 \
+    "$plan_task10" \
+    "$task10_step3_heading" \
+    "$task10_step4_heading" \
+    'Task 10 Step 3 in the current Ubuntu Server plan'
+task10_relocated_import_block=
+if [[ -n "$plan_task10_step3" ]]; then
+    get_fenced_block task10_relocated_import_block \
+        "$plan_task10_step3" '```bash' 'verify="$out/import-check"' \
+        'the Task 10 Step 3 relocated-import command'
+    if ! task10_relocated_import_block_is_valid "$task10_relocated_import_block"; then
+        fail 'Task 10 Step 3 fenced block must fail closed on archive listing, import the absolute data-only archive from a complete exact-commit relocated project tree, and forbid extracting setup.sh from the zip'
+    fi
 fi
 
 filelist_content=$(<"$filelist")
@@ -409,6 +493,17 @@ expect_insertion_rejected task10_relocated_import_block_is_valid \
     "$task10_relocated_import_block" "$task10_git_archive_line" \
     "$task10_quoted_extract_line" \
     'Task 10 quoted-setup-from-data-archive command'
+expect_mutation_rejected task10_relocated_import_block_is_valid \
+    "$task10_relocated_import_block" "$task10_listing_read_check" \
+    "$task10_unchecked_listing_read" \
+    'Task 10 unchecked archive-listing command'
+expect_mutation_rejected task10_step3_contract_is_valid \
+    "$plan_task10" "$task10_step3_heading" "$task10_stepx_heading" \
+    'Task 10 renamed Step 3 heading'
+expect_fenced_block_misplacement_rejected task10_step3_contract_is_valid \
+    "$plan_task10" "$task10_step3_heading" \
+    "$task10_relocated_import_block" \
+    'Task 10 relocated-import block outside Step 3'
 
 if ((failures != 0)); then
     echo "[workflow-command-contracts] $failures contract check(s) failed" >&2
