@@ -70,7 +70,38 @@ exec "${REAL_FILE}" "$@"
 FILE_SHIM
 chmod 0755 "${SHIM_DIR}/file"
 
+MKTEMP_SHIM_DIR="${WORK_DIR}/mktemp shim"
+MKTEMP_LOG="${WORK_DIR}/mktemp.log"
+MKTEMP_ALLOWED_PREFIX="${REPO_ROOT}/build/tmp/"
+REAL_MKTEMP="$(command -v mktemp)"
+export MKTEMP_LOG MKTEMP_ALLOWED_PREFIX REAL_MKTEMP
+mkdir -p "${MKTEMP_SHIM_DIR}"
+cat >"${MKTEMP_SHIM_DIR}/mktemp" <<'MKTEMP_SHIM'
+#!/usr/bin/env bash
+set -euo pipefail
+
+template=${@: -1}
+printf '%s\n' "${template}" >>"${MKTEMP_LOG}"
+if [[ -n "${MKTEMP_FORBIDDEN_PREFIX:-}" &&
+      "${template}" == "${MKTEMP_FORBIDDEN_PREFIX}"* ]]; then
+    echo "mktemp template inside target root: ${template}" >&2
+    exit 90
+fi
+case "${template}" in
+    "${MKTEMP_ALLOWED_PREFIX}"*)
+        exec "${REAL_MKTEMP}" "$@"
+        ;;
+    *)
+        echo "mktemp template outside build tree: ${template}" >&2
+        exit 91
+        ;;
+esac
+MKTEMP_SHIM
+chmod 0755 "${MKTEMP_SHIM_DIR}/mktemp"
+
 TARGET_ROOT="${WORK_DIR}/target root"
+MKTEMP_FORBIDDEN_PREFIX="${TARGET_ROOT}/"
+export MKTEMP_FORBIDDEN_PREFIX
 mkdir -p "${TARGET_ROOT}"
 (
     cd "${REPO_ROOT}"
@@ -123,7 +154,7 @@ printf 'excluded\n' >"${SOURCE_FIXTURE}/contrib/file"
 mkdir -p "${TARGET_ROOT}/opt/keep" "${TARGET_ROOT}/opt/dpu-debugutils"
 printf 'keep\n' >"${TARGET_ROOT}/opt/keep/sentinel"
 printf 'stale\n' >"${TARGET_ROOT}/opt/dpu-debugutils/stale"
-PATH="${SHIM_DIR}:${PATH}" "${STAGE_SCRIPT}" \
+PATH="${MKTEMP_SHIM_DIR}:${SHIM_DIR}:${PATH}" "${STAGE_SCRIPT}" \
     --root "${TARGET_ROOT}" \
     --bin-dir "${FAKE_BIN_DIR}" \
     --source-dir "${SOURCE_FIXTURE}" \
@@ -135,6 +166,17 @@ test "$(cat "${TARGET_ROOT}/opt/keep/sentinel")" = 'keep' ||
     fail 'install replaced unrelated content under /opt'
 test ! -e "${TARGET_ROOT}/opt/dpu-debugutils/stale" ||
     fail 'source destination was not replaced'
+test -s "${MKTEMP_LOG}" || fail 'include-source did not exercise mktemp boundary'
+while IFS= read -r mktemp_template; do
+    [[ "${mktemp_template}" == "${MKTEMP_ALLOWED_PREFIX}"* ]] ||
+        fail "temporary template escaped repo/build/tmp: ${mktemp_template}"
+    [[ "${mktemp_template}" != "${MKTEMP_FORBIDDEN_PREFIX}"* ]] ||
+        fail "temporary template was created inside target root: ${mktemp_template}"
+done <"${MKTEMP_LOG}"
+hidden_source_tmp="$(find "${TARGET_ROOT}/opt" -maxdepth 1 \
+    -name '.dpu-debugutils.*' -print -quit)"
+test -z "${hidden_source_tmp}" ||
+    fail "hidden source temporary remained in target root: ${hidden_source_tmp}"
 excluded_path="$(find "${TARGET_ROOT}/opt/dpu-debugutils" \
     \( -name .git -o -name fpga -o -name contrib -o -name bin -o -name obj \
        -o -name '*.o' -o -name '*.ko' \) -print -quit)"
@@ -203,6 +245,13 @@ expect_failure env PATH="${EARLY_REJECT_SHIM}:${PATH}" "${INSTALL_SCRIPT}" \
     --rootfs "${WORK_DIR}/missing.ext4" --bin-dir "${FAKE_BIN_DIR}"
 test ! -e "${PRIVILEGED_LOG}" ||
     fail 'missing rootfs caused a sudo or mount invocation'
+
+NON_REGULAR_ROOTFS="${WORK_DIR}/rootfs directory"
+mkdir -p "${NON_REGULAR_ROOTFS}"
+expect_failure env PATH="${EARLY_REJECT_SHIM}:${PATH}" "${INSTALL_SCRIPT}" \
+    --rootfs "${NON_REGULAR_ROOTFS}" --bin-dir "${FAKE_BIN_DIR}"
+test ! -e "${PRIVILEGED_LOG}" ||
+    fail 'non-regular rootfs caused a sudo or mount invocation'
 
 NON_EXT4_IMAGE="${WORK_DIR}/not ext4.img"
 printf 'plain text, not an ext4 image\n' >"${NON_EXT4_IMAGE}"

@@ -9,7 +9,6 @@ bin_dir=''
 source_dir=''
 include_source=false
 work_dir=''
-target_source_tmp=''
 
 usage() {
     cat <<'USAGE'
@@ -32,9 +31,6 @@ cleanup() {
     local status=$?
     trap - EXIT INT TERM
     set +e
-    if [[ -n "${target_source_tmp}" ]]; then
-        rm -rf -- "${target_source_tmp}"
-    fi
     if [[ -n "${work_dir}" ]]; then
         rm -rf -- "${work_dir}"
     fi
@@ -80,7 +76,7 @@ root="$(cd "${root}" && pwd -P)"
 [[ -d "${bin_dir}" ]] || fail "binary directory is not a directory: ${bin_dir}"
 bin_dir="$(cd "${bin_dir}" && pwd -P)"
 
-for required_command in file install cp find rm mv mktemp; do
+for required_command in file install cp find rm mktemp; do
     command -v "${required_command}" >/dev/null 2>&1 ||
         fail "missing required command: ${required_command}"
 done
@@ -158,11 +154,9 @@ install -m 0644 \
 
 if "${include_source}"; then
     install -d -m 0755 "${root}/opt"
-    target_source_tmp="$(mktemp -d "${root}/opt/.dpu-debugutils.XXXXXX")"
-    cp -a "${work_dir}/source/." "${target_source_tmp}/"
     rm -rf -- "${root}/opt/dpu-debugutils"
-    mv -- "${target_source_tmp}" "${root}/opt/dpu-debugutils"
-    target_source_tmp=''
+    install -d -m 0755 "${root}/opt/dpu-debugutils"
+    cp -a "${work_dir}/source/." "${root}/opt/dpu-debugutils/"
 fi
 
 echo "Staged DPU debug utilities under ${root}"
