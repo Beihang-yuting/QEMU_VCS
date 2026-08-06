@@ -8,10 +8,34 @@
 #   <PROJECT>/build/ubuntu-kernel/linux-modules-extra-<KVER>_*.deb
 set -euo pipefail
 
+DRY_RUN=false
+if [ "${1:-}" = "--dry-run" ]; then
+    DRY_RUN=true
+    shift
+elif [[ "${1:-}" == -* ]]; then
+    echo "ERROR: unknown option: $1" >&2
+    echo "Usage: $0 [--dry-run] [KVER] [OUTPUT_DIR]" >&2
+    exit 2
+fi
+
+if [ "$#" -gt 2 ]; then
+    echo "ERROR: too many arguments" >&2
+    echo "Usage: $0 [--dry-run] [KVER] [OUTPUT_DIR]" >&2
+    exit 2
+fi
+if [[ "${1:-}" == -* || "${2:-}" == -* ]]; then
+    echo "ERROR: unknown option" >&2
+    echo "Usage: $0 [--dry-run] [KVER] [OUTPUT_DIR]" >&2
+    exit 2
+fi
+
 KVER="${1:-6.8.0-107-generic}"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
-OUTPUT_DIR="${PROJECT_DIR}/guest/images/ubuntu"
+OUTPUT_DIR="${2:-${PROJECT_DIR}/guest/images/ubuntu}"
+if [[ "$OUTPUT_DIR" != /* ]]; then
+    OUTPUT_DIR="$(pwd)/${OUTPUT_DIR#./}"
+fi
 WORK_DIR="${PROJECT_DIR}/build/ubuntu-kernel"
 
 # 从内核版本推断 Ubuntu 代号（用于构建下载 URL）
@@ -27,6 +51,15 @@ case "${_kver_major}.${_kver_minor}" in
     *)        _UBUNTU_SUITE="noble" ;;
 esac
 _MIRROR_BASE="http://archive.ubuntu.com/ubuntu"
+
+if [ "$DRY_RUN" = true ]; then
+    echo "Ubuntu kernel setup dry-run"
+    echo "  KVER:       ${KVER}"
+    echo "  Suite:      ${_UBUNTU_SUITE}"
+    echo "  Output dir: ${OUTPUT_DIR}"
+    echo "  Actions:    reuse/download kernel packages; extract vmlinuz; archive modules"
+    exit 0
+fi
 
 echo "============================================"
 echo " Ubuntu 内核提取: ${KVER}"

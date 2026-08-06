@@ -62,6 +62,10 @@ add_test(NAME test_guest_ssh_provisioning
          COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/test_guest_ssh_provisioning.sh)
 set_tests_properties(test_guest_ssh_provisioning PROPERTIES TIMEOUT 10)
 
+add_test(NAME test_ubuntu_server_profile
+         COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/test_ubuntu_server_profile.sh)
+set_tests_properties(test_ubuntu_server_profile PROPERTIES TIMEOUT 30)
+
 add_test(NAME test_inject_modules_debugfs_paths
          COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/test_inject_modules_debugfs_paths.sh)
 set_tests_properties(test_inject_modules_debugfs_paths PROPERTIES TIMEOUT 30)

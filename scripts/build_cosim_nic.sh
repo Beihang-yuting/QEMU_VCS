@@ -5,7 +5,7 @@
 # 用法:
 #   ./scripts/build_cosim_nic.sh [GUEST_TYPE]
 #
-# 支持的 Guest 类型: ubuntu, debian
+# 支持的 Guest 类型: ubuntu, ubuntu-server, debian
 # 自动检测内核版本，下载 headers，编译，注入到 initramfs/rootfs
 # ============================================================
 set -euo pipefail
@@ -134,7 +134,7 @@ download_headers() {
     cd "$download_dir"
 
     case "$GUEST_TYPE" in
-        ubuntu)
+        ubuntu|ubuntu-server)
             # Ubuntu headers 分两个包:
             #   linux-headers-<base_ver>          -- 通用 scripts/Makefile（all 架构）
             #   linux-headers-<KVER>              -- 架构相关配置（amd64）

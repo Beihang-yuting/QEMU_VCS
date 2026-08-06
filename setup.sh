@@ -175,6 +175,7 @@ CoSim Platform 安装脚本
 
 Guest 环境 (--guest, 仅 local/qemu-only 模式):
   ubuntu      Ubuntu LTS — 6.8 内核，VFIO/RDMA/NVMe-oF 完整模块（推荐）
+  ubuntu-server Ubuntu Server — 完整服务器环境，默认 2G 内存
   debian      Debian 精简版 — 6.1 内核，完整工具链，apt 包管理
   skip        跳过 Guest 构建，手动准备镜像
 
@@ -198,6 +199,7 @@ QEMU 源码 (--qemu-src, 仅 local/qemu-only 模式):
 示例:
   ./setup.sh                                          # 交互式菜单
   ./setup.sh --mode local --guest ubuntu              # 本地全栈 + Ubuntu（推荐）
+  ./setup.sh --mode local --guest ubuntu-server       # 本地全栈 + Ubuntu Server
   ./setup.sh --mode local --guest debian              # 本地全栈 + Debian 完整工具链
   ./setup.sh --mode qemu-only --guest ubuntu          # QEMU 侧远程部署
 
@@ -396,6 +398,14 @@ import_offline() {
         mkdir -p "${PROJECT_DIR}/guest/images/ubuntu"
         cp "$tmpdir"/guest/ubuntu/* "${PROJECT_DIR}/guest/images/ubuntu/"
         ok "Ubuntu 镜像已导入: guest/images/ubuntu/"
+        imported=$((imported + 1))
+    fi
+
+    # Ubuntu Server 镜像
+    if [ -f "$tmpdir/guest/ubuntu-server/vmlinuz" ]; then
+        mkdir -p "${PROJECT_DIR}/guest/images/ubuntu-server"
+        cp "$tmpdir"/guest/ubuntu-server/* "${PROJECT_DIR}/guest/images/ubuntu-server/"
+        ok "Ubuntu Server 镜像已导入: guest/images/ubuntu-server/"
         imported=$((imported + 1))
     fi
 
@@ -605,18 +615,21 @@ interactive_menu() {
     echo "  1) Ubuntu LTS   — 6.8 内核，VFIO/RDMA/NVMe-oF 完整模块（推荐）"
     echo "     镜像 ~480MB，启动 ~10 秒"
     echo ""
-    echo "  2) Debian 精简版 — 6.1 内核，完整工具链，apt 包管理"
+    echo "  2) Ubuntu Server — 完整服务器环境，默认 2G 内存"
+    echo ""
+    echo "  3) Debian 精简版 — 6.1 内核，完整工具链，apt 包管理"
     echo "     镜像 ~500MB，启动 ~15 秒"
     echo ""
-    echo "  3) 跳过 — 手动准备 rootfs 到 guest/images/"
+    echo "  4) 跳过 — 手动准备 rootfs 到 guest/images/"
 
     while true; do
-        read -rp "请选择 [1/2/3]: " choice
+        read -rp "请选择 [1/2/3/4]: " choice
         case "$choice" in
             1) GUEST_TYPE="ubuntu"; break ;;
-            2) GUEST_TYPE="debian"; break ;;
-            3) GUEST_TYPE="skip"; break ;;
-            *) echo "  无效选择，请输入 1、2 或 3" ;;
+            2) GUEST_TYPE="ubuntu-server"; break ;;
+            3) GUEST_TYPE="debian"; break ;;
+            4) GUEST_TYPE="skip"; break ;;
+            *) echo "  无效选择，请输入 1、2、3 或 4" ;;
         esac
     done
     ok "Guest 环境: ${GUEST_TYPE}"
@@ -712,10 +725,10 @@ GUEST_TYPE="${GUEST_TYPE:-ubuntu}"
 QEMU_SRC_OPT="${QEMU_SRC_OPT:-download}"
 
 case "$GUEST_TYPE" in
-    ubuntu|debian|skip) ;;
+    ubuntu|ubuntu-server|debian|skip) ;;
     *)
         fail "无效的 Guest 类型: ${GUEST_TYPE}"
-        fail "可选: ubuntu, debian, skip"
+        fail "可选: ubuntu, ubuntu-server, debian, skip"
         exit 1
         ;;
 esac
@@ -801,12 +814,8 @@ QEMU_DIR="${PROJECT_DIR}/third_party/qemu"
 BUILD_DIR="${PROJECT_DIR}/build"
 BRIDGE_LIB_DIR="${BUILD_DIR}/bridge"
 VCS_SIM_DIR="${PROJECT_DIR}/vcs-tb/sim_build"
-# IMAGES_DIR 根据 GUEST_TYPE 指向子目录
-if [ "${GUEST_TYPE:-ubuntu}" = "debian" ]; then
-    IMAGES_DIR="${PROJECT_DIR}/guest/images/debian"
-else
-    IMAGES_DIR="${PROJECT_DIR}/guest/images/ubuntu"
-fi
+# IMAGES_DIR 始终根据所选 profile 指向其独立子目录。
+IMAGES_DIR="${PROJECT_DIR}/guest/images/${GUEST_TYPE}"
 
 info "项目目录: ${PROJECT_DIR}"
 info "部署模式: ${SETUP_MODE}"
@@ -1584,6 +1593,19 @@ if [ "$NEED_GUEST" = true ]; then
         info "    ${IMAGES_DIR}/rootfs.ext4   -- Guest 磁盘镜像"
         SKIP_COUNT=$((SKIP_COUNT + 1))
     else
+        _DEBIAN_ROOTFS="${PROJECT_DIR}/guest/images/debian/rootfs.ext4"
+
+        if [ "$GUEST_TYPE" = "ubuntu-server" ]; then
+            _UBUNTU_SERVER_BUILDER="${PROJECT_DIR}/scripts/build_rootfs_ubuntu_server.sh"
+            if [ ! -x "$_UBUNTU_SERVER_BUILDER" ]; then
+                fail "Ubuntu Server rootfs 构建脚本不存在或不可执行: $_UBUNTU_SERVER_BUILDER"
+                fail "请先提供 Task 4 的 builder，或导入 guest/ubuntu-server 镜像后重试"
+                FAIL_COUNT=$((FAIL_COUNT + 1))
+            elif ! "$_UBUNTU_SERVER_BUILDER" "$IMAGES_DIR"; then
+                fail "Ubuntu Server rootfs 构建失败: $_UBUNTU_SERVER_BUILDER"
+                FAIL_COUNT=$((FAIL_COUNT + 1))
+            fi
+        else
         # 检查 sudo 权限（仅构建 Debian rootfs 需要 mount/chroot）
         _HAS_SUDO=false
         if sudo -n true 2>/dev/null; then
@@ -1591,7 +1613,6 @@ if [ "$NEED_GUEST" = true ]; then
         fi
 
         _UBUNTU_DIR="${PROJECT_DIR}/guest/images/ubuntu"
-        _DEBIAN_ROOTFS="${PROJECT_DIR}/guest/images/debian/rootfs.ext4"
 
         # ---- 阶段 1: Debian rootfs（需要 sudo + 网络）----
         if [ ! -f "$_DEBIAN_ROOTFS" ]; then
@@ -1700,6 +1721,7 @@ if [ "$NEED_GUEST" = true ]; then
                     "${PROJECT_DIR}/scripts/inject-modules.sh" ubuntu || warn "Ubuntu 模块注入失败"
                 fi
             fi
+        fi
         fi
 
         # ---- 最终结果检查 ----

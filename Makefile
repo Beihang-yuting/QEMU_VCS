@@ -33,7 +33,9 @@ ROOTFS        ?= $(wildcard $(PROJECT_DIR)/guest/images/$(GUEST_TYPE)/rootfs.ext
 # ============================================================
 # TCP 模式
 PORT_BASE     ?= 9100
-ifeq ($(GUEST_TYPE),debian)
+ifeq ($(GUEST_TYPE),ubuntu-server)
+  GUEST_MEMORY  ?= 2G
+else ifeq ($(GUEST_TYPE),debian)
   GUEST_MEMORY  ?= 512M
 else
   GUEST_MEMORY  ?= 256M
@@ -310,6 +312,7 @@ clean-all: clean clean-logs clean-run
 # ============================================================
 info:
 	@echo "=== CoSim 环境 ==="
+	@echo "  Guest:  $(GUEST_TYPE)"
 	@echo "  QEMU:   $(QEMU)  $$(test -f '$(QEMU)' && echo [OK] || echo [缺失])"
 	@echo "  Kernel: $(KERNEL)  $$(test -f '$(KERNEL)' && echo [OK] || echo [缺失])"
 	@echo "  Rootfs: $(if $(ROOTFS),$(ROOTFS)  $$(test -f '$(ROOTFS)' && echo [OK] || echo [缺失]),(未找到))"
@@ -362,6 +365,6 @@ help:
 	@echo "  QEMU_TIME_MODE=icount|realtime QEMU 时间模式(默认 icount);realtime 可显式回退"
 	@echo "  MMIO_TIMEOUT_MS=180000  MMIO 读等 VCS 应答超时 ms(默认 3min; 0=禁用,永久阻塞)"
 	@echo "  ADVERTISE_HOST         写入描述符的 host（默认本机 IP）"
-	@echo "  GUEST_TYPE=ubuntu|debian  Guest 系统（默认 ubuntu）"
+	@echo "  GUEST_TYPE=ubuntu|ubuntu-server|debian  Guest 系统（默认 ubuntu）"
 	@echo "  QEMU= KERNEL= ROOTFS=  路径覆盖"
 	@echo ""
