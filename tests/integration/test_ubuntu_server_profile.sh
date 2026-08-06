@@ -156,6 +156,11 @@ EARLY_DIRNAME
             fail 'Ubuntu Server dry-run claims the writable root uses nodev/noexec'
             ;;
     esac
+    dry_packages_line="$(grep -F 'Packages:' <<<"$builder_output")"
+    case " $dry_packages_line " in
+        *' systemd-resolved '*) ;;
+        *) fail 'Ubuntu Server dry-run package list omits systemd-resolved' ;;
+    esac
 
     for expected in \
         'noble' '8G' '6.8.0-107-generic' \
@@ -290,7 +295,7 @@ EARLY_DIRNAME
     assert_not_contains 'cosim_nic' "$builder_source" \
         'builder installs or autoloads the custom cosim_nic driver'
 
-    expected_packages=$'ubuntu-minimal\nubuntu-standard\nsystemd\nsystemd-sysv\nopenssh-server\nsudo\nbuild-essential\ngit\nbc\nflex\nbison\npkg-config\nlibelf-dev\nlibreadline-dev\nlinux-headers-6.8.0-107-generic\npciutils\nkmod\niproute2\niputils-ping\nethtool\ntcpdump\ncurl\nwget\nvim-tiny\nless\nfile\nca-certificates'
+    expected_packages=$'ubuntu-minimal\nubuntu-standard\nsystemd\nsystemd-sysv\nsystemd-resolved\nopenssh-server\nsudo\nbuild-essential\ngit\nbc\nflex\nbison\npkg-config\nlibelf-dev\nlibreadline-dev\nlinux-headers-6.8.0-107-generic\npciutils\nkmod\niproute2\niputils-ping\nethtool\ntcpdump\ncurl\nwget\nvim-tiny\nless\nfile\nca-certificates'
     builder_packages="$(awk '
         /^PACKAGES=\($/ { capturing = 1; next }
         capturing && /^\)$/ { exit }
@@ -410,6 +415,73 @@ ROOT_DEBOOTSTRAP
             fail "writable rootfs mount blocked debootstrap with status $root_mount_status"
         [ -e "$root_mount_case/debootstrap-ok" ] ||
             fail 'debootstrap fixture did not accept the writable rootfs mount'
+
+        apt_install_case="$work/apt-install-case"
+        apt_install_fakebin="$apt_install_case/fakebin"
+        apt_install_snippet="$apt_install_case/apt-install-snippet.sh"
+        mkdir -p "$apt_install_fakebin"
+        if ! awk '
+            /^chroot "\$\{MOUNT_DIR\}" \/usr\/bin\/env DEBIAN_FRONTEND=noninteractive \\$/ {
+                invocation = $0
+                if ((getline continuation) > 0 &&
+                        continuation ~ /^[[:space:]]+apt-get install /) {
+                    print invocation
+                    print continuation
+                    found = 1
+                    exit
+                }
+            }
+            END { if (!found) exit 1 }
+        ' "$builder" > "$apt_install_snippet"; then
+            fail 'could not extract the builder apt install invocation'
+        fi
+        cat > "$apt_install_fakebin/chroot" <<'APT_CHROOT'
+#!/usr/bin/env bash
+shift
+exec "$@"
+APT_CHROOT
+        cat > "$apt_install_fakebin/apt-get" <<'APT_GET'
+#!/usr/bin/env bash
+install_mode=false
+no_install_recommends=false
+resolved_explicit=false
+for argument in "$@"; do
+    case "$argument" in
+        install) install_mode=true ;;
+        --no-install-recommends) no_install_recommends=true ;;
+        systemd-resolved) resolved_explicit=true ;;
+    esac
+done
+if [ "$install_mode" != true ]; then
+    echo 'builder did not invoke apt-get install' >&2
+    exit 90
+fi
+if [ "$no_install_recommends" != true ]; then
+    echo 'builder removed --no-install-recommends' >&2
+    exit 91
+fi
+if [ "$resolved_explicit" != true ]; then
+    echo 'systemd-resolved must be explicitly installed when recommends are disabled' >&2
+    exit 92
+fi
+: > "$APT_INSTALL_OK"
+APT_GET
+        chmod +x "$apt_install_fakebin/chroot" "$apt_install_fakebin/apt-get"
+
+        apt_install_status=0
+        (
+            export APT_INSTALL_OK="$apt_install_case/install-ok"
+            PATH="$apt_install_fakebin:$PATH"
+            # shellcheck source=/dev/null
+            source "$builder_library"
+            MOUNT_DIR="$apt_install_case/root"
+            # shellcheck source=/dev/null
+            source "$apt_install_snippet"
+        ) > "$apt_install_case/output" 2>&1 || apt_install_status=$?
+        [ "$apt_install_status" -eq 0 ] ||
+            fail "explicit systemd-resolved apt install failed with status $apt_install_status"
+        [ -e "$apt_install_case/install-ok" ] ||
+            fail 'apt fixture did not observe explicit systemd-resolved installation'
 
         password_case="$work/password-case"
         password_fakebin="$password_case/fakebin"

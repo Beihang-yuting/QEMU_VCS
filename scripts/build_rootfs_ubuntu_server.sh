@@ -31,6 +31,7 @@ ubuntu-minimal
 ubuntu-standard
 systemd
 systemd-sysv
+systemd-resolved
 openssh-server
 sudo
 build-essential
