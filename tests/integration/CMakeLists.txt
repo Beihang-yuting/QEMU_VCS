@@ -100,3 +100,7 @@ set_tests_properties(test_dpu_debugutils_build PROPERTIES TIMEOUT 60)
 add_test(NAME test_stage_guest_debugutils
          COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/test_stage_guest_debugutils.sh)
 set_tests_properties(test_stage_guest_debugutils PROPERTIES TIMEOUT 30)
+
+add_test(NAME test_stage_guest_debugutils_hardening
+         COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/test_stage_guest_debugutils_hardening.sh)
+set_tests_properties(test_stage_guest_debugutils_hardening PROPERTIES TIMEOUT 60)

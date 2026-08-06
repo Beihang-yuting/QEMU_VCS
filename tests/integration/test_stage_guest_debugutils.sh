@@ -53,10 +53,19 @@ cat >"${SHIM_DIR}/file" <<'FILE_SHIM'
 set -euo pipefail
 
 for argument in "$@"; do
-    case "${argument}" in
-        "${FAKE_BIN_DIR}/pci_debug"|"${FAKE_BIN_DIR}/reg_display"|"${MIXED_BIN_DIR}/pci_debug")
-            printf '%s: ELF fixture executable, statically linked\n' "${argument}"
-            exit 0
+    case "${argument##*/}" in
+        pci_debug)
+            if cmp -s "${argument}" "${FAKE_BIN_DIR}/pci_debug" ||
+               cmp -s "${argument}" "${MIXED_BIN_DIR}/pci_debug"; then
+                printf '%s: ELF fixture executable, statically linked\n' "${argument}"
+                exit 0
+            fi
+            ;;
+        reg_display)
+            if cmp -s "${argument}" "${FAKE_BIN_DIR}/reg_display"; then
+                printf '%s: ELF fixture executable, statically linked\n' "${argument}"
+                exit 0
+            fi
             ;;
     esac
 
@@ -287,7 +296,8 @@ shift
 
 case "$(basename "${command_path}")" in
     mount)
-        [[ "${1:-}" == -o && "${2:-}" == loop ]] || exit 96
+        [[ "${1:-}" == -t && "${2:-}" == ext4 &&
+           "${3:-}" == -o && "${4:-}" == loop,nosuid,nodev,noexec ]] || exit 96
         printf 'mount\n' >>"${LIFECYCLE_LOG}"
         printf '%s\n' "${@: -1}" >"${LIFECYCLE_MOUNT_DIR_FILE}"
         ;;
