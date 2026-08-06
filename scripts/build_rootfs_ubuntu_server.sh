@@ -3,6 +3,19 @@
 # metadata-only; the real path requires root, network access, and debootstrap.
 set -euo pipefail
 
+capture_guest_password() {
+    unset GUEST_PASSWORD GUEST_PASSWORD_WAS_SET
+    GUEST_PASSWORD=''
+    GUEST_PASSWORD_WAS_SET=false
+    if [[ -v COSIM_GUEST_SSH_PASSWORD ]]; then
+        GUEST_PASSWORD="${COSIM_GUEST_SSH_PASSWORD}"
+        GUEST_PASSWORD_WAS_SET=true
+    fi
+    unset COSIM_GUEST_SSH_PASSWORD
+}
+
+capture_guest_password
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 PROJECT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd -P)"
 
@@ -12,8 +25,6 @@ ROOTFS_SIZE="8G"
 ARCHIVE_MIRROR="http://archive.ubuntu.com/ubuntu"
 SECURITY_MIRROR="http://security.ubuntu.com/ubuntu"
 GUEST_USER="ryan"
-unset GUEST_PASSWORD
-GUEST_PASSWORD=''
 
 PACKAGES=(
 ubuntu-minimal
@@ -321,25 +332,46 @@ prepare_output_lock_candidate() {
 }
 
 claim_output_lock_once() {
-    local move_status
+    local move_status=1
+    local claim_status=1
+    local candidate_id=''
+    local current_lock_id=''
     local current_owner=''
 
+    if [[ -d "${OUTPUT_LOCK_CANDIDATE}" && ! -L "${OUTPUT_LOCK_CANDIDATE}" ]]; then
+        candidate_id="$(stat -c '%d:%i' "${OUTPUT_LOCK_CANDIDATE}" 2>/dev/null || true)"
+    fi
     begin_publish_transition
     if mv -T -- "${OUTPUT_LOCK_CANDIDATE}" "${OUTPUT_LOCK_DIR}" 2>/dev/null; then
         move_status=0
     else
         move_status=$?
     fi
-    if [[ -f "${OUTPUT_LOCK_DIR}/owner" && ! -L "${OUTPUT_LOCK_DIR}/owner" ]]; then
-        current_owner="$(<"${OUTPUT_LOCK_DIR}/owner")"
+    if [[ -d "${OUTPUT_LOCK_DIR}" && ! -L "${OUTPUT_LOCK_DIR}" ]]; then
+        current_lock_id="$(stat -c '%d:%i' "${OUTPUT_LOCK_DIR}" 2>/dev/null || true)"
     fi
-    if [[ -n "${OUTPUT_LOCK_OWNER}" && "${current_owner}" == "${OUTPUT_LOCK_OWNER}" ]]; then
-        output_lock_held=true
+    if [[ -n "${candidate_id}" && "${current_lock_id}" == "${candidate_id}" ]]; then
         OUTPUT_LOCK_CANDIDATE=''
+        if [[ -f "${OUTPUT_LOCK_DIR}/owner" && ! -L "${OUTPUT_LOCK_DIR}/owner" ]] &&
+                current_owner="$(<"${OUTPUT_LOCK_DIR}/owner")" &&
+                [[ -n "${OUTPUT_LOCK_OWNER}" &&
+                   "${current_owner}" == "${OUTPUT_LOCK_OWNER}" ]]; then
+            output_lock_held=true
+            claim_status=0
+        elif [[ ! -e "${OUTPUT_LOCK_DIR}/owner" &&
+                ! -L "${OUTPUT_LOCK_DIR}/owner" ]]; then
+            current_lock_id="$(stat -c '%d:%i' "${OUTPUT_LOCK_DIR}" 2>/dev/null || true)"
+            if [[ "${current_lock_id}" == "${candidate_id}" ]]; then
+                rmdir -- "${OUTPUT_LOCK_DIR}" 2>/dev/null || true
+            fi
+        fi
+    else
+        claim_status="${move_status}"
+        [[ "${claim_status}" -ne 0 ]] || claim_status=1
     fi
-    finish_publish_transition 0
+    finish_publish_transition "${claim_status}" || return $?
 
-    [[ "${output_lock_held}" == true ]] || return "${move_status:-1}"
+    [[ "${output_lock_held}" == true ]]
 }
 
 acquire_output_lock() {
@@ -359,6 +391,8 @@ acquire_output_lock() {
     prepare_output_lock_candidate
 
     if ! claim_output_lock_once; then
+        [[ -n "${OUTPUT_LOCK_CANDIDATE}" ]] ||
+            fail "could not verify newly claimed output lock: ${OUTPUT_DIR}"
         [[ -d "${OUTPUT_LOCK_DIR}" && ! -L "${OUTPUT_LOCK_DIR}" ]] ||
             fail "output lock is not a real directory: ${OUTPUT_LOCK_DIR}"
         [[ "$(cd "${OUTPUT_LOCK_DIR}" && pwd -P)" == "${OUTPUT_LOCK_DIR}" ]] ||
@@ -483,16 +517,8 @@ handle_term() {
     handle_signal 143
 }
 
-capture_guest_password() {
-    local password_was_set=false
-
-    if [[ -v COSIM_GUEST_SSH_PASSWORD ]]; then
-        GUEST_PASSWORD="${COSIM_GUEST_SSH_PASSWORD}"
-        password_was_set=true
-    fi
-    unset COSIM_GUEST_SSH_PASSWORD
-
-    [[ "${password_was_set}" == true && -n "${GUEST_PASSWORD}" ]] ||
+validate_guest_password() {
+    [[ "${GUEST_PASSWORD_WAS_SET}" == true && -n "${GUEST_PASSWORD}" ]] ||
         fail 'COSIM_GUEST_SSH_PASSWORD must be set to a non-empty value'
     if [[ "${GUEST_PASSWORD}" == *$'\r'* || "${GUEST_PASSWORD}" == *$'\n'* ]]; then
         fail 'COSIM_GUEST_SSH_PASSWORD must not contain CR or LF'
@@ -685,12 +711,12 @@ EOF
 }
 
 if [[ "${DRY_RUN}" == true ]]; then
-    unset COSIM_GUEST_SSH_PASSWORD
+    GUEST_PASSWORD=''
     print_plan
     exit 0
 fi
 
-capture_guest_password
+validate_guest_password
 [[ "${EUID}" -eq 0 ]] || fail 'real Ubuntu Server image builds require root'
 [[ "${OUTPUT_DIR}" != / ]] || fail 'refusing to replace the filesystem root'
 output_leaf="${OUTPUT_DIR##*/}"

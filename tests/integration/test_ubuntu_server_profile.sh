@@ -113,9 +113,19 @@ else
 
     builder_fakebin="$work/builder-fakebin"
     mkdir -p "$builder_fakebin"
+    real_dirname="$(command -v dirname)"
+    cat > "$builder_fakebin/dirname" <<'EARLY_DIRNAME'
+#!/usr/bin/env bash
+if [[ -v COSIM_GUEST_SSH_PASSWORD || -v GUEST_PASSWORD ]]; then
+    : > "$EARLY_PASSWORD_LEAK"
+fi
+exec "$REAL_DIRNAME" "$@"
+EARLY_DIRNAME
+    export EARLY_PASSWORD_LEAK="$work/early-password-leak"
+    export REAL_DIRNAME="$real_dirname"
     printf '#!/usr/bin/env bash\n: > "$BLOCKED_SENTINEL"\nexit 97\n' \
         > "$builder_fakebin/blocked"
-    chmod +x "$builder_fakebin/blocked"
+    chmod +x "$builder_fakebin/dirname" "$builder_fakebin/blocked"
     for command_name in \
         sudo mount umount debootstrap apt apt-get curl wget truncate \
         mkfs.ext4 chroot tar depmod e2fsck; do
@@ -128,11 +138,14 @@ else
     builder_output_dir="$dry_project/guest/images/ubuntu-server"
     blocked_sentinel="$work/builder-blocked-command"
     if ! builder_output="$(COSIM_GUEST_SSH_PASSWORD=not-printed \
+            GUEST_PASSWORD=attacker-exported-value \
             BLOCKED_SENTINEL="$blocked_sentinel" \
             PATH="$builder_fakebin:$PATH" \
             "$dry_builder" --dry-run "$builder_output_dir" 2>&1)"; then
         fail "Ubuntu Server builder dry-run failed: $builder_output"
     fi
+    [ ! -e "$work/early-password-leak" ] ||
+        fail 'Guest password leaked into the builder earliest child process'
 
     for expected in \
         'noble' '8G' '6.8.0-107-generic' \
@@ -309,6 +322,7 @@ PASSWORD_CHROOT
             "$password_fakebin/chroot"
 
         if grep -Fq 'capture_guest_password() {' "$builder_library" &&
+                grep -Fq 'validate_guest_password() {' "$builder_library" &&
                 grep -Fq 'install_guest_password() {' "$builder_library"; then
             password_status=0
             (
@@ -320,7 +334,7 @@ PASSWORD_CHROOT
                 PATH="$password_fakebin:$PATH"
                 # shellcheck source=/dev/null
                 source "$builder_library"
-                capture_guest_password
+                validate_guest_password
                 [[ ! -v COSIM_GUEST_SSH_PASSWORD ]]
                 password-env-probe
                 install_guest_password /guest-root
@@ -343,7 +357,7 @@ PASSWORD_CHROOT
                     export COSIM_GUEST_SSH_PASSWORD="$bad_password"
                     # shellcheck source=/dev/null
                     source "$builder_library"
-                    capture_guest_password
+                    validate_guest_password
                 ) > "$password_case/rejected-output" 2>&1 ||
                     bad_password_status=$?
                 [ "$bad_password_status" -ne 0 ] ||
@@ -354,7 +368,7 @@ PASSWORD_CHROOT
                 unset COSIM_GUEST_SSH_PASSWORD
                 # shellcheck source=/dev/null
                 source "$builder_library"
-                capture_guest_password
+                validate_guest_password
             ) > "$password_case/missing-output" 2>&1 ||
                 missing_password_status=$?
             [ "$missing_password_status" -ne 0 ] ||
@@ -362,6 +376,91 @@ PASSWORD_CHROOT
         else
             fail 'builder has no sourceable secure Guest password helpers'
         fi
+
+        lock_claim_case="$work/lock-claim-case"
+        lock_claim_fakebin="$lock_claim_case/fakebin"
+        mkdir -p "$lock_claim_fakebin"
+        real_mv="$(command -v mv)"
+        cat > "$lock_claim_fakebin/mv" <<'LOCK_CLAIM_MV'
+#!/usr/bin/env bash
+"$REAL_MV" "$@" || exit $?
+lock_target=''
+for lock_target in "$@"; do :; done
+case "$CLAIM_MUTATION" in
+    missing) rm -f -- "$lock_target/owner" ;;
+    replaced) printf '%s\n' '999999999:third-party' > "$lock_target/owner" ;;
+esac
+LOCK_CLAIM_MV
+        chmod +x "$lock_claim_fakebin/mv"
+
+        for claim_mutation in missing replaced; do
+            claim_dir="$lock_claim_case/$claim_mutation"
+            claim_build_tmp="$claim_dir/build/tmp"
+            claim_result="$claim_dir/result"
+            mkdir -p "$claim_build_tmp"
+            claim_status=0
+            (
+                export REAL_MV="$real_mv"
+                export CLAIM_MUTATION="$claim_mutation"
+                PATH="$lock_claim_fakebin:$PATH"
+                # shellcheck source=/dev/null
+                source "$builder_library"
+                BUILD_TMP="$claim_build_tmp"
+                OUTPUT_LOCK_CANDIDATE="$claim_build_tmp/.ubuntu-server-lock-candidate.test"
+                OUTPUT_LOCK_DIR="$claim_build_tmp/ubuntu-server-output.$(
+                    printf '0%.0s' {1..64}
+                ).lock"
+                OUTPUT_LOCK_OWNER="${BASHPID}:test"
+                mkdir "$OUTPUT_LOCK_CANDIDATE"
+                printf '%s\n' "$OUTPUT_LOCK_OWNER" > "$OUTPUT_LOCK_CANDIDATE/owner"
+                claim_status=0
+                claim_output_lock_once || claim_status=$?
+                printf '%s\n%s\n' "$claim_status" "$output_lock_held" > "$claim_result"
+            ) || claim_status=$?
+            [ "$claim_status" -eq 0 ] ||
+                fail "could not exercise $claim_mutation lock-owner mutation"
+            claim_function_status="$(sed -n '1p' "$claim_result")"
+            claim_held="$(sed -n '2p' "$claim_result")"
+            [ "$claim_function_status" -ne 0 ] ||
+                fail "lock claim reported success after its owner was $claim_mutation"
+            [ "$claim_held" = false ] ||
+                fail "lock claim marked itself held after its owner was $claim_mutation"
+            claim_lock="$(find "$claim_build_tmp" -mindepth 1 -maxdepth 1 \
+                -name 'ubuntu-server-output.*.lock' -print -quit)"
+            if [ "$claim_mutation" = missing ]; then
+                [ -z "$claim_lock" ] ||
+                    fail 'ownerless claimed lock was not safely removed'
+            else
+                [ -n "$claim_lock" ] &&
+                        grep -Fxq '999999999:third-party' "$claim_lock/owner" ||
+                    fail 'lock claim removed or changed a replacement owner'
+            fi
+        done
+
+        acquire_case="$lock_claim_case/acquire-replaced"
+        acquire_build_tmp="$acquire_case/build/tmp"
+        mkdir -p "$acquire_build_tmp"
+        acquire_status=0
+        (
+            export REAL_MV="$real_mv"
+            export CLAIM_MUTATION=replaced
+            PATH="$lock_claim_fakebin:$PATH"
+            # shellcheck source=/dev/null
+            source "$builder_library"
+            BUILD_TMP="$acquire_build_tmp"
+            OUTPUT_DIR="$acquire_case/output"
+            acquire_output_lock
+            : > "$acquire_case/publication-continued"
+        ) > "$acquire_case/acquire-output" 2>&1 || acquire_status=$?
+        [ "$acquire_status" -ne 0 ] ||
+            fail 'acquire continued after its claimed owner was replaced'
+        [ ! -e "$acquire_case/publication-continued" ] ||
+            fail 'publication continued without a verified output lock owner'
+        acquire_lock="$(find "$acquire_build_tmp" -mindepth 1 -maxdepth 1 \
+            -name 'ubuntu-server-output.*.lock' -print -quit)"
+        [ -n "$acquire_lock" ] &&
+                grep -Fxq '999999999:third-party' "$acquire_lock/owner" ||
+            fail 'failed acquire removed or changed a replacement lock owner'
 
         signal_fakebin="$work/signal-fakebin"
         signal_build_tmp="$work/signal-build/tmp"
