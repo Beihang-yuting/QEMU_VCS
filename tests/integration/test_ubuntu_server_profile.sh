@@ -28,6 +28,26 @@ assert_same() {
     cmp -s -- "$1" "$2" || fail "$3 (different: $1, $2)"
 }
 
+snapshot_tree() {
+    local root="$1"
+    (
+        cd "$root"
+        find . -mindepth 1 -printf '%P\0' | LC_ALL=C sort -z |
+            while IFS= read -r -d '' path; do
+                if [ -L "$path" ]; then
+                    printf 'symlink\t%s\t%s\n' "$path" "$(readlink -- "$path")"
+                elif [ -f "$path" ]; then
+                    printf 'file\t%s\t%s\n' "$path" \
+                        "$(sha256sum -- "$path" | awk '{print $1}')"
+                elif [ -d "$path" ]; then
+                    printf 'directory\t%s\n' "$path"
+                else
+                    printf 'other\t%s\t%s\n' "$path" "$(stat -c '%F' -- "$path")"
+                fi
+            done
+    )
+}
+
 # Public selectors and Make defaults.
 help="$(bash "$repo/setup.sh" --help)" || fail 'setup --help failed'
 assert_contains 'ubuntu-server' "$help" 'setup help omits ubuntu-server'
@@ -139,13 +159,65 @@ builder_log="$work/builder-log"
 printf '%s\n' '#!/usr/bin/env bash' \
     'printf "%s\n" "$#" > "${BUILDER_LOG}.count"' \
     'printf "%s\n" "$@" > "${BUILDER_LOG}.args"' \
+    'output_dir="$1"' \
+    'case "${BUILDER_FIXTURE_MODE:-complete}" in' \
+    '    empty) ;;' \
+    '    no-kernel) mkdir -p "$output_dir"; printf "rootfs\n" > "$output_dir/rootfs.ext4" ;;' \
+    '    no-rootfs) mkdir -p "$output_dir"; printf "kernel\n" > "$output_dir/vmlinuz" ;;' \
+    '    complete) mkdir -p "$output_dir"; printf "rootfs\n" > "$output_dir/rootfs.ext4"; printf "kernel\n" > "$output_dir/vmlinuz" ;;' \
+    'esac' \
     > "$test_project/scripts/build_rootfs_ubuntu_server.sh"
 chmod +x "$test_project/scripts/build_rootfs_ubuntu_server.sh"
+
+rm -rf "$server_output"
+empty_output="$work/empty-builder-output"
+if (
+    # shellcheck source=/dev/null
+    source "$setup_library"
+    PROJECT_DIR="$test_project"
+    export BUILDER_LOG="$builder_log" BUILDER_FIXTURE_MODE=empty
+    build_ubuntu_server_guest "$server_output"
+) > "$empty_output" 2>&1; then
+    fail 'Ubuntu Server build route accepted a successful builder with no artifacts'
+fi
+empty_text="$(<"$empty_output")"
+assert_contains 'rootfs' "$empty_text" 'empty-builder error omits the missing rootfs'
+assert_contains 'kernel' "$empty_text" 'empty-builder error omits the missing kernel'
+
+rm -rf "$server_output"
+no_kernel_output="$work/no-kernel-builder-output"
+if (
+    # shellcheck source=/dev/null
+    source "$setup_library"
+    PROJECT_DIR="$test_project"
+    export BUILDER_LOG="$builder_log" BUILDER_FIXTURE_MODE=no-kernel
+    build_ubuntu_server_guest "$server_output"
+) > "$no_kernel_output" 2>&1; then
+    fail 'Ubuntu Server build route accepted a missing kernel artifact'
+fi
+assert_contains 'kernel' "$(<"$no_kernel_output")" \
+    'missing-kernel error does not identify the kernel artifact'
+
+rm -rf "$server_output"
+no_rootfs_output="$work/no-rootfs-builder-output"
+if (
+    # shellcheck source=/dev/null
+    source "$setup_library"
+    PROJECT_DIR="$test_project"
+    export BUILDER_LOG="$builder_log" BUILDER_FIXTURE_MODE=no-rootfs
+    build_ubuntu_server_guest "$server_output"
+) > "$no_rootfs_output" 2>&1; then
+    fail 'Ubuntu Server build route accepted a missing rootfs artifact'
+fi
+assert_contains 'rootfs' "$(<"$no_rootfs_output")" \
+    'missing-rootfs error does not identify the rootfs artifact'
+
+rm -rf "$server_output"
 if ! (
     # shellcheck source=/dev/null
     source "$setup_library"
     PROJECT_DIR="$test_project"
-    export BUILDER_LOG="$builder_log"
+    export BUILDER_LOG="$builder_log" BUILDER_FIXTURE_MODE=complete
     build_ubuntu_server_guest "$server_output"
 ); then
     fail 'Ubuntu Server build route failed with an executable builder'
@@ -158,6 +230,58 @@ assert_same "$work/expected-builder-args" "${builder_log}.args" \
 grep -Fq 'build_ubuntu_server_guest "$IMAGES_DIR"' "$repo/setup.sh" || \
     fail 'main Guest flow does not call the tested Ubuntu Server build route'
 
+# Kernel extraction dry-run must leave the complete isolated project tree
+# byte-for-byte and topology-equivalent, and must not invoke privileged,
+# package-manager, or network commands.
+fakebin="$work/fakebin"
+mkdir -p "$fakebin"
+printf '#!/usr/bin/env bash\ntouch "$BLOCKED_SENTINEL"\nexit 97\n' > "$fakebin/blocked"
+chmod +x "$fakebin/blocked"
+for command_name in sudo apt apt-get curl wget; do
+    ln -s blocked "$fakebin/$command_name"
+done
+
+snapshot_tree "$test_project" > "$work/tree-before-dry-run"
+dry_output_dir="$test_project/dry-run-output"
+dry_output="$(BLOCKED_SENTINEL="$work/blocked-command" PATH="$fakebin:$PATH" \
+    "$test_project/scripts/setup-ubuntu-kernel.sh" --dry-run \
+    6.8.0-107-generic "$dry_output_dir" 2>&1)" || \
+    fail "kernel setup dry-run failed: $dry_output"
+assert_contains '6.8.0-107-generic' "$dry_output" 'dry-run omits resolved kernel version'
+assert_contains "$dry_output_dir" "$dry_output" 'dry-run omits resolved output directory'
+[ ! -e "$dry_output_dir" ] || fail 'dry-run created the requested output directory'
+[ ! -e "$test_project/build/ubuntu-kernel" ] || fail 'dry-run created its kernel work directory'
+[ ! -e "$work/blocked-command" ] || fail 'dry-run invoked sudo, apt, or a network client'
+
+default_dry_output="$(BLOCKED_SENTINEL="$work/blocked-command-default" PATH="$fakebin:$PATH" \
+    "$test_project/scripts/setup-ubuntu-kernel.sh" --dry-run 2>&1)" || \
+    fail "default kernel setup dry-run failed: $default_dry_output"
+assert_contains "$test_project/guest/images/ubuntu" "$default_dry_output" \
+    'legacy default Ubuntu kernel output path changed'
+[ ! -e "$test_project/guest/images/ubuntu" ] || \
+    fail 'default dry-run created the legacy Ubuntu output directory'
+[ ! -e "$test_project/build/ubuntu-kernel" ] || \
+    fail 'default dry-run created its kernel work directory'
+[ ! -e "$work/blocked-command-default" ] || \
+    fail 'default dry-run invoked sudo, apt, or a network client'
+
+if BLOCKED_SENTINEL="$work/blocked-command-unknown" PATH="$fakebin:$PATH" \
+        "$test_project/scripts/setup-ubuntu-kernel.sh" --unknown >/dev/null 2>&1; then
+    fail 'kernel setup accepted an unknown option'
+fi
+[ ! -e "$work/blocked-command-unknown" ] || \
+    fail 'unknown-option validation invoked sudo, apt, or a network client'
+if BLOCKED_SENTINEL="$work/blocked-command-extra" PATH="$fakebin:$PATH" \
+        "$test_project/scripts/setup-ubuntu-kernel.sh" --dry-run 6.8.0-107-generic \
+        "$dry_output_dir" extra >/dev/null 2>&1; then
+    fail 'kernel setup accepted an extra positional argument'
+fi
+[ ! -e "$work/blocked-command-extra" ] || \
+    fail 'extra-argument validation invoked sudo, apt, or a network client'
+snapshot_tree "$test_project" > "$work/tree-after-dry-run"
+assert_same "$work/tree-before-dry-run" "$work/tree-after-dry-run" \
+    'kernel setup dry-run changed the isolated project tree'
+
 printf 'server-kernel\n' > "$payload/guest/ubuntu-server/vmlinuz"
 printf 'server-modules\n' > "$payload/guest/ubuntu-server/modules.tar.gz"
 printf 'server-rootfs\n' > "$payload/guest/ubuntu-server/rootfs.ext4"
@@ -167,6 +291,18 @@ printf 'debian-kernel\n' > "$payload/guest/debian/bzImage"
 printf 'debian-rootfs\n' > "$payload/guest/debian/rootfs.ext4"
 archive="$work/offline.zip"
 (cd "$payload" && zip -qr "$archive" .) || fail 'failed to create offline import fixture'
+mkdir -p "$test_project/guest/images/ubuntu-server" \
+    "$test_project/guest/images/ubuntu" "$test_project/guest/images/debian"
+for stale_path in \
+    "$test_project/guest/images/ubuntu-server/vmlinuz" \
+    "$test_project/guest/images/ubuntu-server/modules.tar.gz" \
+    "$test_project/guest/images/ubuntu-server/rootfs.ext4" \
+    "$test_project/guest/images/ubuntu/vmlinuz" \
+    "$test_project/guest/images/ubuntu/rootfs.ext4" \
+    "$test_project/guest/images/debian/bzImage" \
+    "$test_project/guest/images/debian/rootfs.ext4"; do
+    printf 'stale:%s\n' "$stale_path" > "$stale_path"
+done
 import_output="$(bash "$test_project/setup.sh" --import "$archive" --import-only 2>&1)" || \
     fail "offline import failed: $import_output"
 assert_file "$test_project/guest/images/ubuntu-server/vmlinuz" \
@@ -204,42 +340,6 @@ assert_same "$payload/guest/debian/bzImage" \
 assert_same "$payload/guest/debian/rootfs.ext4" \
     "$test_project/guest/images/debian/rootfs.ext4" \
     'legacy Debian rootfs import content changed'
-
-# Kernel extraction dry-run must resolve the requested output without touching
-# it or invoking privilege/network/package commands.
-fakebin="$work/fakebin"
-mkdir -p "$fakebin"
-printf '#!/usr/bin/env bash\ntouch "$BLOCKED_SENTINEL"\nexit 97\n' > "$fakebin/blocked"
-chmod +x "$fakebin/blocked"
-for command_name in sudo apt apt-get curl wget; do
-    ln -s blocked "$fakebin/$command_name"
-done
-
-dry_output="$(BLOCKED_SENTINEL="$work/blocked-command" PATH="$fakebin:$PATH" \
-    "$repo/scripts/setup-ubuntu-kernel.sh" --dry-run 6.8.0-107-generic "$work/out" 2>&1)" || \
-    fail "kernel setup dry-run failed: $dry_output"
-assert_contains '6.8.0-107-generic' "$dry_output" 'dry-run omits resolved kernel version'
-assert_contains "$work/out" "$dry_output" 'dry-run omits resolved output directory'
-[ ! -e "$work/out" ] || fail 'dry-run created the output directory'
-[ ! -e "$work/blocked-command" ] || fail 'dry-run invoked sudo, apt, or a network client'
-
-default_dry_output="$(BLOCKED_SENTINEL="$work/blocked-command-default" PATH="$fakebin:$PATH" \
-    "$repo/scripts/setup-ubuntu-kernel.sh" --dry-run 2>&1)" || \
-    fail "default kernel setup dry-run failed: $default_dry_output"
-assert_contains "$repo/guest/images/ubuntu" "$default_dry_output" \
-    'legacy default Ubuntu kernel output path changed'
-[ ! -e "$work/blocked-command-default" ] || \
-    fail 'default dry-run invoked sudo, apt, or a network client'
-
-if BLOCKED_SENTINEL="$work/blocked-command-unknown" PATH="$fakebin:$PATH" \
-        "$test_project/scripts/setup-ubuntu-kernel.sh" --unknown >/dev/null 2>&1; then
-    fail 'kernel setup accepted an unknown option'
-fi
-if BLOCKED_SENTINEL="$work/blocked-command-extra" PATH="$fakebin:$PATH" \
-        "$test_project/scripts/setup-ubuntu-kernel.sh" --dry-run 6.8.0-107-generic \
-        "$work/out" extra >/dev/null 2>&1; then
-    fail 'kernel setup accepted an extra positional argument'
-fi
 
 if [ "$failures" -ne 0 ]; then
     echo "[ubuntu-server-profile] $failures contract check(s) failed" >&2

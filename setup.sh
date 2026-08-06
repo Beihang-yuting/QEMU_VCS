@@ -489,6 +489,7 @@ resolve_offline_custom_driver() {
 build_ubuntu_server_guest() {
     local output_dir="$1"
     local builder="${PROJECT_DIR}/scripts/build_rootfs_ubuntu_server.sh"
+    local missing=0
 
     if [ ! -x "$builder" ]; then
         fail "Ubuntu Server rootfs 构建脚本不存在或不可执行: $builder"
@@ -497,6 +498,17 @@ build_ubuntu_server_guest() {
     fi
     if ! "$builder" "$output_dir"; then
         fail "Ubuntu Server rootfs 构建失败: $builder"
+        return 1
+    fi
+    if [ ! -f "${output_dir}/rootfs.ext4" ]; then
+        fail "Ubuntu Server rootfs 产物缺失: ${output_dir}/rootfs.ext4"
+        missing=1
+    fi
+    if [ ! -f "${output_dir}/vmlinuz" ] && [ ! -f "${output_dir}/bzImage" ]; then
+        fail "Ubuntu Server kernel 产物缺失: ${output_dir}/vmlinuz 或 bzImage"
+        missing=1
+    fi
+    if [ "$missing" -ne 0 ]; then
         return 1
     fi
 }
