@@ -389,17 +389,29 @@ DEBIAN_FIXTURE="${WORK_DIR}/debian builder fixture"
 DEBIAN_FAKE_BIN="${DEBIAN_FIXTURE}/fake bin"
 DEBIAN_LOG="${DEBIAN_FIXTURE}/builder.log"
 DEBIAN_MOUNT_FILE="${DEBIAN_FIXTURE}/mount-dir"
+DEBIAN_MOUNT_STATE="${DEBIAN_FIXTURE}/mount-state"
+DEBIAN_BUILD_USER_LOG="${DEBIAN_FIXTURE}/build-user.log"
+DEBIAN_GUEST_TOOLS_TREE="${DEBIAN_FIXTURE}/guest-tools-tree"
+DEBIAN_SIGNAL_STATE="${DEBIAN_FIXTURE}/signal-state"
+DEBIAN_SUDO_LOG="${DEBIAN_FIXTURE}/sudo-boundaries.log"
 DEBIAN_OUTPUT="${DEBIAN_FIXTURE}/output"
-export DEBIAN_FIXTURE DEBIAN_LOG DEBIAN_MOUNT_FILE
+export DEBIAN_FIXTURE DEBIAN_LOG DEBIAN_MOUNT_FILE DEBIAN_MOUNT_STATE \
+    DEBIAN_BUILD_USER_LOG DEBIAN_GUEST_TOOLS_TREE DEBIAN_SIGNAL_STATE \
+    DEBIAN_SUDO_LOG
 mkdir -p "${DEBIAN_FIXTURE}/scripts" "${DEBIAN_FIXTURE}/build/tmp" \
-    "${DEBIAN_FAKE_BIN}" "${DEBIAN_OUTPUT}"
+    "${DEBIAN_FIXTURE}/guest" "${DEBIAN_FAKE_BIN}" "${DEBIAN_OUTPUT}"
 cp "${DEBIAN_BUILDER}" "${DEBIAN_FIXTURE}/scripts/build_rootfs_debian.sh"
 chmod 0755 "${DEBIAN_FIXTURE}/scripts/build_rootfs_debian.sh"
+printf '#!/bin/sh\nexec /bin/sh\n' >"${DEBIAN_FIXTURE}/guest/cosim-init"
+chmod 0755 "${DEBIAN_FIXTURE}/guest/cosim-init"
 
 cat >"${DEBIAN_FIXTURE}/scripts/build_dpu_debugutils.sh" <<'DEBIAN_BUILD_HELPER'
 #!/usr/bin/env bash
 set -euo pipefail
 [[ "$#" -eq 0 ]] || exit 80
+build_user=${DEBIAN_EFFECTIVE_USER:-root}
+printf '%s\n' "$build_user" >"${DEBIAN_BUILD_USER_LOG}"
+[[ "$build_user" == "${DEBIAN_EXPECT_BUILD_USER:-root}" ]] || exit 86
 printf 'build\n' >>"${DEBIAN_LOG}"
 build_result=${DEBIAN_BUILD_RESULT:-0}
 (( build_result == 0 )) || exit "${build_result}"
@@ -417,6 +429,14 @@ set -euo pipefail
 [[ "$#" -eq 4 && "$1" == --root && "$3" == --bin-dir ]] || exit 81
 [[ "$2" == "$(cat "${DEBIAN_MOUNT_FILE}")" && -f "$2/.fixture-mounted" ]] || exit 82
 [[ "$4" == "${DEBIAN_FIXTURE}/build/guest_tools/dpu-debugutils" ]] || exit 83
+if [[ "${DEBIAN_CHECK_FINAL_TOOLS_TREE:-0}" == 1 ]]; then
+    [[ ! -e "$2/usr/local/bin/dpu-debugutils" ]] || exit 88
+    [[ -x "$2/usr/local/bin/other_tool" ]] || exit 89
+    cp "$4/pci_debug" "$2/usr/local/bin/pci_debug"
+    cp "$4/reg_display" "$2/usr/local/bin/reg_display"
+    find "$2/usr/local/bin" -mindepth 1 -maxdepth 1 -printf '%f\n' | sort \
+        >"${DEBIAN_GUEST_TOOLS_TREE}"
+fi
 printf 'stage:%s\n' "$2" >>"${DEBIAN_LOG}"
 exit "${DEBIAN_STAGE_RESULT:-0}"
 DEBIAN_STAGE_HELPER
@@ -425,9 +445,52 @@ chmod 0755 "${DEBIAN_FIXTURE}/scripts/build_dpu_debugutils.sh" \
 
 cat >"${DEBIAN_FAKE_BIN}/id" <<'DEBIAN_ID_SHIM'
 #!/usr/bin/env bash
-[[ "${1:-}" == -u ]] && { printf '0\n'; exit 0; }
+if [[ "${1:-}" == -u && "$#" -eq 1 ]]; then
+    printf '0\n'
+    exit 0
+fi
+if [[ "${1:-}" == -u && "${2:-}" == fixture-builder ]]; then
+    printf '1234\n'
+    exit 0
+fi
+if [[ "${1:-}" == -g && "${2:-}" == fixture-builder ]]; then
+    printf '1234\n'
+    exit 0
+fi
 exec /usr/bin/id "$@"
 DEBIAN_ID_SHIM
+
+cat >"${DEBIAN_FAKE_BIN}/sudo" <<'DEBIAN_SUDO_SHIM'
+#!/usr/bin/env bash
+set -euo pipefail
+[[ "${1:-}" == -u && "${2:-}" == fixture-builder && "${3:-}" == -- ]] || exit 87
+shift 3
+if [[ "${DEBIAN_ENFORCE_BUILD_USER_BOUNDARIES:-0}" == 1 ]]; then
+    command_name=${1:-}
+    target=${@: -1}
+    case "$command_name" in
+        mkdir)
+            printf 'mkdir:%s:fixture-builder\n' "$target" >>"${DEBIAN_SUDO_LOG}"
+            if [[ "${DEBIAN_SUDO_DENY_MKDIR_PATH:-}" == "$target" ]]; then
+                exit 52
+            fi
+            ;;
+        test)
+            [[ "${2:-}" == -w ]] || exit 90
+            printf 'write:%s:fixture-builder\n' "$target" >>"${DEBIAN_SUDO_LOG}"
+            if [[ "${DEBIAN_SUDO_DENY_WRITE_PATH:-}" == "$target" ]]; then
+                exit 53
+            fi
+            exit 0
+            ;;
+        */scripts/build_dpu_debugutils.sh)
+            printf 'helper:%s:fixture-builder\n' "$command_name" >>"${DEBIAN_SUDO_LOG}"
+            ;;
+        *) exit 91 ;;
+    esac
+fi
+DEBIAN_EFFECTIVE_USER=fixture-builder exec "$@"
+DEBIAN_SUDO_SHIM
 
 cat >"${DEBIAN_FAKE_BIN}/debootstrap" <<'DEBIAN_DEBOOTSTRAP_SHIM'
 #!/usr/bin/env bash
@@ -435,6 +498,9 @@ set -euo pipefail
 root=$3
 mkdir -p "$root"/{boot,dev,etc,etc/profile.d,etc/systemd/system,proc,sys,usr/local/bin}
 printf 'root:*:1:1:1:1:1:1:1\n' >"$root/etc/shadow"
+if [[ "${DEBIAN_WITH_INITRD:-0}" == 1 ]]; then
+    printf 'fixture initrd\n' >"$root/boot/initrd.img-fixture"
+fi
 DEBIAN_DEBOOTSTRAP_SHIM
 
 cat >"${DEBIAN_FAKE_BIN}/dd" <<'DEBIAN_DD_SHIM'
@@ -461,6 +527,7 @@ if [[ "${1:-}" == --find ]]; then
     printf '/dev/loop-fixture\n'
 else
     printf 'losetup-detach\n' >>"${DEBIAN_LOG}"
+    exit "${DEBIAN_LOSETUP_DETACH_RESULT:-0}"
 fi
 DEBIAN_LOSETUP_SHIM
 
@@ -469,6 +536,7 @@ cat >"${DEBIAN_FAKE_BIN}/mount" <<'DEBIAN_MOUNT_SHIM'
 set -euo pipefail
 target=${@: -1}
 mkdir -p "$target"
+printf '%s\n' "$target" >>"${DEBIAN_MOUNT_STATE}"
 if [[ "${1:-}" == /dev/loop-fixture ]]; then
     printf '%s\n' "$target" >"${DEBIAN_MOUNT_FILE}"
     : >"$target/.fixture-mounted"
@@ -480,11 +548,57 @@ cat >"${DEBIAN_FAKE_BIN}/umount" <<'DEBIAN_UMOUNT_SHIM'
 #!/usr/bin/env bash
 set -euo pipefail
 target=${1:?missing target}
-if [[ -s "${DEBIAN_MOUNT_FILE}" && "$target" == "$(cat "${DEBIAN_MOUNT_FILE}")" ]]; then
+root=$(cat "${DEBIAN_MOUNT_FILE}")
+target_kind=${target#"${root}"}
+[[ -n "$target_kind" ]] || target_kind=root
+if [[ "${DEBIAN_UMOUNT_FAIL_TARGET:-}" == "$target_kind" ]]; then
+    printf 'umount-failed:%s\n' "$target" >>"${DEBIAN_LOG}"
+    exit 47
+fi
+if [[ "${DEBIAN_UMOUNT_STICKY_TARGET:-}" == "$target_kind" ]]; then
+    printf 'umount-still-mounted:%s\n' "$target" >>"${DEBIAN_LOG}"
+    exit 0
+fi
+if awk -v prefix="$target/" 'index($0, prefix) == 1 { found = 1 } END { exit !found }' \
+        "${DEBIAN_MOUNT_STATE}"; then
+    printf 'umount-has-child:%s\n' "$target" >>"${DEBIAN_LOG}"
+    exit 48
+fi
+awk -v target="$target" '$0 != target' "${DEBIAN_MOUNT_STATE}" \
+    >"${DEBIAN_MOUNT_STATE}.new"
+mv "${DEBIAN_MOUNT_STATE}.new" "${DEBIAN_MOUNT_STATE}"
+if [[ "$target" == "$root" ]]; then
     rm -f "$target/.fixture-mounted"
     printf 'umount-root:%s\n' "$target" >>"${DEBIAN_LOG}"
 fi
+if [[ "${DEBIAN_SIGNAL_DURING_UMOUNT_TARGET:-}" == "$target_kind" &&
+      ! -e "${DEBIAN_SIGNAL_STATE}.first" ]]; then
+    : >"${DEBIAN_SIGNAL_STATE}.first"
+    kill -TERM "$PPID"
+fi
 DEBIAN_UMOUNT_SHIM
+
+cat >"${DEBIAN_FAKE_BIN}/mountpoint" <<'DEBIAN_MOUNTPOINT_SHIM'
+#!/usr/bin/env bash
+set -euo pipefail
+target=${@: -1}
+root=$(cat "${DEBIAN_MOUNT_FILE}")
+target_kind=${target#"${root}"}
+[[ -n "$target_kind" ]] || target_kind=root
+if [[ "${DEBIAN_MOUNTPOINT_ERROR_TARGET:-}" == "$target_kind" ]]; then
+    exit 65
+fi
+if grep -Fxq "$target" "${DEBIAN_MOUNT_STATE}"; then
+    exit 0
+fi
+if [[ "${DEBIAN_SECOND_SIGNAL_DURING_VERIFY_TARGET:-}" == "$target_kind" &&
+      -e "${DEBIAN_SIGNAL_STATE}.first" &&
+      ! -e "${DEBIAN_SIGNAL_STATE}.second" ]]; then
+    : >"${DEBIAN_SIGNAL_STATE}.second"
+    kill -INT "$PPID"
+fi
+exit "${DEBIAN_MOUNTPOINT_INACTIVE_STATUS:-32}"
+DEBIAN_MOUNTPOINT_SHIM
 
 cat >"${DEBIAN_FAKE_BIN}/chroot" <<'DEBIAN_CHROOT_SHIM'
 #!/usr/bin/env bash
@@ -495,6 +609,39 @@ cat >"${DEBIAN_FAKE_BIN}/openssl" <<'DEBIAN_OPENSSL_SHIM'
 #!/usr/bin/env bash
 printf 'fixture-password-hash\n'
 DEBIAN_OPENSSL_SHIM
+
+cat >"${DEBIAN_FAKE_BIN}/file" <<'DEBIAN_FILE_SHIM'
+#!/usr/bin/env bash
+printf '%s: gzip compressed data\n' "${1:-fixture}"
+DEBIAN_FILE_SHIM
+
+cat >"${DEBIAN_FAKE_BIN}/zcat" <<'DEBIAN_ZCAT_SHIM'
+#!/usr/bin/env bash
+printf 'fixture archive\n'
+DEBIAN_ZCAT_SHIM
+
+cat >"${DEBIAN_FAKE_BIN}/cpio" <<'DEBIAN_CPIO_SHIM'
+#!/usr/bin/env bash
+cat >/dev/null
+exit "${DEBIAN_CPIO_RESULT:-0}"
+DEBIAN_CPIO_SHIM
+
+cat >"${DEBIAN_FAKE_BIN}/rm" <<'DEBIAN_RM_SHIM'
+#!/usr/bin/env bash
+set -euo pipefail
+target=${@: -1}
+case "${DEBIAN_RM_FAIL_KIND:-}:$target" in
+    repack:"${DEBIAN_FIXTURE}/build/tmp/debian-initramfs."*)
+        printf 'rm-repack-failed:%s\n' "$target" >>"${DEBIAN_LOG}"
+        exit 67
+        ;;
+    root:"${DEBIAN_FIXTURE}/build/tmp/debian-rootfs."*)
+        printf 'rm-root-failed:%s\n' "$target" >>"${DEBIAN_LOG}"
+        exit 68
+        ;;
+esac
+exec /usr/bin/rm "$@"
+DEBIAN_RM_SHIM
 
 cat >"${DEBIAN_FAKE_BIN}/ls" <<'DEBIAN_LS_SHIM'
 #!/usr/bin/env bash
@@ -513,8 +660,11 @@ run_debian_builder() {
 }
 
 : >"${DEBIAN_LOG}"
-run_debian_builder >"${DEBIAN_FIXTURE}/success.stdout" \
-    2>"${DEBIAN_FIXTURE}/success.stderr"
+: >"${DEBIAN_MOUNT_STATE}"
+if ! run_debian_builder >"${DEBIAN_FIXTURE}/success.stdout" \
+        2>"${DEBIAN_FIXTURE}/success.stderr"; then
+    fail "Debian builder success fixture failed: $(<"${DEBIAN_FIXTURE}/success.stderr")"
+fi
 DEBIAN_MOUNT_DIR="$(cat "${DEBIAN_MOUNT_FILE}")"
 mapfile -t DEBIAN_EVENTS <"${DEBIAN_LOG}"
 test "${DEBIAN_EVENTS[0]:-}" = build ||
@@ -536,7 +686,104 @@ test "${stage_event}" = "stage:${DEBIAN_MOUNT_DIR}" ||
 test "${unmount_event}" = "umount-root:${DEBIAN_MOUNT_DIR}" ||
     fail 'Debian builder did not unmount its root after staging'
 
+# util-linux mountpoint commonly returns 1 for an ordinary non-mountpoint.
+# The builder must treat that documented result as safely unmounted too.
 : >"${DEBIAN_LOG}"
+: >"${DEBIAN_MOUNT_STATE}"
+if ! DEBIAN_MOUNTPOINT_INACTIVE_STATUS=1 run_debian_builder \
+        >"${DEBIAN_FIXTURE}/mountpoint-one.stdout" \
+        2>"${DEBIAN_FIXTURE}/mountpoint-one.stderr"; then
+    fail "Debian builder rejected mountpoint status 1 for an unmounted path: $(<"${DEBIAN_FIXTURE}/mountpoint-one.stderr")"
+fi
+DEBIAN_STATUS_ONE_MOUNT_DIR="$(cat "${DEBIAN_MOUNT_FILE}")"
+test ! -e "${DEBIAN_STATUS_ONE_MOUNT_DIR}" ||
+    fail 'Debian builder retained an unmounted root when mountpoint returned 1'
+grep -Fxq 'losetup-detach' "${DEBIAN_LOG}" ||
+    fail 'Debian builder did not detach the loop after mountpoint returned 1'
+
+# A failure in the EXIT-only mount-directory removal turns an otherwise
+# successful build into a failure and leaves the directory for inspection.
+: >"${DEBIAN_LOG}"
+: >"${DEBIAN_MOUNT_STATE}"
+set +e
+DEBIAN_RM_FAIL_KIND=root run_debian_builder \
+    >"${DEBIAN_FIXTURE}/mount-dir-cleanup.stdout" \
+    2>"${DEBIAN_FIXTURE}/mount-dir-cleanup.stderr"
+DEBIAN_MOUNT_DIR_CLEANUP_STATUS=$?
+set -e
+test "${DEBIAN_MOUNT_DIR_CLEANUP_STATUS}" -ne 0 ||
+    fail 'Debian builder ignored mount-directory removal failure after success'
+DEBIAN_UNREMOVED_MOUNT_DIR="$(sed -n 's/^rm-root-failed://p' "${DEBIAN_LOG}" | tail -1)"
+test -n "${DEBIAN_UNREMOVED_MOUNT_DIR}" && test -d "${DEBIAN_UNREMOVED_MOUNT_DIR}" ||
+    fail 'Debian fixture did not retain the rootfs directory after rm failure'
+grep -Fq 'Could not remove rootfs work directory' \
+    "${DEBIAN_FIXTURE}/mount-dir-cleanup.stderr" ||
+    fail 'Debian cleanup did not report mount-directory removal failure'
+test "$(grep -c '^losetup-detach$' "${DEBIAN_LOG}" || true)" -eq 1 ||
+    fail 'Debian cleanup did not detach before attempting mount-directory removal'
+
+# A loop detach error participates in the same aggregate cleanup result.
+: >"${DEBIAN_LOG}"
+: >"${DEBIAN_MOUNT_STATE}"
+set +e
+DEBIAN_LOSETUP_DETACH_RESULT=69 run_debian_builder \
+    >"${DEBIAN_FIXTURE}/loop-cleanup.stdout" \
+    2>"${DEBIAN_FIXTURE}/loop-cleanup.stderr"
+DEBIAN_LOOP_CLEANUP_STATUS=$?
+set -e
+test "${DEBIAN_LOOP_CLEANUP_STATUS}" -ne 0 ||
+    fail 'Debian builder ignored loop detach failure'
+grep -Fq 'Could not detach loop device /dev/loop-fixture' \
+    "${DEBIAN_FIXTURE}/loop-cleanup.stderr" ||
+    fail 'Debian cleanup did not report loop detach failure'
+
+# Cleanup must report a failed removal of an in-progress initramfs workspace,
+# while retaining the earlier build failure as the primary exit status.
+: >"${DEBIAN_LOG}"
+: >"${DEBIAN_MOUNT_STATE}"
+set +e
+DEBIAN_WITH_INITRD=1 DEBIAN_CPIO_RESULT=49 DEBIAN_RM_FAIL_KIND=repack \
+    run_debian_builder >"${DEBIAN_FIXTURE}/repack-cleanup.stdout" \
+    2>"${DEBIAN_FIXTURE}/repack-cleanup.stderr"
+DEBIAN_REPACK_CLEANUP_STATUS=$?
+set -e
+test "${DEBIAN_REPACK_CLEANUP_STATUS}" -eq 49 ||
+    fail "Debian cleanup replaced the initramfs failure: ${DEBIAN_REPACK_CLEANUP_STATUS}"
+DEBIAN_REPACK_DIR="$(sed -n 's/^rm-repack-failed://p' "${DEBIAN_LOG}" | tail -1)"
+test -n "${DEBIAN_REPACK_DIR}" && test -d "${DEBIAN_REPACK_DIR}" ||
+    fail 'Debian fixture did not retain the initramfs directory after rm failure'
+grep -Fq 'Could not remove initramfs work directory' \
+    "${DEBIAN_FIXTURE}/repack-cleanup.stderr" ||
+    fail 'Debian cleanup did not report the initramfs removal failure'
+
+# Signals delivered after umount and during its mountpoint verification must
+# be deferred until the tracked state is current.  Cleanup must then remain
+# idempotent and finish even when a second signal arrives in that window.
+: >"${DEBIAN_LOG}"
+: >"${DEBIAN_MOUNT_STATE}"
+rm -f "${DEBIAN_SIGNAL_STATE}.first" "${DEBIAN_SIGNAL_STATE}.second"
+set +e
+DEBIAN_SIGNAL_DURING_UMOUNT_TARGET=root \
+DEBIAN_SECOND_SIGNAL_DURING_VERIFY_TARGET=root \
+    run_debian_builder >"${DEBIAN_FIXTURE}/unmount-signals.stdout" \
+    2>"${DEBIAN_FIXTURE}/unmount-signals.stderr"
+DEBIAN_UNMOUNT_SIGNALS_STATUS=$?
+set -e
+DEBIAN_SIGNAL_MOUNT_DIR="$(cat "${DEBIAN_MOUNT_FILE}")"
+test "${DEBIAN_UNMOUNT_SIGNALS_STATUS}" -eq 130 ||
+    fail "Debian builder did not preserve the final deferred signal status: ${DEBIAN_UNMOUNT_SIGNALS_STATUS}"
+test -e "${DEBIAN_SIGNAL_STATE}.first" &&
+    test -e "${DEBIAN_SIGNAL_STATE}.second" ||
+    fail 'Debian builder did not exercise both unmount signal windows'
+test "$(grep -Fc "umount-root:${DEBIAN_SIGNAL_MOUNT_DIR}" "${DEBIAN_LOG}" || true)" -eq 1 ||
+    fail 'Debian cleanup retried a root already unmounted before a signal'
+test "$(grep -c '^losetup-detach$' "${DEBIAN_LOG}" || true)" -eq 1 ||
+    fail 'Debian signal cleanup did not detach the loop exactly once'
+test ! -e "${DEBIAN_SIGNAL_MOUNT_DIR}" ||
+    fail 'Debian signal cleanup left its unmounted work directory'
+
+: >"${DEBIAN_LOG}"
+: >"${DEBIAN_MOUNT_STATE}"
 set +e
 DEBIAN_BUILD_RESULT=31 run_debian_builder \
     >"${DEBIAN_FIXTURE}/build-failure.stdout" \
@@ -549,6 +796,7 @@ test "$(cat "${DEBIAN_LOG}")" = build ||
     fail 'Debian builder continued after tool build failure'
 
 : >"${DEBIAN_LOG}"
+: >"${DEBIAN_MOUNT_STATE}"
 set +e
 DEBIAN_STAGE_RESULT=37 run_debian_builder \
     >"${DEBIAN_FIXTURE}/stage-failure.stdout" \
@@ -564,5 +812,214 @@ grep -Fxq "umount-root:${DEBIAN_FAILED_MOUNT_DIR}" "${DEBIAN_LOG}" ||
     fail 'Debian builder staging failure did not unmount the root'
 grep -Fxq 'losetup-detach' "${DEBIAN_LOG}" ||
     fail 'Debian builder staging failure did not detach the loop device'
+
+# A successful umount return is not sufficient: if mountpoint still reports
+# the root active, cleanup must fail closed without detaching or deleting it.
+: >"${DEBIAN_LOG}"
+: >"${DEBIAN_MOUNT_STATE}"
+set +e
+DEBIAN_UMOUNT_STICKY_TARGET=root run_debian_builder \
+    >"${DEBIAN_FIXTURE}/sticky-root.stdout" \
+    2>"${DEBIAN_FIXTURE}/sticky-root.stderr"
+DEBIAN_STICKY_ROOT_STATUS=$?
+set -e
+DEBIAN_STICKY_ROOT_DIR="$(cat "${DEBIAN_MOUNT_FILE}")"
+test "${DEBIAN_STICKY_ROOT_STATUS}" -ne 0 ||
+    fail 'Debian builder ignored a root that remained mounted after successful umount'
+test -d "${DEBIAN_STICKY_ROOT_DIR}" ||
+    fail 'Debian builder removed a root that remained mounted'
+test "$(grep -c '^losetup-detach$' "${DEBIAN_LOG}" || true)" -eq 0 ||
+    fail 'Debian builder detached its loop device while the root remained mounted'
+
+# An uncertain mountpoint query must fail closed even after umount returned
+# success; otherwise cleanup cannot prove that recursive removal is safe.
+: >"${DEBIAN_LOG}"
+: >"${DEBIAN_MOUNT_STATE}"
+set +e
+DEBIAN_MOUNTPOINT_ERROR_TARGET=root run_debian_builder \
+    >"${DEBIAN_FIXTURE}/uncertain-root.stdout" \
+    2>"${DEBIAN_FIXTURE}/uncertain-root.stderr"
+DEBIAN_UNCERTAIN_ROOT_STATUS=$?
+set -e
+DEBIAN_UNCERTAIN_ROOT_DIR="$(cat "${DEBIAN_MOUNT_FILE}")"
+test "${DEBIAN_UNCERTAIN_ROOT_STATUS}" -ne 0 ||
+    fail 'Debian builder treated an uncertain mount query as unmounted'
+test -d "${DEBIAN_UNCERTAIN_ROOT_DIR}" ||
+    fail 'Debian builder removed a root whose mount state was uncertain'
+test "$(grep -c '^losetup-detach$' "${DEBIAN_LOG}" || true)" -eq 0 ||
+    fail 'Debian builder detached its loop after an uncertain mount query'
+
+# A child unmount failure keeps the root busy.  Neither the loop nor the work
+# directory may be removed, and the unmount failure must remain visible.
+: >"${DEBIAN_LOG}"
+: >"${DEBIAN_MOUNT_STATE}"
+set +e
+DEBIAN_UMOUNT_FAIL_TARGET=/dev run_debian_builder \
+    >"${DEBIAN_FIXTURE}/child-unmount.stdout" \
+    2>"${DEBIAN_FIXTURE}/child-unmount.stderr"
+DEBIAN_CHILD_UNMOUNT_STATUS=$?
+set -e
+DEBIAN_CHILD_UNMOUNT_DIR="$(cat "${DEBIAN_MOUNT_FILE}")"
+test "${DEBIAN_CHILD_UNMOUNT_STATUS}" -ne 0 ||
+    fail 'Debian builder ignored a child unmount failure'
+test -d "${DEBIAN_CHILD_UNMOUNT_DIR}" ||
+    fail 'Debian builder removed a root with a mounted child'
+test "$(grep -c '^losetup-detach$' "${DEBIAN_LOG}" || true)" -eq 0 ||
+    fail 'Debian builder detached its loop device with a mounted child'
+
+# Cleanup trouble must not replace an earlier, meaningful build failure.
+: >"${DEBIAN_LOG}"
+: >"${DEBIAN_MOUNT_STATE}"
+set +e
+DEBIAN_STAGE_RESULT=37 DEBIAN_UMOUNT_STICKY_TARGET=root run_debian_builder \
+    >"${DEBIAN_FIXTURE}/failure-with-sticky-root.stdout" \
+    2>"${DEBIAN_FIXTURE}/failure-with-sticky-root.stderr"
+DEBIAN_FAILURE_WITH_CLEANUP_STATUS=$?
+set -e
+DEBIAN_FAILURE_WITH_CLEANUP_DIR="$(cat "${DEBIAN_MOUNT_FILE}")"
+test "${DEBIAN_FAILURE_WITH_CLEANUP_STATUS}" -eq 37 ||
+    fail "cleanup replaced original stage status: ${DEBIAN_FAILURE_WITH_CLEANUP_STATUS}"
+test -d "${DEBIAN_FAILURE_WITH_CLEANUP_DIR}" ||
+    fail 'cleanup removed a mounted root after the original stage failure'
+test "$(grep -c '^losetup-detach$' "${DEBIAN_LOG}" || true)" -eq 0 ||
+    fail 'cleanup detached a mounted root after the original stage failure'
+
+# A sudo-driven build must prepare tools as the invoking user so a later
+# unprivileged rebuild can replace them.  The fake sudo models target-user
+# mkdir/write denial, so these assertions do not rely on the root test runner's
+# own access checks.  Direct-root cases above remain valid.
+rm -rf "${DEBIAN_FIXTURE}/build/guest_tools"
+: >"${DEBIAN_LOG}"
+: >"${DEBIAN_MOUNT_STATE}"
+: >"${DEBIAN_SUDO_LOG}"
+SUDO_USER=fixture-builder DEBIAN_EXPECT_BUILD_USER=fixture-builder \
+    DEBIAN_ENFORCE_BUILD_USER_BOUNDARIES=1 \
+    run_debian_builder >"${DEBIAN_FIXTURE}/sudo-user.stdout" \
+    2>"${DEBIAN_FIXTURE}/sudo-user.stderr" ||
+    fail "Debian builder did not build as SUDO_USER: $(<"${DEBIAN_FIXTURE}/sudo-user.stderr")"
+test "$(cat "${DEBIAN_BUILD_USER_LOG}")" = fixture-builder ||
+    fail 'Debian debug utility helper did not run as the invoking user'
+for boundary in \
+    "mkdir:${DEBIAN_FIXTURE}/build/guest_tools:fixture-builder" \
+    "mkdir:${DEBIAN_FIXTURE}/build/guest_tools/dpu-debugutils:fixture-builder" \
+    "write:${DEBIAN_FIXTURE}/build:fixture-builder" \
+    "write:${DEBIAN_FIXTURE}/build/tmp:fixture-builder" \
+    "write:${DEBIAN_FIXTURE}/build/guest_tools:fixture-builder" \
+    "write:${DEBIAN_FIXTURE}/build/guest_tools/dpu-debugutils:fixture-builder" \
+    "helper:${DEBIAN_FIXTURE}/scripts/build_dpu_debugutils.sh:fixture-builder" \
+    "write:${DEBIAN_FIXTURE}/build/guest_tools/dpu-debugutils/pci_debug:fixture-builder" \
+    "write:${DEBIAN_FIXTURE}/build/guest_tools/dpu-debugutils/reg_display:fixture-builder"; do
+    grep -Fxq "$boundary" "${DEBIAN_SUDO_LOG}" ||
+        fail "Debian builder skipped invoking-user boundary: $boundary"
+done
+
+# A modeled target-user write denial must stop before any image operation,
+# even though the root test process itself can write the file.
+: >"${DEBIAN_LOG}"
+: >"${DEBIAN_MOUNT_STATE}"
+: >"${DEBIAN_SUDO_LOG}"
+set +e
+SUDO_USER=fixture-builder DEBIAN_EXPECT_BUILD_USER=fixture-builder \
+    DEBIAN_ENFORCE_BUILD_USER_BOUNDARIES=1 \
+    DEBIAN_SUDO_DENY_WRITE_PATH="${DEBIAN_FIXTURE}/build/guest_tools/dpu-debugutils/reg_display" \
+    run_debian_builder >"${DEBIAN_FIXTURE}/sudo-user-write-denied.stdout" \
+    2>"${DEBIAN_FIXTURE}/sudo-user-write-denied.stderr"
+DEBIAN_SUDO_WRITE_DENIED_STATUS=$?
+set -e
+test "${DEBIAN_SUDO_WRITE_DENIED_STATUS}" -ne 0 ||
+    fail 'Debian builder ignored invoking-user write denial'
+grep -Fxq "write:${DEBIAN_FIXTURE}/build/guest_tools/dpu-debugutils/reg_display:fixture-builder" \
+    "${DEBIAN_SUDO_LOG}" ||
+    fail 'Debian builder did not ask the invoking user to validate reg_display writability'
+test "$(cat "${DEBIAN_LOG}")" = build ||
+    fail 'Debian builder modified the image after invoking-user write denial'
+
+# Directory creation is also an invoking-user boundary.  A modeled denial is
+# propagated before the helper and before image creation.
+rm -rf "${DEBIAN_FIXTURE}/build/guest_tools"
+: >"${DEBIAN_LOG}"
+: >"${DEBIAN_MOUNT_STATE}"
+: >"${DEBIAN_SUDO_LOG}"
+set +e
+SUDO_USER=fixture-builder DEBIAN_EXPECT_BUILD_USER=fixture-builder \
+    DEBIAN_ENFORCE_BUILD_USER_BOUNDARIES=1 \
+    DEBIAN_SUDO_DENY_MKDIR_PATH="${DEBIAN_FIXTURE}/build/guest_tools" \
+    run_debian_builder >"${DEBIAN_FIXTURE}/sudo-user-mkdir-denied.stdout" \
+    2>"${DEBIAN_FIXTURE}/sudo-user-mkdir-denied.stderr"
+DEBIAN_SUDO_MKDIR_DENIED_STATUS=$?
+set -e
+test "${DEBIAN_SUDO_MKDIR_DENIED_STATUS}" -eq 52 ||
+    fail "Debian builder did not propagate invoking-user mkdir denial: ${DEBIAN_SUDO_MKDIR_DENIED_STATUS}"
+grep -Fxq "mkdir:${DEBIAN_FIXTURE}/build/guest_tools:fixture-builder" \
+    "${DEBIAN_SUDO_LOG}" ||
+    fail 'Debian builder did not create guest_tools through the invoking-user runner'
+test ! -s "${DEBIAN_LOG}" ||
+    fail 'Debian builder invoked the helper after invoking-user mkdir denial'
+
+: >"${DEBIAN_LOG}"
+: >"${DEBIAN_MOUNT_STATE}"
+: >"${DEBIAN_SUDO_LOG}"
+set +e
+SUDO_USER=fixture-builder DEBIAN_EXPECT_BUILD_USER=fixture-builder \
+    DEBIAN_ENFORCE_BUILD_USER_BOUNDARIES=1 DEBIAN_BUILD_RESULT=39 \
+    run_debian_builder \
+    >"${DEBIAN_FIXTURE}/sudo-user-build-failure.stdout" \
+    2>"${DEBIAN_FIXTURE}/sudo-user-build-failure.stderr"
+DEBIAN_SUDO_BUILD_STATUS=$?
+set -e
+test "${DEBIAN_SUDO_BUILD_STATUS}" -eq 39 ||
+    fail "SUDO_USER build failure was not preserved: ${DEBIAN_SUDO_BUILD_STATUS}"
+test "$(cat "${DEBIAN_BUILD_USER_LOG}")" = fixture-builder ||
+    fail 'failing debug utility helper did not run as the invoking user'
+test "$(cat "${DEBIAN_LOG}")" = build ||
+    fail 'Debian builder modified the image after invoking-user build failure'
+
+# Generic Guest tools are copied separately; the debugutils directory itself
+# must not leak into /usr/local/bin before the staging helper installs binaries.
+printf '#!/bin/sh\nexit 0\n' >"${DEBIAN_FIXTURE}/build/guest_tools/other_tool"
+chmod 0755 "${DEBIAN_FIXTURE}/build/guest_tools/other_tool"
+: >"${DEBIAN_LOG}"
+: >"${DEBIAN_MOUNT_STATE}"
+if ! DEBIAN_CHECK_FINAL_TOOLS_TREE=1 run_debian_builder \
+        >"${DEBIAN_FIXTURE}/final-tools-tree.stdout" \
+        2>"${DEBIAN_FIXTURE}/final-tools-tree.stderr"; then
+    fail "Debian builder leaked the debugutils directory into the Guest: $(<"${DEBIAN_FIXTURE}/final-tools-tree.stderr")"
+fi
+EXPECTED_DEBIAN_TOOLS_TREE=$'other_tool\npci_debug\nreg_display'
+test "$(cat "${DEBIAN_GUEST_TOOLS_TREE}")" = "${EXPECTED_DEBIAN_TOOLS_TREE}" ||
+    fail "unexpected final Guest tools tree: $(tr '\n' ' ' <"${DEBIAN_GUEST_TOOLS_TREE}")"
+
+# Root must not follow repository build-path symlinks before invoking a helper.
+mv "${DEBIAN_FIXTURE}/build" "${DEBIAN_FIXTURE}/build.real"
+mkdir -p "${DEBIAN_FIXTURE}/escaped-build/tmp"
+ln -s "${DEBIAN_FIXTURE}/escaped-build" "${DEBIAN_FIXTURE}/build"
+: >"${DEBIAN_LOG}"
+set +e
+run_debian_builder >"${DEBIAN_FIXTURE}/symlink-build.stdout" \
+    2>"${DEBIAN_FIXTURE}/symlink-build.stderr"
+DEBIAN_SYMLINK_BUILD_STATUS=$?
+set -e
+test "${DEBIAN_SYMLINK_BUILD_STATUS}" -ne 0 ||
+    fail 'Debian builder accepted a symlinked repository build directory'
+test ! -s "${DEBIAN_LOG}" ||
+    fail 'Debian builder invoked the helper through a symlinked build directory'
+rm "${DEBIAN_FIXTURE}/build"
+mv "${DEBIAN_FIXTURE}/build.real" "${DEBIAN_FIXTURE}/build"
+
+mv "${DEBIAN_FIXTURE}/build/tmp" "${DEBIAN_FIXTURE}/build/tmp.real"
+mkdir -p "${DEBIAN_FIXTURE}/escaped-tmp"
+ln -s "${DEBIAN_FIXTURE}/escaped-tmp" "${DEBIAN_FIXTURE}/build/tmp"
+: >"${DEBIAN_LOG}"
+set +e
+run_debian_builder >"${DEBIAN_FIXTURE}/symlink-build-tmp.stdout" \
+    2>"${DEBIAN_FIXTURE}/symlink-build-tmp.stderr"
+DEBIAN_SYMLINK_TMP_STATUS=$?
+set -e
+test "${DEBIAN_SYMLINK_TMP_STATUS}" -ne 0 ||
+    fail 'Debian builder accepted a symlinked repository build/tmp directory'
+test ! -s "${DEBIAN_LOG}" ||
+    fail 'Debian builder invoked the helper through symlinked build/tmp'
+rm "${DEBIAN_FIXTURE}/build/tmp"
+mv "${DEBIAN_FIXTURE}/build/tmp.real" "${DEBIAN_FIXTURE}/build/tmp"
 
 echo '[stage-guest-debugutils] PASS'

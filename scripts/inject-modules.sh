@@ -4,14 +4,48 @@
 set -euo pipefail
 
 SYSTEM="${1:-ubuntu}"
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd -P)"
+PROJECT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd -P)"
 COSIM_DIR="${PROJECT_DIR}/guest/images/${SYSTEM}"
 
 MODULES_TAR="${MODULES_TAR:-${COSIM_DIR}/modules.tar.gz}"
 SRC_ROOTFS="${SRC_ROOTFS:-${COSIM_DIR}/rootfs.ext4}"
 DST_ROOTFS="${DST_ROOTFS:-${COSIM_DIR}/rootfs.ext4}"
 BUILD_TMP="${PROJECT_DIR}/build/tmp"
+DEBUG_BIN_DIR="${PROJECT_DIR}/build/guest_tools/dpu-debugutils"
+
+preflight_fail() {
+    echo "ERROR: $*" >&2
+    exit 1
+}
+
+validate_debug_output_paths() {
+    local path
+    local canonical_path
+    local utility
+
+    for path in \
+        "${PROJECT_DIR}/build" \
+        "${PROJECT_DIR}/build/guest_tools" \
+        "$DEBUG_BIN_DIR"; do
+        [ ! -L "$path" ] || preflight_fail "调试工具输出目录是符号链接: $path"
+        if [ -e "$path" ]; then
+            [ -d "$path" ] || preflight_fail "调试工具输出路径不是目录: $path"
+            canonical_path=$(cd "$path" && pwd -P) ||
+                preflight_fail "无法解析调试工具输出目录: $path"
+            [ "$canonical_path" = "$path" ] ||
+                preflight_fail "调试工具输出目录逃逸工作树: $path"
+        fi
+    done
+
+    for utility in pci_debug reg_display; do
+        path="${DEBUG_BIN_DIR}/${utility}"
+        if [ -e "$path" ] || [ -L "$path" ]; then
+            [ ! -L "$path" ] && [ -f "$path" ] ||
+                preflight_fail "调试工具输出不是常规文件: $path"
+        fi
+    done
+}
 
 # 如果目标 rootfs 不存在，尝试用 Debian 基础 rootfs
 if [ ! -f "$SRC_ROOTFS" ] && [ -f "${PROJECT_DIR}/guest/images/debian/rootfs.ext4" ]; then
@@ -28,6 +62,32 @@ if [ ! -f "$SRC_ROOTFS" ]; then
     echo "ERROR: 找不到基础 rootfs: $SRC_ROOTFS"
     exit 1
 fi
+
+debug_utility_is_executable_file() {
+    [ -f "$1" ] && [ ! -L "$1" ] && [ -x "$1" ]
+}
+
+validate_debug_output_paths
+if ! debug_utility_is_executable_file "${DEBUG_BIN_DIR}/pci_debug" ||
+        ! debug_utility_is_executable_file "${DEBUG_BIN_DIR}/reg_display"; then
+    "${PROJECT_DIR}/scripts/build_dpu_debugutils.sh" "$DEBUG_BIN_DIR"
+fi
+validate_debug_output_paths
+for utility in pci_debug reg_display; do
+    if ! debug_utility_is_executable_file "${DEBUG_BIN_DIR}/${utility}"; then
+        echo "ERROR: 调试工具不是常规的可执行文件: ${DEBUG_BIN_DIR}/${utility}" >&2
+        exit 1
+    fi
+    command -v file >/dev/null 2>&1 ||
+        preflight_fail "缺少调试工具格式检查命令: file"
+    if ! file_output=$(file -- "${DEBUG_BIN_DIR}/${utility}"); then
+        preflight_fail "无法检查调试工具格式: ${DEBUG_BIN_DIR}/${utility}"
+    fi
+    case "$file_output" in
+        *'statically linked'*) ;;
+        *) preflight_fail "调试工具不是静态链接文件: ${DEBUG_BIN_DIR}/${utility}" ;;
+    esac
+done
 
 # ---- 1. 复制基础 rootfs ----
 echo "[1/4] 复制基础 rootfs 为 ${SYSTEM} rootfs..."
@@ -132,7 +192,7 @@ cd "$PROJECT_DIR"
 
 "${PROJECT_DIR}/scripts/install_guest_debugutils.sh" \
     --rootfs "$DST_ROOTFS" \
-    --bin-dir "${PROJECT_DIR}/build/guest_tools/dpu-debugutils"
+    --bin-dir "$DEBUG_BIN_DIR"
 
 echo ""
 echo "============================================"
