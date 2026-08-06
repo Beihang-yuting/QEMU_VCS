@@ -141,7 +141,9 @@ fi
 # must restore every old artifact, including files already overwritten.
 rollback_source="$work/rollback/source"
 mkdir -p "$rollback_source/guest/ubuntu" \
-    "$rollback_source/guest/ubuntu-server"
+    "$rollback_source/guest/ubuntu-server" "$rollback_source/qemu-src"
+printf 'rollback-qemu-source\n' > \
+    "$rollback_source/qemu-src/qemu-9.2.0.tar.xz"
 printf 'new-compact-kernel\n' > "$rollback_source/guest/ubuntu/vmlinuz"
 printf 'new-compact-rootfs\n' > "$rollback_source/guest/ubuntu/rootfs.ext4"
 printf 'new-server-kernel\n' > "$rollback_source/guest/ubuntu-server/vmlinuz"
@@ -172,6 +174,83 @@ rollback_expected="$work/rollback/expected"
 mkdir -p "$rollback_expected"
 cp -a "$test_project/guest/images/ubuntu" "$rollback_expected/ubuntu"
 cp -a "$test_project/guest/images/ubuntu-server" "$rollback_expected/ubuntu-server"
+
+stage_copy_fakebin="$work/rollback/stage-copy-fakebin"
+mkdir -p "$stage_copy_fakebin"
+cat > "$stage_copy_fakebin/cp" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+destination="${@: -1}"
+case "$destination" in
+    */offline-transaction.*/new/guest/images/ubuntu/vmlinuz)
+        /usr/bin/cp "$@"
+        exit 73
+        ;;
+esac
+exec /usr/bin/cp "$@"
+EOF
+chmod +x "$stage_copy_fakebin/cp"
+stage_copy_log="$work/rollback/stage-copy.log"
+if PATH="$stage_copy_fakebin:$PATH" \
+        "$test_project/setup.sh" --import "$rollback_archive" --import-only \
+        >"$stage_copy_log" 2>&1; then
+    fail 'staging copy content-then-return73 unexpectedly succeeded'
+fi
+for artifact in vmlinuz rootfs.ext4; do
+    cmp -s "$rollback_expected/ubuntu/$artifact" \
+        "$test_project/guest/images/ubuntu/$artifact" || \
+        fail "staging copy failure changed compact $artifact"
+done
+for artifact in vmlinuz modules.tar.gz rootfs.ext4; do
+    cmp -s "$rollback_expected/ubuntu-server/$artifact" \
+        "$test_project/guest/images/ubuntu-server/$artifact" || \
+        fail "staging copy failure changed server $artifact"
+done
+if find "$test_project/build" -maxdepth 2 -type d \
+        \( -name 'offline-import*' -o -name 'offline-transaction*' \) \
+        -print -quit | grep -q .; then
+    fail 'staging copy failure left import transaction state'
+fi
+
+qemu_copy_fakebin="$work/rollback/qemu-copy-fakebin"
+mkdir -p "$qemu_copy_fakebin"
+cat > "$qemu_copy_fakebin/cp" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+destination="${@: -1}"
+case "$destination" in
+    */offline-transaction.*/sources/qemu/)
+        /usr/bin/cp "$@"
+        exit 74
+        ;;
+esac
+exec /usr/bin/cp "$@"
+EOF
+chmod +x "$qemu_copy_fakebin/cp"
+qemu_copy_log="$work/rollback/qemu-copy.log"
+set +e
+PATH="$qemu_copy_fakebin:$PATH" \
+    "$test_project/setup.sh" --import "$rollback_archive" --import-only \
+    >"$qemu_copy_log" 2>&1
+qemu_copy_status=$?
+set -e
+[ "$qemu_copy_status" -ne 0 ] || \
+    fail 'QEMU staging copy return74 unexpectedly succeeded'
+for artifact in vmlinuz rootfs.ext4; do
+    cmp -s "$rollback_expected/ubuntu/$artifact" \
+        "$test_project/guest/images/ubuntu/$artifact" || \
+        fail "QEMU staging copy failure changed compact $artifact"
+done
+for artifact in vmlinuz modules.tar.gz rootfs.ext4; do
+    cmp -s "$rollback_expected/ubuntu-server/$artifact" \
+        "$test_project/guest/images/ubuntu-server/$artifact" || \
+        fail "QEMU staging copy failure changed server $artifact"
+done
+if find "$test_project/build" -maxdepth 2 -type d \
+        \( -name 'offline-import*' -o -name 'offline-transaction*' \) \
+        -print -quit | grep -q .; then
+    fail 'QEMU staging copy failure left import transaction state'
+fi
 
 rollback_fakebin="$work/rollback/fakebin"
 mkdir -p "$rollback_fakebin"
@@ -216,6 +295,63 @@ if find "$test_project/build" -maxdepth 2 -type d \
         \( -name 'offline-import*' -o -name 'offline-transaction*' \) \
         -print -quit | grep -q .; then
     fail 'failed import left transaction temporary state'
+fi
+
+move_nonzero_fakebin="$work/rollback/move-nonzero-fakebin"
+mkdir -p "$move_nonzero_fakebin"
+cat > "$move_nonzero_fakebin/mv" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+destination="${@: -1}"
+if [ "$destination" = "$OFFLINE_TEST_MOVE_NONZERO_DEST" ] && \
+        [ ! -e "$OFFLINE_TEST_MOVE_NONZERO_ONCE" ]; then
+    : > "$OFFLINE_TEST_MOVE_NONZERO_ONCE"
+    /usr/bin/mv "$@"
+    exit 75
+fi
+exec /usr/bin/mv "$@"
+EOF
+chmod +x "$move_nonzero_fakebin/mv"
+for profile_artifact in \
+    ubuntu/vmlinuz \
+    ubuntu/rootfs.ext4 \
+    ubuntu-server/vmlinuz \
+    ubuntu-server/modules.tar.gz \
+    ubuntu-server/rootfs.ext4; do
+    printf 'move75-stale:%s\n' "$profile_artifact" > \
+        "$test_project/guest/images/$profile_artifact"
+done
+move_nonzero_expected="$work/rollback/move-nonzero-expected"
+mkdir -p "$move_nonzero_expected"
+/usr/bin/cp -a "$test_project/guest/images/ubuntu" \
+    "$move_nonzero_expected/ubuntu"
+/usr/bin/cp -a "$test_project/guest/images/ubuntu-server" \
+    "$move_nonzero_expected/ubuntu-server"
+move_nonzero_log="$work/rollback/move-nonzero.log"
+set +e
+PATH="$move_nonzero_fakebin:$PATH" \
+    OFFLINE_TEST_MOVE_NONZERO_DEST="$test_project/guest/images/ubuntu" \
+    OFFLINE_TEST_MOVE_NONZERO_ONCE="$work/rollback/move-nonzero-once" \
+    "$test_project/setup.sh" --import "$rollback_archive" --import-only \
+    >"$move_nonzero_log" 2>&1
+move_nonzero_status=$?
+set -e
+[ "$move_nonzero_status" -ne 0 ] || \
+    fail 'install move completed then return75 unexpectedly succeeded'
+for artifact in vmlinuz rootfs.ext4; do
+    cmp -s "$move_nonzero_expected/ubuntu/$artifact" \
+        "$test_project/guest/images/ubuntu/$artifact" || \
+        fail "move return75 did not restore compact $artifact"
+done
+for artifact in vmlinuz modules.tar.gz rootfs.ext4; do
+    cmp -s "$move_nonzero_expected/ubuntu-server/$artifact" \
+        "$test_project/guest/images/ubuntu-server/$artifact" || \
+        fail "move return75 changed server $artifact"
+done
+if find "$test_project/build" -maxdepth 2 -type d \
+        \( -name 'offline-import*' -o -name 'offline-transaction*' \) \
+        -print -quit | grep -q .; then
+    fail 'move return75 left import transaction state'
 fi
 
 # Signals on either side of the backup rename must observe a complete state
@@ -489,6 +625,8 @@ case "$source_image" in
         fixture_root="$OFFLINE_TEST_SERVER_ROOT" ;;
     */guest/images/ubuntu/rootfs.ext4)
         fixture_root="$OFFLINE_TEST_COMPACT_ROOT" ;;
+    */guest/images/debian/rootfs.ext4)
+        fixture_root="$OFFLINE_TEST_DEBIAN_ROOT" ;;
     *) exit 71 ;;
 esac
 mkdir -p "$target"
@@ -541,8 +679,46 @@ done
 if zipinfo -1 "$package_archive" | grep -Eq '(^|/)custom-driver(/|$)'; then
     fail 'default offline package unexpectedly contains a custom driver'
 fi
+if zipinfo -1 "$package_archive" | grep -E '\.ko$' >/dev/null; then
+    fail 'default Ubuntu Server offline package unexpectedly contains a direct .ko'
+fi
 if zipinfo -1 "$package_archive" | grep -Eq '(^/|(^|/)\.\.(/|$))'; then
     fail 'offline package contains an unsafe or absolute entry path'
+fi
+
+package_import_project="$work/package-import-project"
+mkdir -p "$package_import_project"
+cp "$repo/setup.sh" "$package_import_project/setup.sh"
+chmod +x "$package_import_project/setup.sh"
+if ! "$package_import_project/setup.sh" --import "$package_archive" --import-only \
+        >"$work/package-import.log" 2>&1; then
+    cat "$work/package-import.log" >&2
+    fail 'generated Ubuntu Server archive could not be imported'
+fi
+if find "$package_import_project" -type f -name '*.ko' -print -quit | grep -q .; then
+    fail 'generated Ubuntu Server import tree contains a direct .ko'
+fi
+
+direct_ko_source="$work/direct-ko/source"
+mkdir -p "$direct_ko_source/driver"
+printf 'unexpected-direct-module\n' > \
+    "$direct_ko_source/driver/cosim_nic_6.8.0-107-generic.ko"
+direct_ko_archive="$work/direct-ko/archive.zip"
+cp "$package_archive" "$direct_ko_archive"
+(cd "$direct_ko_source" && zip -q "$direct_ko_archive" \
+    driver/cosim_nic_6.8.0-107-generic.ko)
+printf 'preflight-sentinel\n' > "$package_import_project/import-sentinel"
+direct_ko_log="$work/direct-ko/import.log"
+if "$package_import_project/setup.sh" --import "$direct_ko_archive" --import-only \
+        >"$direct_ko_log" 2>&1; then
+    fail 'setup accepted a direct .ko in a v3 Ubuntu Server archive'
+fi
+grep -Fq 'direct .ko' "$direct_ko_log" || \
+    fail 'direct .ko preflight rejection did not explain the policy'
+grep -Fxq 'preflight-sentinel' "$package_import_project/import-sentinel" || \
+    fail 'direct .ko preflight rejection changed the target project'
+if find "$package_import_project" -type f -name '*.ko' -print -quit | grep -q .; then
+    fail 'direct .ko preflight rejection imported a kernel module'
 fi
 test "$(wc -l < "$mount_log")" -eq 2 || \
     fail 'packager did not validate both selected Ubuntu rootfs images'
@@ -561,6 +737,28 @@ while IFS=$'\t' read -r mount_args _source mount_target; do
 done < "$mount_log"
 [ ! -e "$package_project/build/offline-staging" ] || \
     fail 'packager used the legacy production temporary path outside build/tmp'
+
+# The direct cosim_nic artifact remains part of legacy ubuntu/debian packages.
+for legacy_guest in ubuntu debian; do
+    legacy_archive="$work/output/legacy-$legacy_guest.zip"
+    : > "$mount_log"
+    : > "$umount_log"
+    if ! PATH="$fakebin:$PATH" \
+        OFFLINE_TEST_MOUNT_LOG="$mount_log" \
+        OFFLINE_TEST_UMOUNT_LOG="$umount_log" \
+        OFFLINE_TEST_COMPACT_ROOT="$compact_root" \
+        OFFLINE_TEST_DEBIAN_ROOT="$compact_root" \
+        OFFLINE_TEST_SERVER_ROOT="$server_root" \
+        "$package_project/scripts/prepare-offline.sh" \
+            --guest "$legacy_guest" --output "$legacy_archive" \
+            >"$work/package-legacy-$legacy_guest.log" 2>&1; then
+        cat "$work/package-legacy-$legacy_guest.log" >&2
+        fail "legacy $legacy_guest offline packaging failed"
+    fi
+    zipinfo -1 "$legacy_archive" | \
+        grep -Eq '^driver/cosim_nic_.*\.ko$' || \
+        fail "legacy $legacy_guest package lost direct cosim_nic.ko"
+done
 
 # A relative build link resolving inside the mounted rootfs is valid.
 relative_server_root="$work/mount-fixtures/server-relative-link"

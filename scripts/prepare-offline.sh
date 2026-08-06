@@ -427,7 +427,9 @@ echo ""
 echo -e "${BOLD}[5/5] cosim_nic.ko 预编译${NC}"
 
 PREBUILT="${PROJECT_DIR}/guest/driver/prebuilt/cosim_nic_${KVER}.ko"
-if [ -f "$PREBUILT" ]; then
+if [ "$GUEST_TYPE" = ubuntu-server ]; then
+    info "Ubuntu Server v3 离线包不包含 direct cosim_nic.ko"
+elif [ -f "$PREBUILT" ]; then
     mkdir -p "${STAGING}/driver"
     cp "$PREBUILT" "${STAGING}/driver/"
     ok "cosim_nic.ko 预编译已复制"

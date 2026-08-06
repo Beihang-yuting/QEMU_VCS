@@ -403,11 +403,16 @@ offline_tree_matches_identity() {
 
 stage_and_verify_offline_files() {
     local source_dir="$1" staged_dest="$2"
-    local source_file staged_file
+    local source_file staged_file copy_status
 
     while IFS= read -r -d '' source_file; do
         staged_file="${staged_dest}/$(basename "$source_file")"
-        cp -a -- "$source_file" "$staged_file"
+        if cp -a -- "$source_file" "$staged_file"; then
+            :
+        else
+            copy_status=$?
+            return "$copy_status"
+        fi
         cmp -s -- "$source_file" "$staged_file" || return 1
     done < <(find "$source_dir" -mindepth 1 -maxdepth 1 -type f -print0)
 }
@@ -630,6 +635,13 @@ import_offline() {
             cleanup_offline_import_temporaries
             return 1
         fi
+        if [ "$OFFLINE_VERSION" = 3 ] && \
+                [ "$OFFLINE_GUEST_TYPE" = ubuntu-server ] && \
+                find "$tmpdir" -type f -name '*.ko' -print -quit | grep -q .; then
+            fail 'Ubuntu Server v3 离线包禁止包含 direct .ko'
+            cleanup_offline_import_temporaries
+            return 1
+        fi
         ok "离线包版本: ${OFFLINE_VERSION:-${OFFLINE_DATE:-unknown}}"
         ok "Guest 类型:  ${OFFLINE_GUEST_TYPE:-unknown}"
         ok "内核版本:    ${OFFLINE_KVER:-unknown}"
@@ -639,7 +651,7 @@ import_offline() {
 
     local imported=0 index relative_dest preserve_existing
     local source_file final_file final_dest backup_dest staged_dest
-    local qemu_tar custom_dest artifact_count=0
+    local qemu_tar qemu_copy_status custom_dest artifact_count=0
     local -a source_dirs=() relative_dirs=() preserve_flags=() messages=()
     local -a transaction_dirs=()
 
@@ -661,7 +673,22 @@ import_offline() {
         -name 'qemu-*.tar.*' -print -quit 2>/dev/null || true)
     if [ -n "$qemu_tar" ]; then
         mkdir -p "$OFFLINE_TRANSACTION_ROOT/sources/qemu"
-        cp -a -- "$qemu_tar" "$OFFLINE_TRANSACTION_ROOT/sources/qemu/"
+        qemu_copy_status=0
+        if cp -a -- "$qemu_tar" "$OFFLINE_TRANSACTION_ROOT/sources/qemu/"; then
+            if ! cmp -s -- "$qemu_tar" \
+                    "$OFFLINE_TRANSACTION_ROOT/sources/qemu/$(basename "$qemu_tar")"; then
+                qemu_copy_status=1
+            fi
+        else
+            qemu_copy_status=$?
+        fi
+        if [ "$qemu_copy_status" -ne 0 ]; then
+            fail 'QEMU 离线源码暂存或校验失败'
+            rollback_offline_transaction || true
+            cleanup_offline_import_temporaries
+            trap - INT TERM HUP
+            return "$qemu_copy_status"
+        fi
         source_dirs+=("$OFFLINE_TRANSACTION_ROOT/sources/qemu")
         relative_dirs+=("third_party")
         preserve_flags+=(true)
@@ -837,7 +864,9 @@ import_offline() {
 
         OFFLINE_TRANSACTION_TRANSITION=true
         transaction_status=0
-        if ! mv -nT -- "$staged_dest" "$final_dest"; then
+        if mv -nT -- "$staged_dest" "$final_dest"; then
+            :
+        else
             transaction_status=$?
         fi
         if [ -e "$staged_dest" ] || [ ! -d "$final_dest" ] || \
