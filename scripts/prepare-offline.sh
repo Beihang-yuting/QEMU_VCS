@@ -14,7 +14,7 @@
 # ============================================================
 set -euo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd -P)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 
 RED='\033[0;31m'
@@ -28,6 +28,77 @@ info()  { echo -e "${CYAN}[INFO]${NC} $*"; }
 ok()    { echo -e "${GREEN}[OK]${NC} $*"; }
 warn()  { echo -e "${YELLOW}[WARN]${NC} $*"; }
 fail()  { echo -e "${RED}[FAIL]${NC} $*"; }
+
+prepare_project_tmp_root() {
+    local tmp_root="$1" project_canonical expected_canonical
+    local current component tmp_canonical identity_before identity_after
+    local owner_uid current_uid mode
+
+    project_canonical=$(cd -- "$PROJECT_DIR" && pwd -P) || {
+        fail "无法解析项目目录: $PROJECT_DIR"
+        return 1
+    }
+    expected_canonical="$project_canonical/build/tmp"
+    [ "$tmp_root" = "${PROJECT_DIR}/build/tmp" ] || {
+        fail "临时目录不在项目 build/tmp: $tmp_root"
+        return 1
+    }
+
+    current=$PROJECT_DIR
+    for component in build tmp; do
+        current="$current/$component"
+        if [ -L "$current" ]; then
+            fail "项目 build/tmp 路径包含符号链接: $current"
+            return 1
+        fi
+        if [ -e "$current" ]; then
+            if [ ! -d "$current" ]; then
+                fail "项目 build/tmp 路径不是目录: $current"
+                return 1
+            fi
+        elif ! mkdir -- "$current"; then
+            fail "无法创建项目临时目录: $current"
+            return 1
+        fi
+        if [ -L "$current" ] || [ ! -d "$current" ]; then
+            fail "项目 build/tmp 路径不安全: $current"
+            return 1
+        fi
+    done
+
+    tmp_canonical=$(cd -- "$tmp_root" && pwd -P) || return 1
+    if [ "$tmp_canonical" != "$expected_canonical" ]; then
+        fail "项目临时目录规范路径越界: $tmp_root"
+        return 1
+    fi
+    current_uid=$(id -u) || return 1
+    owner_uid=$(stat -c '%u' -- "$tmp_root") || return 1
+    if [ "$owner_uid" != "$current_uid" ]; then
+        fail "项目临时目录所有者不安全: $tmp_root"
+        return 1
+    fi
+    identity_before=$(stat -Lc '%d:%i' -- "$tmp_root") || return 1
+    chmod 0700 -- "$tmp_root" || return 1
+
+    current=$PROJECT_DIR
+    for component in build tmp; do
+        current="$current/$component"
+        if [ -L "$current" ] || [ ! -d "$current" ]; then
+            fail "项目 build/tmp 路径在检查期间发生变化: $current"
+            return 1
+        fi
+    done
+    tmp_canonical=$(cd -- "$tmp_root" && pwd -P) || return 1
+    identity_after=$(stat -Lc '%d:%i' -- "$tmp_root") || return 1
+    owner_uid=$(stat -c '%u' -- "$tmp_root") || return 1
+    mode=$(stat -c '%a' -- "$tmp_root") || return 1
+    if [ "$tmp_canonical" != "$expected_canonical" ] ||
+            [ "$identity_after" != "$identity_before" ] ||
+            [ "$owner_uid" != "$current_uid" ] || [ "$mode" != 700 ]; then
+        fail "项目临时目录安全属性在检查期间发生变化: $tmp_root"
+        return 1
+    fi
+}
 
 GUEST_TYPE="ubuntu"
 SKIP_ROOTFS=false
@@ -58,18 +129,136 @@ esac
 
 OUTPUT="${OUTPUT:-${PROJECT_DIR}/cosim-offline-$(date +%Y%m%d).zip}"
 TMP_ROOT="${PROJECT_DIR}/build/tmp"
-mkdir -p "$TMP_ROOT"
+prepare_project_tmp_root "$TMP_ROOT" || exit 1
 STAGING=$(mktemp -d "$TMP_ROOT/offline-staging.XXXXXX")
 PACKAGE_TMP=""
 MD5_TMP=""
-ACTIVE_MOUNT=""
+ACTIVE_MOUNTS=()
+PENDING_MOUNT=""
+MOUNT_TRANSITION=false
+PENDING_SIGNAL_STATUS=0
+
+rootfs_mount_target_is_registered() {
+    local target="$1" active
+    [ -n "$PENDING_MOUNT" ] && [ "$target" = "$PENDING_MOUNT" ] && return 0
+    for active in "${ACTIVE_MOUNTS[@]}"; do
+        [ "$target" = "$active" ] && return 0
+    done
+    return 1
+}
+
+rootfs_mount_path_identity() {
+    local target="$1" canonical identity
+    [ -d "$target" ] && [ ! -L "$target" ] || return 1
+    canonical=$(cd -- "$target" && pwd -P) || return 1
+    [ "$canonical" = "$target" ] || return 1
+    identity=$(stat -Lc '%d:%i' -- "$target") || return 1
+    printf '%s|%s\n' "$canonical" "$identity"
+}
+
+rootfs_mount_state() {
+    local target="$1" status diagnostic_status
+    local identity_before identity_after mountpoint_output
+    ROOTFS_MOUNT_STATE=unknown
+    rootfs_mount_target_is_registered "$target" || return 1
+    identity_before=$(rootfs_mount_path_identity "$target") || return 1
+    if mountpoint -q -- "$target"; then
+        status=0
+    else
+        status=$?
+    fi
+    identity_after=$(rootfs_mount_path_identity "$target") || return 1
+    [ "$identity_before" = "$identity_after" ] || return 1
+
+    case "$status" in
+        0)
+            ROOTFS_MOUNT_STATE=active
+            return 0
+            ;;
+        32)
+            ROOTFS_MOUNT_STATE=inactive
+            return 0
+            ;;
+        1) ;;
+        *) return 1 ;;
+    esac
+
+    if mountpoint_output=$(LC_ALL=C mountpoint -- "$target" 2>&1); then
+        diagnostic_status=0
+    else
+        diagnostic_status=$?
+    fi
+    identity_after=$(rootfs_mount_path_identity "$target") || return 1
+    [ "$identity_before" = "$identity_after" ] || return 1
+    case "$diagnostic_status" in
+        1|32) ;;
+        *) return 1 ;;
+    esac
+    if [ "$mountpoint_output" != "$target is not a mountpoint" ]; then
+        return 1
+    fi
+    ROOTFS_MOUNT_STATE=inactive
+}
+
+forget_active_mount() {
+    local target="$1" active
+    local -a retained=()
+    for active in "${ACTIVE_MOUNTS[@]}"; do
+        [ "$active" = "$target" ] || retained+=("$active")
+    done
+    ACTIVE_MOUNTS=("${retained[@]}")
+}
+
+release_rootfs_mount() {
+    local target="$1"
+    if ! rootfs_mount_state "$target"; then
+        fail "无法确认 rootfs 挂载状态，保留目录以供恢复: $target"
+        return 1
+    fi
+    if [ "$ROOTFS_MOUNT_STATE" = active ]; then
+        if ! sudo umount -- "$target"; then
+            fail "无法卸载 rootfs，保留目录以供恢复: $target"
+            return 1
+        fi
+        if ! rootfs_mount_state "$target" ||
+                [ "$ROOTFS_MOUNT_STATE" != inactive ]; then
+            fail "无法确认 rootfs 已卸载，保留目录以供恢复: $target"
+            return 1
+        fi
+    fi
+    forget_active_mount "$target"
+    rm -rf -- "$target"
+}
 
 cleanup() {
     local status=$?
+    local cleanup_failed=0 mount_dir i pending_is_active=false
     trap - EXIT INT TERM HUP
-    if [ -n "$ACTIVE_MOUNT" ]; then
-        sudo umount -- "$ACTIVE_MOUNT" >/dev/null 2>&1 || true
+    MOUNT_TRANSITION=false
+
+    if [ -n "$PENDING_MOUNT" ]; then
+        if rootfs_mount_state "$PENDING_MOUNT"; then
+            if [ "$ROOTFS_MOUNT_STATE" = active ]; then
+                for mount_dir in "${ACTIVE_MOUNTS[@]}"; do
+                    [ "$mount_dir" = "$PENDING_MOUNT" ] && pending_is_active=true
+                done
+                [ "$pending_is_active" = true ] || ACTIVE_MOUNTS+=("$PENDING_MOUNT")
+            else
+                rm -rf -- "$PENDING_MOUNT"
+            fi
+        else
+            fail "无法确认 rootfs 挂载状态，保留目录以供恢复: $PENDING_MOUNT"
+            cleanup_failed=1
+        fi
+        PENDING_MOUNT=""
     fi
+
+    for ((i=${#ACTIVE_MOUNTS[@]} - 1; i >= 0; i--)); do
+        mount_dir=${ACTIVE_MOUNTS[$i]}
+        if ! release_rootfs_mount "$mount_dir"; then
+            cleanup_failed=1
+        fi
+    done
     rm -rf -- "$STAGING"
     if [ -n "$PACKAGE_TMP" ]; then
         rm -f -- "$PACKAGE_TMP"
@@ -77,9 +266,27 @@ cleanup() {
     if [ -n "$MD5_TMP" ]; then
         rm -f -- "$MD5_TMP"
     fi
+    if [ "$cleanup_failed" -ne 0 ] && [ "$status" -eq 0 ]; then
+        status=1
+    fi
     exit "$status"
 }
-trap cleanup EXIT INT TERM HUP
+
+handle_signal() {
+    local signal_status="$1"
+    if [ "$MOUNT_TRANSITION" = true ]; then
+        if [ "$PENDING_SIGNAL_STATUS" -eq 0 ]; then
+            PENDING_SIGNAL_STATUS=$signal_status
+        fi
+        return
+    fi
+    exit "$signal_status"
+}
+
+trap cleanup EXIT
+trap 'handle_signal 129' HUP
+trap 'handle_signal 130' INT
+trap 'handle_signal 143' TERM
 
 echo ""
 echo -e "${BOLD}============================================================${NC}"
@@ -99,7 +306,7 @@ if [ -n "$COMPAT_RUNTIME_DEB" ]; then
 fi
 
 # ---- 检查依赖 ----
-for cmd in curl zip; do
+for cmd in curl zip mountpoint; do
     if ! command -v "$cmd" &>/dev/null; then
         fail "缺少依赖: $cmd"
         exit 1
@@ -109,72 +316,177 @@ done
 # ---- 准备 staging 目录 ----
 mkdir -p "$STAGING"/{qemu-src,guest/debian,guest/ubuntu,guest/ubuntu-server,kheaders}
 
-rootfs_path_exists() {
-    local root="$1" guest_path="$2"
-    local full_path="${root}${guest_path}" link_target resolved
+ROOTFS_RESOLVED_PATH=""
 
-    if [ ! -L "$full_path" ]; then
-        [ -e "$full_path" ]
-        return
-    fi
-    link_target=$(readlink -- "$full_path") || return 1
-    case "$link_target" in
-        /*) resolved=$(realpath -m -- "${root}${link_target}") ;;
-        *) resolved=$(realpath -m -- "$(dirname "$full_path")/${link_target}") ;;
-    esac
-    case "$resolved" in
-        "$root"/*) [ -e "$resolved" ] ;;
+# Resolve a guest-absolute path without ever applying host-root symlink
+# semantics.  Each link target is folded back into the component queue:
+# absolute targets restart at the mounted root, while relative targets restart
+# at the link's guest directory.  Reject loops and attempts to walk above /.
+rootfs_resolve_path() {
+    local root="$1" guest_path="$2"
+    local remaining component candidate target part
+    local symlink_hops=0
+    local -a resolved_parts=()
+
+    ROOTFS_RESOLVED_PATH=""
+    case "$guest_path" in
+        /*) remaining=${guest_path#/} ;;
         *) return 1 ;;
     esac
+
+    while [ -n "$remaining" ]; do
+        case "$remaining" in
+            */*)
+                component=${remaining%%/*}
+                remaining=${remaining#*/}
+                ;;
+            *)
+                component=$remaining
+                remaining=""
+                ;;
+        esac
+
+        case "$component" in
+            ''|.) continue ;;
+            ..)
+                [ "${#resolved_parts[@]}" -gt 0 ] || return 1
+                unset "resolved_parts[${#resolved_parts[@]}-1]"
+                continue
+                ;;
+        esac
+
+        candidate=$root
+        for part in "${resolved_parts[@]}"; do
+            candidate="$candidate/$part"
+        done
+        candidate="$candidate/$component"
+
+        if [ -L "$candidate" ]; then
+            symlink_hops=$((symlink_hops + 1))
+            [ "$symlink_hops" -le 40 ] || return 1
+            target=$(readlink -- "$candidate") || return 1
+            case "$target" in
+                /*)
+                    resolved_parts=()
+                    target=${target#/}
+                    ;;
+            esac
+            if [ -n "$target" ]; then
+                if [ -n "$remaining" ]; then
+                    remaining="$target/$remaining"
+                else
+                    remaining=$target
+                fi
+            fi
+            continue
+        fi
+
+        resolved_parts+=("$component")
+        if [ -n "$remaining" ] && [ ! -d "$candidate" ]; then
+            return 1
+        fi
+    done
+
+    ROOTFS_RESOLVED_PATH=$root
+    for part in "${resolved_parts[@]}"; do
+        ROOTFS_RESOLVED_PATH="$ROOTFS_RESOLVED_PATH/$part"
+    done
+}
+
+rootfs_has_regular_file() {
+    rootfs_resolve_path "$1" "$2" && [ -f "$ROOTFS_RESOLVED_PATH" ]
+}
+
+rootfs_has_executable() {
+    rootfs_resolve_path "$1" "$2" &&
+        [ -f "$ROOTFS_RESOLVED_PATH" ] && [ -x "$ROOTFS_RESOLVED_PATH" ]
+}
+
+rootfs_has_directory() {
+    rootfs_resolve_path "$1" "$2" && [ -d "$ROOTFS_RESOLVED_PATH" ]
 }
 
 validate_rootfs() {
     local image="$1" profile="$2"
-    local mount_dir validation_failed=0 unmount_failed=0
+    local mount_dir mount_status mount_is_active=false
+    local validation_failed=0 unmount_failed=0 signal_status
     mount_dir=$(mktemp -d "$TMP_ROOT/offline-rootfs-${profile}.XXXXXX")
 
-    if ! sudo mount -o loop,ro,nosuid,nodev -- "$image" "$mount_dir"; then
+    PENDING_MOUNT=$mount_dir
+    MOUNT_TRANSITION=true
+    if sudo mount -o loop,ro,nosuid,nodev -- "$image" "$mount_dir"; then
+        mount_status=0
+    else
+        mount_status=$?
+    fi
+    if rootfs_mount_state "$mount_dir"; then
+        if [ "$ROOTFS_MOUNT_STATE" = active ]; then
+            ACTIVE_MOUNTS+=("$mount_dir")
+            mount_is_active=true
+            PENDING_MOUNT=""
+        elif rm -rf -- "$mount_dir"; then
+            PENDING_MOUNT=""
+        fi
+    fi
+    MOUNT_TRANSITION=false
+    if [ "$PENDING_SIGNAL_STATUS" -ne 0 ]; then
+        signal_status=$PENDING_SIGNAL_STATUS
+        PENDING_SIGNAL_STATUS=0
+        exit "$signal_status"
+    fi
+
+    if [ "$mount_status" -ne 0 ] || [ "$mount_is_active" != true ]; then
         fail "无法只读挂载 ${profile} rootfs: $image"
-        rm -rf -- "$mount_dir"
+        if [ "$mount_is_active" = true ]; then
+            release_rootfs_mount "$mount_dir" || true
+        elif [ "$ROOTFS_MOUNT_STATE" = inactive ]; then
+            rm -rf -- "$mount_dir"
+        fi
         return 1
     fi
-    ACTIVE_MOUNT="$mount_dir"
 
     for required in /usr/local/bin/pci_debug /usr/local/bin/reg_display; do
-        if [ ! -x "${mount_dir}${required}" ]; then
+        if ! rootfs_has_executable "$mount_dir" "$required"; then
             fail "${profile} rootfs 缺少可执行文件: ${required}"
             validation_failed=1
         fi
     done
 
     if [ "$profile" = ubuntu-server ]; then
-        if ! grep -Eq '^ID=ubuntu$' "$mount_dir/etc/os-release" 2>/dev/null; then
+        if ! rootfs_has_regular_file "$mount_dir" /etc/os-release ||
+                ! grep -Eq '^ID=ubuntu$' "$ROOTFS_RESOLVED_PATH" 2>/dev/null; then
             fail 'ubuntu-server rootfs 的 /etc/os-release 缺少 ID=ubuntu'
             validation_failed=1
         fi
-        if ! grep -Eq '^VERSION_ID="?24\.04"?$' "$mount_dir/etc/os-release" 2>/dev/null; then
+        if ! rootfs_has_regular_file "$mount_dir" /etc/os-release ||
+                ! grep -Eq '^VERSION_ID="?24\.04"?$' "$ROOTFS_RESOLVED_PATH" 2>/dev/null; then
             fail 'ubuntu-server rootfs 的 /etc/os-release 缺少 VERSION_ID="24.04"'
             validation_failed=1
         fi
-        for required in \
-            /usr/bin/gcc \
-            /usr/bin/make \
-            "/usr/src/linux-headers-${KVER}/Makefile" \
-            "/lib/modules/${KVER}/build" \
-            /opt/dpu-debugutils/Makefile; do
-            if ! rootfs_path_exists "$mount_dir" "$required"; then
+        for required in /usr/bin/gcc /usr/bin/make; do
+            if ! rootfs_has_executable "$mount_dir" "$required"; then
                 fail "ubuntu-server rootfs 缺少: ${required}"
                 validation_failed=1
             fi
         done
+        for required in \
+            "/usr/src/linux-headers-${KVER}/Makefile" \
+            /opt/dpu-debugutils/Makefile; do
+            if ! rootfs_has_regular_file "$mount_dir" "$required"; then
+                fail "ubuntu-server rootfs 缺少: ${required}"
+                validation_failed=1
+            fi
+        done
+        required="/lib/modules/${KVER}/build"
+        if ! rootfs_has_directory "$mount_dir" "$required"; then
+            fail "ubuntu-server rootfs 缺少: ${required}"
+            validation_failed=1
+        fi
     fi
 
-    if ! sudo umount -- "$mount_dir"; then
+    if ! release_rootfs_mount "$mount_dir"; then
         fail "无法卸载 ${profile} rootfs: $mount_dir"
         unmount_failed=1
-    else
-        ACTIVE_MOUNT=""
-        rm -rf -- "$mount_dir"
     fi
 
     [ "$validation_failed" -eq 0 ] && [ "$unmount_failed" -eq 0 ]

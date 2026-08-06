@@ -9,7 +9,7 @@
 set -euo pipefail
 
 # ---- 全局变量 ----
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd -P)"
 PROJECT_DIR="$SCRIPT_DIR"
 PASS_COUNT=0
 FAIL_COUNT=0
@@ -28,6 +28,78 @@ info()  { echo -e "${CYAN}[INFO]${NC} $*"; }
 ok()    { echo -e "${GREEN}[OK]${NC} $*"; }
 warn()  { echo -e "${YELLOW}[WARN]${NC} $*"; WARN_MSGS+=("$*"); }
 fail()  { echo -e "${RED}[FAIL]${NC} $*"; }
+
+prepare_project_tmp_root() {
+    local tmp_root="$1" project_canonical expected_canonical
+    local current component tmp_canonical identity_before identity_after
+    local owner_uid current_uid mode
+
+    project_canonical=$(cd -- "$PROJECT_DIR" && pwd -P) || {
+        fail "无法解析项目目录: $PROJECT_DIR"
+        return 1
+    }
+    expected_canonical="$project_canonical/build/tmp"
+    [ "$tmp_root" = "${PROJECT_DIR}/build/tmp" ] || {
+        fail "临时目录不在项目 build/tmp: $tmp_root"
+        return 1
+    }
+
+    current=$PROJECT_DIR
+    for component in build tmp; do
+        current="$current/$component"
+        if [ -L "$current" ]; then
+            fail "项目 build/tmp 路径包含符号链接: $current"
+            return 1
+        fi
+        if [ -e "$current" ]; then
+            if [ ! -d "$current" ]; then
+                fail "项目 build/tmp 路径不是目录: $current"
+                return 1
+            fi
+        elif ! mkdir -- "$current"; then
+            fail "无法创建项目临时目录: $current"
+            return 1
+        fi
+        if [ -L "$current" ] || [ ! -d "$current" ]; then
+            fail "项目 build/tmp 路径不安全: $current"
+            return 1
+        fi
+    done
+
+    tmp_canonical=$(cd -- "$tmp_root" && pwd -P) || return 1
+    if [ "$tmp_canonical" != "$expected_canonical" ]; then
+        fail "项目临时目录规范路径越界: $tmp_root"
+        return 1
+    fi
+    current_uid=$(id -u) || return 1
+    owner_uid=$(stat -c '%u' -- "$tmp_root") || return 1
+    if [ "$owner_uid" != "$current_uid" ]; then
+        fail "项目临时目录所有者不安全: $tmp_root"
+        return 1
+    fi
+    identity_before=$(stat -Lc '%d:%i' -- "$tmp_root") || return 1
+    chmod 0700 -- "$tmp_root" || return 1
+
+    current=$PROJECT_DIR
+    for component in build tmp; do
+        current="$current/$component"
+        if [ -L "$current" ] || [ ! -d "$current" ]; then
+            fail "项目 build/tmp 路径在检查期间发生变化: $current"
+            return 1
+        fi
+    done
+    tmp_canonical=$(cd -- "$tmp_root" && pwd -P) || return 1
+    identity_after=$(stat -Lc '%d:%i' -- "$tmp_root") || return 1
+    owner_uid=$(stat -c '%u' -- "$tmp_root") || return 1
+    mode=$(stat -c '%a' -- "$tmp_root") || return 1
+    if [ "$tmp_canonical" != "$expected_canonical" ] ||
+            [ "$identity_after" != "$identity_before" ] ||
+            [ "$owner_uid" != "$current_uid" ] || [ "$mode" != 700 ]; then
+        fail "项目临时目录安全属性在检查期间发生变化: $tmp_root"
+        return 1
+    fi
+}
+
 header() {
     echo ""
     echo "========================================================"
@@ -454,12 +526,28 @@ rollback_offline_transaction() {
 
         if [ -e "$backup_dest" ]; then
             if [ ! -e "$final_dest" ]; then
-                mkdir -p "$(dirname "$final_dest")"
-                mv -T -- "$backup_dest" "$final_dest"
+                if ! mkdir -p "$(dirname "$final_dest")"; then
+                    fail "离线导入回滚无法准备目标目录: $relative_dest"
+                    OFFLINE_TRANSACTION_CONFLICT=true
+                elif mv -T -- "$backup_dest" "$final_dest"; then
+                    :
+                else
+                    fail "离线导入回滚无法恢复 backup: $relative_dest"
+                    OFFLINE_TRANSACTION_CONFLICT=true
+                fi
             elif [[ "$state" = INSTALLED || "$state" = COMMITTED ]] && \
                     offline_tree_matches_identity "$installed_identity" "$final_dest"; then
-                rm -rf -- "$final_dest"
-                mv -T -- "$backup_dest" "$final_dest"
+                if rm -rf -- "$final_dest"; then
+                    if mv -T -- "$backup_dest" "$final_dest"; then
+                        :
+                    else
+                        fail "离线导入回滚无法恢复 backup: $relative_dest"
+                        OFFLINE_TRANSACTION_CONFLICT=true
+                    fi
+                else
+                    fail "离线导入回滚无法移除本事务 final: $relative_dest"
+                    OFFLINE_TRANSACTION_CONFLICT=true
+                fi
             else
                 fail "离线导入回滚发现并发冲突，保留 final 与 backup: $relative_dest"
                 OFFLINE_TRANSACTION_CONFLICT=true
@@ -467,7 +555,10 @@ rollback_offline_transaction() {
         elif [ "$original_absent" = true ] && [ -e "$final_dest" ]; then
             if [[ "$state" = INSTALLED || "$state" = COMMITTED ]] && \
                     offline_tree_matches_identity "$installed_identity" "$final_dest"; then
-                rm -rf -- "$final_dest"
+                if ! rm -rf -- "$final_dest"; then
+                    fail "离线导入回滚无法移除本事务 final: $relative_dest"
+                    OFFLINE_TRANSACTION_CONFLICT=true
+                fi
             elif [ "$state" != PREPARED ]; then
                 fail "离线导入回滚发现并发冲突，保留新 final: $relative_dest"
                 OFFLINE_TRANSACTION_CONFLICT=true
@@ -475,6 +566,9 @@ rollback_offline_transaction() {
         fi
     done
     OFFLINE_TRANSACTION_ACTIVE=false
+    if [ "$OFFLINE_TRANSACTION_CONFLICT" = true ]; then
+        fail "离线导入需要手动 recovery: $OFFLINE_TRANSACTION_ROOT"
+    fi
     [ "$OFFLINE_TRANSACTION_CONFLICT" = false ]
 }
 
@@ -525,42 +619,41 @@ interrupt_offline_import() {
 }
 
 validate_offline_archive_entries() {
-    local zip_file="$1" entry mode
-    local entry_count mode_count
-
-    entry_count=$(zipinfo -1 -- "$zip_file" | wc -l)
-    mode_count=$(zipinfo -l -- "$zip_file" | awk '$1 ~ /^[-dlcbps]/ { count++ } END { print count + 0 }')
-    if [ "$entry_count" -ne "$mode_count" ]; then
-        fail '不安全的离线包条目: 文件名包含换行或无法解析的类型'
-        return 1
-    fi
+    local entry_listing="$1" type_listing="$2" entry mode line
+    local entry_count=0 mode_count=0
+    local -A seen_entries=()
 
     while IFS= read -r entry; do
+        entry_count=$((entry_count + 1))
+        if [ -n "${seen_entries[$entry]+set}" ]; then
+            fail '不安全的离线包条目: 存在重复路径'
+            return 1
+        fi
+        seen_entries["$entry"]=1
         case "$entry" in
             ''|/*|*\\*|../*|*/../*|*/..|..|./*|*/./*|*/.|.)
                 fail "不安全的离线包条目: $entry"
                 return 1
                 ;;
         esac
-    done < <(zipinfo -1 -- "$zip_file")
+    done < "$entry_listing"
 
-    if [ -n "$(zipinfo -1 -- "$zip_file" | LC_ALL=C sort | uniq -d)" ]; then
-        fail '不安全的离线包条目: 存在重复路径'
-        return 1
-    fi
-
-    while read -r mode; do
+    while IFS= read -r line; do
+        mode="${line%%[[:space:]]*}"
         case "$mode" in
-            -*|d*) ;;
-            *)
-                # ZIP has no hard-link extraction primitive.  Rejecting every
-                # non-regular/non-directory Unix entry also rejects symlinks
-                # and any hard-link-like special entry before extraction.
+            -*|d*) mode_count=$((mode_count + 1)) ;;
+            l*|c*|b*|p*|s*)
+                mode_count=$((mode_count + 1))
                 fail "不安全的离线包条目类型: $mode"
                 return 1
                 ;;
         esac
-    done < <(zipinfo -l -- "$zip_file" | awk '$1 ~ /^[-dlcbps]/ { print $1 }')
+    done < "$type_listing"
+
+    if [ "$entry_count" -ne "$mode_count" ]; then
+        fail '不安全的离线包条目: 文件名包含换行或无法解析的类型'
+        return 1
+    fi
 }
 
 # ============================================================
@@ -573,6 +666,12 @@ import_offline() {
         fail "离线包不存在: $zip_file"
         return 1
     fi
+    for archive_command in zipinfo unzip; do
+        if ! command -v "$archive_command" >/dev/null 2>&1; then
+            fail "缺少离线包校验依赖: $archive_command"
+            return 1
+        fi
+    done
 
     # 校验 zip 完整性
     info "校验离线包: $zip_file ($(du -h "$zip_file" | cut -f1))"
@@ -600,6 +699,36 @@ import_offline() {
         fi
     fi
 
+    local import_tmp_root="${PROJECT_DIR}/build/tmp"
+    local archive_listing_dir entry_listing type_listing listing_status
+    prepare_project_tmp_root "$import_tmp_root" || return 1
+    archive_listing_dir=$(mktemp -d "$import_tmp_root/offline-listing.XXXXXX")
+    entry_listing="$archive_listing_dir/entries"
+    type_listing="$archive_listing_dir/types"
+    listing_status=0
+    if zipinfo -1 -- "$zip_file" > "$entry_listing"; then
+        :
+    else
+        listing_status=$?
+    fi
+    if [ "$listing_status" -eq 0 ]; then
+        if zipinfo -l -- "$zip_file" > "$type_listing"; then
+            :
+        else
+            listing_status=$?
+        fi
+    fi
+    if [ "$listing_status" -ne 0 ]; then
+        rm -rf -- "$archive_listing_dir"
+        fail "zipinfo 离线包条目列表读取失败: status=$listing_status"
+        return "$listing_status"
+    fi
+    if ! validate_offline_archive_entries "$entry_listing" "$type_listing"; then
+        rm -rf -- "$archive_listing_dir"
+        return 1
+    fi
+    rm -rf -- "$archive_listing_dir"
+
     if ! unzip -tq "$zip_file" &>/dev/null; then
         fail "zip 文件损坏，无法解压"
         fail "  文件: $zip_file"
@@ -612,14 +741,8 @@ import_offline() {
     fi
     ok "zip 校验通过"
 
-    if ! validate_offline_archive_entries "$zip_file"; then
-        return 1
-    fi
-
     info "解压离线包..."
-    local import_tmp_root="${PROJECT_DIR}/build/tmp"
     local tmpdir
-    mkdir -p "$import_tmp_root"
     tmpdir=$(mktemp -d "$import_tmp_root/offline-import.XXXXXX")
     OFFLINE_IMPORT_TMPDIR="$tmpdir"
     if ! unzip -qo "$zip_file" -d "$tmpdir"; then
@@ -634,6 +757,23 @@ import_offline() {
         if ! validate_offline_metadata; then
             cleanup_offline_import_temporaries
             return 1
+        fi
+        if [ "$OFFLINE_VERSION" = 3 ] && \
+                [ "$OFFLINE_GUEST_TYPE" = ubuntu-server ]; then
+            local required_v3_artifact
+            for required_v3_artifact in \
+                guest/ubuntu/vmlinuz \
+                guest/ubuntu/rootfs.ext4 \
+                guest/ubuntu-server/vmlinuz \
+                guest/ubuntu-server/modules.tar.gz \
+                guest/ubuntu-server/rootfs.ext4; do
+                if [ ! -f "$tmpdir/$required_v3_artifact" ] || \
+                        [ -L "$tmpdir/$required_v3_artifact" ]; then
+                    fail "Ubuntu Server v3 离线包缺少 regular artifact: $required_v3_artifact"
+                    cleanup_offline_import_temporaries
+                    return 1
+                fi
+            done
         fi
         if [ "$OFFLINE_VERSION" = 3 ] && \
                 [ "$OFFLINE_GUEST_TYPE" = ubuntu-server ] && \
@@ -856,7 +996,7 @@ import_offline() {
                 rollback_offline_transaction || true
                 cleanup_offline_import_temporaries
                 trap - INT TERM HUP
-                return 1
+                return "$transaction_status"
             fi
         else
             OFFLINE_TRANSACTION_STATES[$transaction_index]=BACKED_UP
@@ -871,7 +1011,7 @@ import_offline() {
         fi
         if [ -e "$staged_dest" ] || [ ! -d "$final_dest" ] || \
                 ! offline_tree_matches_identity "$installed_identity" "$final_dest"; then
-            transaction_status=75
+            [ "$transaction_status" -ne 0 ] || transaction_status=75
         else
             OFFLINE_TRANSACTION_STATES[$transaction_index]=INSTALLED
         fi
@@ -881,7 +1021,7 @@ import_offline() {
             rollback_offline_transaction || true
             cleanup_offline_import_temporaries
             trap - INT TERM HUP
-            return 1
+            return "$transaction_status"
         fi
     done
 
