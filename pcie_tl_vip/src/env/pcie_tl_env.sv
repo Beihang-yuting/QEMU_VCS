@@ -501,12 +501,12 @@ class pcie_tl_env extends uvm_env;
                 if ($cast(cpl, tlp)) ep_agent.ep_driver.handle_completion(cpl);
             end
             else if (cfg.ep_auto_response && ep_agent.ep_driver != null) begin
-                fork
-                    begin
-                        pcie_tl_tlp tlp_copy = tlp;
+                begin
+                    automatic pcie_tl_tlp tlp_copy = tlp;
+                    fork
                         ep_agent.ep_driver.handle_request(tlp_copy);
-                    end
-                join_none
+                    join_none
+                end
             end
         end
     endtask
@@ -541,22 +541,22 @@ class pcie_tl_env extends uvm_env;
                 // Register in scoreboard only for non-posted (completion will be matched)
                 if (scb != null && tlp.requires_completion())
                     scb.register_pending(tlp);
-                fork
-                    begin
-                        pcie_tl_tlp req_copy = tlp;
+                begin
+                    automatic pcie_tl_tlp req_copy = tlp;
+                    fork
                         rc_agent.rc_driver.handle_request(req_copy);
-                    end
-                join_none
+                    join_none
+                end
             end else if (tlp.requires_completion()) begin
                 // Legacy (non-unified) path: rc_auto_respond for EP DMA reads
                 if (scb != null)
                     scb.register_pending(tlp);
-                fork
-                    begin
-                        pcie_tl_tlp req_copy = tlp;
+                begin
+                    automatic pcie_tl_tlp req_copy = tlp;
+                    fork
                         rc_auto_respond(req_copy);
-                    end
-                join_none
+                    join_none
+                end
             end
         end
     endtask
@@ -581,12 +581,12 @@ class pcie_tl_env extends uvm_env;
                 if ($cast(cpl, tlp)) ep_agents[i].ep_driver.handle_completion(cpl);
             end
             else if (cfg.ep_auto_response && ep_agents[i].ep_driver != null) begin
-                fork
-                    begin
-                        pcie_tl_tlp tlp_copy = tlp;
+                begin
+                    automatic pcie_tl_tlp tlp_copy = tlp;
+                    fork
                         ep_agents[i].ep_driver.handle_request(tlp_copy);
-                    end
-                join_none
+                    join_none
+                end
             end
         end
     endtask
@@ -615,12 +615,12 @@ class pcie_tl_env extends uvm_env;
                      (tlp.requires_completion() || tlp.kind == TLP_MEM_WR)) begin
                 if (scbs.size() > i && scbs[i] != null && tlp.requires_completion())
                     scbs[i].register_pending(tlp);
-                fork
-                    begin
-                        pcie_tl_tlp req_copy = tlp;
+                begin
+                    automatic pcie_tl_tlp req_copy = tlp;
+                    fork
                         rc_agents[i].rc_driver.handle_request(req_copy);
-                    end
-                join_none
+                    join_none
+                end
             end
         end
     endtask
@@ -732,9 +732,12 @@ class pcie_tl_env extends uvm_env;
                                        TLP_ATOMIC_FETCHADD, TLP_ATOMIC_SWAP, TLP_ATOMIC_CAS})) begin
                 if (scbs[r] != null && tlp.requires_completion())
                     scbs[r].register_pending(tlp);
-                fork
-                    begin pcie_tl_tlp req_copy = tlp; rc_agents[r].rc_driver.handle_request(req_copy); end
-                join_none
+                begin
+                    automatic pcie_tl_tlp req_copy = tlp;
+                    fork
+                        rc_agents[r].rc_driver.handle_request(req_copy);
+                    join_none
+                end
             end
         end
     endtask
@@ -756,13 +759,13 @@ class pcie_tl_env extends uvm_env;
             else if (cfg.ep_auto_response && ep_agents[idx].ep_driver != null) begin
                 if (tlp.kind inside {TLP_MEM_RD, TLP_MEM_RD_LK, TLP_MEM_WR,
                                      TLP_CFG_RD0, TLP_CFG_WR0, TLP_IO_RD, TLP_IO_WR}) begin
-                    fork
-                        begin
-                            automatic pcie_tl_tlp t = tlp;
-                            automatic int i = idx;
+                    begin
+                        automatic int i = idx;
+                        automatic pcie_tl_tlp t = tlp;
+                        fork
                             ep_agents[i].ep_driver.handle_request(t);
-                        end
-                    join_none
+                        join_none
+                    end
                 end
             end
         end

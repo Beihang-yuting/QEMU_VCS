@@ -99,6 +99,10 @@ add_test(NAME test_cosim_completion_ownership
          COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/test_cosim_completion_ownership.sh)
 set_tests_properties(test_cosim_completion_ownership PROPERTIES TIMEOUT 10)
 
+add_test(NAME test_pcie_tl_env_fork_capture
+         COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/test_pcie_tl_env_fork_capture.sh)
+set_tests_properties(test_pcie_tl_env_fork_capture PROPERTIES TIMEOUT 10)
+
 # TCP transport roundtrip integration test
 add_executable(test_tcp_roundtrip test_tcp_roundtrip.c)
 target_link_libraries(test_tcp_roundtrip cosim_bridge_common cosim_bridge pthread)
