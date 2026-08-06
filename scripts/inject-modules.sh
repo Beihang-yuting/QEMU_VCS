@@ -11,6 +11,7 @@ COSIM_DIR="${PROJECT_DIR}/guest/images/${SYSTEM}"
 MODULES_TAR="${MODULES_TAR:-${COSIM_DIR}/modules.tar.gz}"
 SRC_ROOTFS="${SRC_ROOTFS:-${COSIM_DIR}/rootfs.ext4}"
 DST_ROOTFS="${DST_ROOTFS:-${COSIM_DIR}/rootfs.ext4}"
+BUILD_TMP="${PROJECT_DIR}/build/tmp"
 
 # 如果目标 rootfs 不存在，尝试用 Debian 基础 rootfs
 if [ ! -f "$SRC_ROOTFS" ] && [ -f "${PROJECT_DIR}/guest/images/debian/rootfs.ext4" ]; then
@@ -54,7 +55,9 @@ if [ -z "$NEW_KVER" ]; then
 fi
 echo "  新内核版本: $NEW_KVER"
 
-WORK_DIR=$(mktemp -d)
+mkdir -p "$BUILD_TMP"
+WORK_DIR=$(mktemp -d "${BUILD_TMP}/inject-modules.XXXXXX")
+chmod 0700 "$WORK_DIR"
 cleanup() {
     rm -rf "$WORK_DIR"
     rm -f "${DBGCMDS:-}"
@@ -68,7 +71,8 @@ if command -v depmod &>/dev/null; then
     depmod -b "$WORK_DIR" "$NEW_KVER" 2>/dev/null || true
 fi
 
-DBGCMDS=$(mktemp)
+DBGCMDS=$(mktemp "${BUILD_TMP}/inject-modules-debugfs.XXXXXX")
+chmod 0600 "$DBGCMDS"
 
 # debugfs does not interpret slashes in the destination argument of `write`.
 # Enter the parent directory first so each module is stored in its real ext4
@@ -125,6 +129,10 @@ RDMA_CHECK=$(debugfs -R "dump lib/modules/${NEW_KVER}/modules.dep /dev/stdout" "
 echo "  RDMA 模块数: $RDMA_CHECK"
 
 cd "$PROJECT_DIR"
+
+"${PROJECT_DIR}/scripts/install_guest_debugutils.sh" \
+    --rootfs "$DST_ROOTFS" \
+    --bin-dir "${PROJECT_DIR}/build/guest_tools/dpu-debugutils"
 
 echo ""
 echo "============================================"

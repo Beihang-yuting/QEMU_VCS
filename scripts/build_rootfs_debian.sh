@@ -11,7 +11,9 @@ DEBIAN_SUITE="bookworm"
 DEBIAN_MIRROR="http://deb.debian.org/debian"
 ROOTFS_SIZE_MB=1536
 ROOTFS_IMG="${OUTPUT_DIR}/rootfs.ext4"
-MOUNT_DIR=$(mktemp -d /tmp/cosim-rootfs.XXXXXX)
+BUILD_TMP="${PROJECT_DIR}/build/tmp"
+MOUNT_DIR=""
+REPACK_DIR=""
 LOOP_DEV=""
 
 info()  { echo -e "\033[0;36m[INFO]\033[0m $*"; }
@@ -19,13 +21,26 @@ ok()    { echo -e "\033[0;32m[OK]\033[0m $*"; }
 fail()  { echo -e "\033[0;31m[FAIL]\033[0m $*"; exit 1; }
 
 cleanup() {
+    local status=$?
+
+    set +e
     info "Cleaning up..."
-    umount "$MOUNT_DIR/proc" 2>/dev/null || true
-    umount "$MOUNT_DIR/sys" 2>/dev/null || true
-    umount "$MOUNT_DIR/dev" 2>/dev/null || true
-    umount "$MOUNT_DIR" 2>/dev/null || true
-    [ -n "$LOOP_DEV" ] && losetup -d "$LOOP_DEV" 2>/dev/null || true
-    rm -rf "$MOUNT_DIR"
+    if [ -n "$MOUNT_DIR" ]; then
+        umount "$MOUNT_DIR/proc" 2>/dev/null || true
+        umount "$MOUNT_DIR/sys" 2>/dev/null || true
+        umount "$MOUNT_DIR/dev" 2>/dev/null || true
+        umount "$MOUNT_DIR" 2>/dev/null || true
+    fi
+    if [ -n "$LOOP_DEV" ]; then
+        losetup -d "$LOOP_DEV" 2>/dev/null || true
+    fi
+    if [ -n "$REPACK_DIR" ]; then
+        rm -rf "$REPACK_DIR"
+    fi
+    if [ -n "$MOUNT_DIR" ]; then
+        rm -rf "$MOUNT_DIR"
+    fi
+    exit "$status"
 }
 trap cleanup EXIT
 
@@ -42,6 +57,10 @@ if ! command -v zstd &>/dev/null; then
     apt-get install -y -qq zstd 2>/dev/null || echo "[WARN] zstd not installed, initramfs repack may fail"
 fi
 
+"${PROJECT_DIR}/scripts/build_dpu_debugutils.sh"
+
+mkdir -p "$BUILD_TMP"
+MOUNT_DIR=$(mktemp -d "${BUILD_TMP}/debian-rootfs.XXXXXX")
 mkdir -p "$OUTPUT_DIR"
 
 # ---- Create ext4 image ----
@@ -96,7 +115,7 @@ if [ -n "$INITRD" ]; then
     # 注入 cosim-init 替换 Debian 默认 init（适配 cosim 高延迟环境）
     COSIM_INIT="${PROJECT_DIR}/guest/cosim-init"
     if [ -f "$COSIM_INIT" ]; then
-        REPACK_DIR=$(mktemp -d /tmp/cosim-initramfs.XXXXXX)
+        REPACK_DIR=$(mktemp -d "${BUILD_TMP}/debian-initramfs.XXXXXX")
         cd "$REPACK_DIR"
         # Debian bookworm 可能用 zstd 或 gzip 压缩 initrd
         if file "$INITRD" | grep -q "Zstandard"; then
@@ -109,6 +128,7 @@ if [ -n "$INITRD" ]; then
         find . | cpio -o -H newc 2>/dev/null | gzip > "${OUTPUT_DIR}/initramfs.gz"
         cd /
         rm -rf "$REPACK_DIR"
+        REPACK_DIR=""
         ok "Initramfs: ${OUTPUT_DIR}/initramfs.gz (cosim-init injected)"
     else
         cp "$INITRD" "${OUTPUT_DIR}/initramfs.gz"
@@ -170,6 +190,10 @@ if [ -d "$TOOLS_DIR" ]; then
     info "Copying custom test tools..."
     cp -a "$TOOLS_DIR"/* "$MOUNT_DIR/usr/local/bin/" 2>/dev/null || true
 fi
+
+"${PROJECT_DIR}/scripts/stage_guest_debugutils.sh" \
+    --root "$MOUNT_DIR" \
+    --bin-dir "${PROJECT_DIR}/build/guest_tools/dpu-debugutils"
 
 # ---- Done ----
 umount "$MOUNT_DIR"

@@ -5,6 +5,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 STAGE_SCRIPT="${REPO_ROOT}/scripts/stage_guest_debugutils.sh"
 INSTALL_SCRIPT="${REPO_ROOT}/scripts/install_guest_debugutils.sh"
+DEBIAN_BUILDER="${REPO_ROOT}/scripts/build_rootfs_debian.sh"
+UBUNTU_SERVER_BUILDER="${REPO_ROOT}/scripts/build_rootfs_ubuntu_server.sh"
 REAL_FILE="$(command -v file)"
 
 mkdir -p "${REPO_ROOT}/build/tmp"
@@ -34,6 +36,9 @@ assert_root_unchanged() {
 
 test -x "${STAGE_SCRIPT}" || fail "missing executable staging script: ${STAGE_SCRIPT}"
 test -x "${INSTALL_SCRIPT}" || fail "missing executable image wrapper: ${INSTALL_SCRIPT}"
+test -x "${DEBIAN_BUILDER}" || fail "missing Debian image builder: ${DEBIAN_BUILDER}"
+test -x "${UBUNTU_SERVER_BUILDER}" ||
+    fail "missing Ubuntu Server image builder: ${UBUNTU_SERVER_BUILDER}"
 
 FAKE_BIN_DIR="${WORK_DIR}/fake static bin"
 MIXED_BIN_DIR="${WORK_DIR}/mixed bin"
@@ -353,5 +358,211 @@ FAILED_MOUNT_DIR="$(cat "${LIFECYCLE_MOUNT_DIR_FILE}")"
     fail "failure mount directory was outside repo/build/tmp: ${FAILED_MOUNT_DIR}"
 test ! -e "${FAILED_MOUNT_DIR}" ||
     fail "failing wrapper left mount directory: ${FAILED_MOUNT_DIR}"
+
+# Both image builders must build the static tools before creating an image and
+# stage them while the Guest root is mounted.  The Ubuntu Server path already
+# has a broad behavioral fixture of its own, so keep a small ordering contract
+# here and drive the newly covered Debian path end-to-end with fake helpers.
+ubuntu_build_line="$(grep -nF '"${PROJECT_DIR}/scripts/build_dpu_debugutils.sh" "${DEBUG_BIN_DIR}"' \
+    "${UBUNTU_SERVER_BUILDER}" | cut -d: -f1)"
+ubuntu_image_line="$(grep -nF 'truncate -s "${ROOTFS_SIZE}" "${ROOTFS_IMAGE}"' \
+    "${UBUNTU_SERVER_BUILDER}" | cut -d: -f1)"
+ubuntu_stage_line="$(grep -nF '"${PROJECT_DIR}/scripts/stage_guest_debugutils.sh"' \
+    "${UBUNTU_SERVER_BUILDER}" | tail -1 | cut -d: -f1)"
+ubuntu_unmount_line="$(grep -nF 'unmount_all' "${UBUNTU_SERVER_BUILDER}" | tail -1 | cut -d: -f1)"
+[[ -n "${ubuntu_build_line}" && -n "${ubuntu_image_line}" &&
+   -n "${ubuntu_stage_line}" && -n "${ubuntu_unmount_line}" ]] ||
+    fail 'Ubuntu Server debug utility call-site contract is incomplete'
+(( ubuntu_build_line < ubuntu_image_line )) ||
+    fail 'Ubuntu Server debug utilities are not built before image creation'
+(( ubuntu_image_line < ubuntu_stage_line && ubuntu_stage_line < ubuntu_unmount_line )) ||
+    fail 'Ubuntu Server debug utilities are not staged while the image is mounted'
+grep -Fq 'mktemp -d "${BUILD_TMP}/debian-rootfs.XXXXXX"' "${DEBIAN_BUILDER}" ||
+    fail 'Debian rootfs mount temporary is not constrained to build/tmp'
+grep -Fq 'mktemp -d "${BUILD_TMP}/debian-initramfs.XXXXXX"' "${DEBIAN_BUILDER}" ||
+    fail 'Debian initramfs temporary is not constrained to build/tmp'
+if grep -Eq 'mktemp .*([[:space:]]|^)/tmp/' "${DEBIAN_BUILDER}"; then
+    fail 'Debian builder still creates production temporaries under /tmp'
+fi
+
+DEBIAN_FIXTURE="${WORK_DIR}/debian builder fixture"
+DEBIAN_FAKE_BIN="${DEBIAN_FIXTURE}/fake bin"
+DEBIAN_LOG="${DEBIAN_FIXTURE}/builder.log"
+DEBIAN_MOUNT_FILE="${DEBIAN_FIXTURE}/mount-dir"
+DEBIAN_OUTPUT="${DEBIAN_FIXTURE}/output"
+export DEBIAN_FIXTURE DEBIAN_LOG DEBIAN_MOUNT_FILE
+mkdir -p "${DEBIAN_FIXTURE}/scripts" "${DEBIAN_FIXTURE}/build/tmp" \
+    "${DEBIAN_FAKE_BIN}" "${DEBIAN_OUTPUT}"
+cp "${DEBIAN_BUILDER}" "${DEBIAN_FIXTURE}/scripts/build_rootfs_debian.sh"
+chmod 0755 "${DEBIAN_FIXTURE}/scripts/build_rootfs_debian.sh"
+
+cat >"${DEBIAN_FIXTURE}/scripts/build_dpu_debugutils.sh" <<'DEBIAN_BUILD_HELPER'
+#!/usr/bin/env bash
+set -euo pipefail
+[[ "$#" -eq 0 ]] || exit 80
+printf 'build\n' >>"${DEBIAN_LOG}"
+build_result=${DEBIAN_BUILD_RESULT:-0}
+(( build_result == 0 )) || exit "${build_result}"
+mkdir -p "${DEBIAN_FIXTURE}/build/guest_tools/dpu-debugutils"
+for utility in pci_debug reg_display; do
+    printf '#!/bin/sh\nexit 0\n' \
+        >"${DEBIAN_FIXTURE}/build/guest_tools/dpu-debugutils/${utility}"
+    chmod 0755 "${DEBIAN_FIXTURE}/build/guest_tools/dpu-debugutils/${utility}"
+done
+DEBIAN_BUILD_HELPER
+
+cat >"${DEBIAN_FIXTURE}/scripts/stage_guest_debugutils.sh" <<'DEBIAN_STAGE_HELPER'
+#!/usr/bin/env bash
+set -euo pipefail
+[[ "$#" -eq 4 && "$1" == --root && "$3" == --bin-dir ]] || exit 81
+[[ "$2" == "$(cat "${DEBIAN_MOUNT_FILE}")" && -f "$2/.fixture-mounted" ]] || exit 82
+[[ "$4" == "${DEBIAN_FIXTURE}/build/guest_tools/dpu-debugutils" ]] || exit 83
+printf 'stage:%s\n' "$2" >>"${DEBIAN_LOG}"
+exit "${DEBIAN_STAGE_RESULT:-0}"
+DEBIAN_STAGE_HELPER
+chmod 0755 "${DEBIAN_FIXTURE}/scripts/build_dpu_debugutils.sh" \
+    "${DEBIAN_FIXTURE}/scripts/stage_guest_debugutils.sh"
+
+cat >"${DEBIAN_FAKE_BIN}/id" <<'DEBIAN_ID_SHIM'
+#!/usr/bin/env bash
+[[ "${1:-}" == -u ]] && { printf '0\n'; exit 0; }
+exec /usr/bin/id "$@"
+DEBIAN_ID_SHIM
+
+cat >"${DEBIAN_FAKE_BIN}/debootstrap" <<'DEBIAN_DEBOOTSTRAP_SHIM'
+#!/usr/bin/env bash
+set -euo pipefail
+root=$3
+mkdir -p "$root"/{boot,dev,etc,etc/profile.d,etc/systemd/system,proc,sys,usr/local/bin}
+printf 'root:*:1:1:1:1:1:1:1\n' >"$root/etc/shadow"
+DEBIAN_DEBOOTSTRAP_SHIM
+
+cat >"${DEBIAN_FAKE_BIN}/dd" <<'DEBIAN_DD_SHIM'
+#!/usr/bin/env bash
+set -euo pipefail
+for argument in "$@"; do
+    case "$argument" in
+        of=*) image=${argument#of=} ;;
+    esac
+done
+printf 'dd\n' >>"${DEBIAN_LOG}"
+: >"${image:?missing output image}"
+DEBIAN_DD_SHIM
+
+cat >"${DEBIAN_FAKE_BIN}/mkfs.ext4" <<'DEBIAN_MKFS_SHIM'
+#!/usr/bin/env bash
+exit 0
+DEBIAN_MKFS_SHIM
+
+cat >"${DEBIAN_FAKE_BIN}/losetup" <<'DEBIAN_LOSETUP_SHIM'
+#!/usr/bin/env bash
+set -euo pipefail
+if [[ "${1:-}" == --find ]]; then
+    printf '/dev/loop-fixture\n'
+else
+    printf 'losetup-detach\n' >>"${DEBIAN_LOG}"
+fi
+DEBIAN_LOSETUP_SHIM
+
+cat >"${DEBIAN_FAKE_BIN}/mount" <<'DEBIAN_MOUNT_SHIM'
+#!/usr/bin/env bash
+set -euo pipefail
+target=${@: -1}
+mkdir -p "$target"
+if [[ "${1:-}" == /dev/loop-fixture ]]; then
+    printf '%s\n' "$target" >"${DEBIAN_MOUNT_FILE}"
+    : >"$target/.fixture-mounted"
+    printf 'mount-root:%s\n' "$target" >>"${DEBIAN_LOG}"
+fi
+DEBIAN_MOUNT_SHIM
+
+cat >"${DEBIAN_FAKE_BIN}/umount" <<'DEBIAN_UMOUNT_SHIM'
+#!/usr/bin/env bash
+set -euo pipefail
+target=${1:?missing target}
+if [[ -s "${DEBIAN_MOUNT_FILE}" && "$target" == "$(cat "${DEBIAN_MOUNT_FILE}")" ]]; then
+    rm -f "$target/.fixture-mounted"
+    printf 'umount-root:%s\n' "$target" >>"${DEBIAN_LOG}"
+fi
+DEBIAN_UMOUNT_SHIM
+
+cat >"${DEBIAN_FAKE_BIN}/chroot" <<'DEBIAN_CHROOT_SHIM'
+#!/usr/bin/env bash
+exit 0
+DEBIAN_CHROOT_SHIM
+
+cat >"${DEBIAN_FAKE_BIN}/openssl" <<'DEBIAN_OPENSSL_SHIM'
+#!/usr/bin/env bash
+printf 'fixture-password-hash\n'
+DEBIAN_OPENSSL_SHIM
+
+cat >"${DEBIAN_FAKE_BIN}/ls" <<'DEBIAN_LS_SHIM'
+#!/usr/bin/env bash
+for argument in "$@"; do
+    case "$argument" in
+        */boot/vmlinuz-\*|*/boot/initrd.img-\*) exit 0 ;;
+    esac
+done
+exec /usr/bin/ls "$@"
+DEBIAN_LS_SHIM
+chmod 0755 "${DEBIAN_FAKE_BIN}"/*
+
+run_debian_builder() {
+    PATH="${DEBIAN_FAKE_BIN}:${PATH}" \
+        "${DEBIAN_FIXTURE}/scripts/build_rootfs_debian.sh" "${DEBIAN_OUTPUT}"
+}
+
+: >"${DEBIAN_LOG}"
+run_debian_builder >"${DEBIAN_FIXTURE}/success.stdout" \
+    2>"${DEBIAN_FIXTURE}/success.stderr"
+DEBIAN_MOUNT_DIR="$(cat "${DEBIAN_MOUNT_FILE}")"
+mapfile -t DEBIAN_EVENTS <"${DEBIAN_LOG}"
+test "${DEBIAN_EVENTS[0]:-}" = build ||
+    fail "Debian builder did not build tools first: $(tr '\n' ' ' <"${DEBIAN_LOG}")"
+test "${DEBIAN_EVENTS[1]:-}" = dd ||
+    fail "Debian builder created the image before building tools: $(tr '\n' ' ' <"${DEBIAN_LOG}")"
+[[ "${DEBIAN_MOUNT_DIR}" == "${DEBIAN_FIXTURE}/build/tmp/"* ]] ||
+    fail "Debian builder mount escaped build/tmp: ${DEBIAN_MOUNT_DIR}"
+test ! -e "${DEBIAN_MOUNT_DIR}" ||
+    fail "Debian builder left mount directory: ${DEBIAN_MOUNT_DIR}"
+stage_event=''
+unmount_event=''
+for event in "${DEBIAN_EVENTS[@]}"; do
+    [[ "$event" == stage:* ]] && stage_event=$event
+    [[ "$event" == umount-root:* ]] && unmount_event=$event
+done
+test "${stage_event}" = "stage:${DEBIAN_MOUNT_DIR}" ||
+    fail 'Debian builder did not stage tools into its mounted root'
+test "${unmount_event}" = "umount-root:${DEBIAN_MOUNT_DIR}" ||
+    fail 'Debian builder did not unmount its root after staging'
+
+: >"${DEBIAN_LOG}"
+set +e
+DEBIAN_BUILD_RESULT=31 run_debian_builder \
+    >"${DEBIAN_FIXTURE}/build-failure.stdout" \
+    2>"${DEBIAN_FIXTURE}/build-failure.stderr"
+DEBIAN_BUILD_STATUS=$?
+set -e
+test "${DEBIAN_BUILD_STATUS}" -eq 31 ||
+    fail "Debian builder swallowed tool build failure: ${DEBIAN_BUILD_STATUS}"
+test "$(cat "${DEBIAN_LOG}")" = build ||
+    fail 'Debian builder continued after tool build failure'
+
+: >"${DEBIAN_LOG}"
+set +e
+DEBIAN_STAGE_RESULT=37 run_debian_builder \
+    >"${DEBIAN_FIXTURE}/stage-failure.stdout" \
+    2>"${DEBIAN_FIXTURE}/stage-failure.stderr"
+DEBIAN_STAGE_STATUS=$?
+set -e
+test "${DEBIAN_STAGE_STATUS}" -eq 37 ||
+    fail "Debian builder swallowed staging failure: ${DEBIAN_STAGE_STATUS}"
+DEBIAN_FAILED_MOUNT_DIR="$(cat "${DEBIAN_MOUNT_FILE}")"
+test ! -e "${DEBIAN_FAILED_MOUNT_DIR}" ||
+    fail "Debian builder staging failure left mount directory: ${DEBIAN_FAILED_MOUNT_DIR}"
+grep -Fxq "umount-root:${DEBIAN_FAILED_MOUNT_DIR}" "${DEBIAN_LOG}" ||
+    fail 'Debian builder staging failure did not unmount the root'
+grep -Fxq 'losetup-detach' "${DEBIAN_LOG}" ||
+    fail 'Debian builder staging failure did not detach the loop device'
 
 echo '[stage-guest-debugutils] PASS'
