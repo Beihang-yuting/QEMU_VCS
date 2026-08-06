@@ -694,7 +694,7 @@ Suite: ${SUITE}
 Image size: ${ROOTFS_SIZE} (sparse; truncate, never dd)
 Kernel: ${KVER}
 Kernel assets: guest/images/ubuntu/{vmlinuz,modules.tar.gz}; run setup-ubuntu-kernel.sh ${KVER} if absent
-Bootstrap: debootstrap --variant=minbase ${SUITE} ROOT ${ARCHIVE_MIRROR}
+Bootstrap: debootstrap --no-merged-usr --variant=minbase ${SUITE} ROOT ${ARCHIVE_MIRROR}
 Apt sources:
   ${ARCHIVE_MIRROR} ${SUITE} main universe
   ${ARCHIVE_MIRROR} ${SUITE}-updates main universe
@@ -818,7 +818,7 @@ tracked_mount mounted_root "${MOUNT_DIR}" mount -o loop,nosuid \
     "${ROOTFS_IMAGE}" "${MOUNT_DIR}"
 
 echo "Bootstrapping Ubuntu ${SUITE}"
-debootstrap --variant=minbase "${SUITE}" "${MOUNT_DIR}" "${ARCHIVE_MIRROR}"
+debootstrap --no-merged-usr --variant=minbase "${SUITE}" "${MOUNT_DIR}" "${ARCHIVE_MIRROR}"
 
 tar -xzf "${KERNEL_MODULES}" -C "${MOUNT_DIR}"
 MODULE_DIR="${MOUNT_DIR}/lib/modules/${KVER}"

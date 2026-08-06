@@ -164,7 +164,7 @@ EARLY_DIRNAME
         '/opt/dpu-debugutils' \
         'apt-daily.timer' 'apt-daily-upgrade.timer' \
         'unattended-upgrades.service' \
-        'debootstrap --variant=minbase' \
+        'debootstrap --no-merged-usr --variant=minbase' \
         'http://archive.ubuntu.com/ubuntu noble main universe' \
         'http://archive.ubuntu.com/ubuntu noble-updates main universe' \
         'http://security.ubuntu.com/ubuntu noble-security main universe' \
@@ -234,7 +234,7 @@ EARLY_DIRNAME
         'builder does not create a sparse 8G image with truncate'
     assert_not_contains 'dd if=' "$builder_source" \
         'builder allocates the image with dd'
-    assert_contains 'debootstrap --variant=minbase "${SUITE}" "${MOUNT_DIR}" "${ARCHIVE_MIRROR}"' \
+    assert_contains 'debootstrap --no-merged-usr --variant=minbase "${SUITE}" "${MOUNT_DIR}" "${ARCHIVE_MIRROR}"' \
         "$builder_source" 'builder debootstrap contract changed'
     assert_contains '"${PROJECT_DIR}/scripts/setup-ubuntu-kernel.sh" "${KVER}"' \
         "$builder_source" 'builder does not request the exact legacy Ubuntu kernel asset'
@@ -323,7 +323,7 @@ EARLY_DIRNAME
                 capturing = 1
             }
             capturing { print }
-            capturing && /^debootstrap --variant=minbase / {
+            capturing && /^debootstrap / {
                 found = 1
                 exit
             }
@@ -360,6 +360,32 @@ case ",$mount_options," in
         exit 87
         ;;
 esac
+legacy_no_merged_usr=false
+legacy_variant=''
+legacy_positionals=()
+for argument in "$@"; do
+    case "$argument" in
+        --no-merged-usr) legacy_no_merged_usr=true ;;
+        --variant=*) legacy_variant="${argument#--variant=}" ;;
+        --*)
+            echo "unexpected debootstrap option: $argument" >&2
+            exit 88
+            ;;
+        *) legacy_positionals+=("$argument") ;;
+    esac
+done
+if [ "$legacy_no_merged_usr" != true ]; then
+    echo 'legacy debootstrap pre-created merged-/usr links; base-files extraction: File exists' >&2
+    exit 87
+fi
+if [ "$legacy_variant" != minbase ] ||
+        [ "${#legacy_positionals[@]}" -ne 3 ] ||
+        [ "${legacy_positionals[0]}" != "$ROOT_EXPECTED_SUITE" ] ||
+        [ "${legacy_positionals[1]}" != "$ROOT_EXPECTED_TARGET" ] ||
+        [ "${legacy_positionals[2]}" != "$ROOT_EXPECTED_MIRROR" ]; then
+    echo 'debootstrap suite, variant, target, or mirror changed' >&2
+    exit 89
+fi
 : > "$ROOT_DEBOOTSTRAP_OK"
 ROOT_DEBOOTSTRAP
         chmod +x "$root_mount_fakebin/mount" \
@@ -369,6 +395,9 @@ ROOT_DEBOOTSTRAP
         (
             export ROOT_MOUNT_OPTIONS="$root_mount_case/mount-options"
             export ROOT_DEBOOTSTRAP_OK="$root_mount_case/debootstrap-ok"
+            export ROOT_EXPECTED_SUITE=noble
+            export ROOT_EXPECTED_TARGET="$root_mount_case/root"
+            export ROOT_EXPECTED_MIRROR=http://archive.ubuntu.com/ubuntu
             PATH="$root_mount_fakebin:$PATH"
             # shellcheck source=/dev/null
             source "$builder_library"
