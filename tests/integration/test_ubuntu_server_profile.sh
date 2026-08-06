@@ -242,8 +242,6 @@ EARLY_DIRNAME
         "$builder_source" 'builder does not mask cloud-init units'
     assert_contains 'systemctl mask apt-daily.timer apt-daily-upgrade.timer unattended-upgrades.service' \
         "$builder_source" 'builder does not mask apt background units'
-    assert_contains 'mount -o loop,nosuid,nodev' "$builder_source" \
-        'builder root mount lacks safe options or is not executable'
     assert_contains 'trap cleanup EXIT' "$builder_source" \
         'builder has no EXIT cleanup trap'
     assert_contains 'trap handle_int INT' "$builder_source" \
@@ -261,8 +259,9 @@ EARLY_DIRNAME
         'builder publication does not use no-target-directory renames'
     assert_contains '${BUILD_TMP}/ubuntu-server-output.' "$builder_source" \
         'builder output lock is not rooted in repo build/tmp'
-    assert_contains 'tracked_mount mounted_root "${MOUNT_DIR}" mount -o loop,nosuid,nodev' \
-        "$builder_source" 'root mount is not signal-safe and tracked'
+    expected_root_mount=$'tracked_mount mounted_root "${MOUNT_DIR}" mount -o loop,nosuid \\\n    "${ROOTFS_IMAGE}" "${MOUNT_DIR}"'
+    assert_contains "$expected_root_mount" "$builder_source" \
+        'writable root mount is not loop,nosuid and signal-safe'
     assert_contains 'tracked_mount mounted_sys "${MOUNT_DIR}/sys" mount -t sysfs' \
         "$builder_source" 'sys mount is not signal-safe and tracked'
     assert_contains 'tracked_mount mounted_proc "${MOUNT_DIR}/proc" mount -t proc' \
@@ -271,6 +270,10 @@ EARLY_DIRNAME
         "$builder_source" 'dev mount is not signal-safe and tracked'
     assert_contains 'tracked_mount mounted_devpts "${MOUNT_DIR}/dev/pts" mount -t devpts' \
         "$builder_source" 'devpts mount is not signal-safe and tracked'
+    prepare_offline_source="$(<"$repo/scripts/prepare-offline.sh")"
+    assert_contains 'sudo mount -o loop,ro,nosuid,nodev -- "$image" "$mount_dir"' \
+        "$prepare_offline_source" \
+        'prepare-offline readonly rootfs mount lost ro,nosuid,nodev'
     expected_unmounts=$'unmount_if_mounted mounted_devpts "${MOUNT_DIR}/dev/pts"\nunmount_if_mounted mounted_dev "${MOUNT_DIR}/dev"\nunmount_if_mounted mounted_proc "${MOUNT_DIR}/proc"\nunmount_if_mounted mounted_sys "${MOUNT_DIR}/sys"\nunmount_if_mounted mounted_root "${MOUNT_DIR}"'
     assert_contains "$expected_unmounts" "$builder_source" \
         'builder cleanup does not use the required reverse unmount order'
@@ -301,6 +304,74 @@ EARLY_DIRNAME
         { print }
         END { if (!found) exit 1 }
     ' "$builder" > "$builder_library"; then
+        root_mount_case="$work/root-mount-case"
+        root_mount_fakebin="$root_mount_case/fakebin"
+        root_mount_snippet="$root_mount_case/root-mount-snippet.sh"
+        mkdir -p "$root_mount_fakebin" "$root_mount_case/root"
+        if ! awk '
+            /^tracked_mount mounted_root "\$\{MOUNT_DIR\}" mount -o / {
+                capturing = 1
+            }
+            capturing { print }
+            capturing && /^debootstrap --variant=minbase / {
+                found = 1
+                exit
+            }
+            END { if (!found) exit 1 }
+        ' "$builder" > "$root_mount_snippet"; then
+            fail 'could not extract the builder root-mount/debootstrap sequence'
+        fi
+        cat > "$root_mount_fakebin/mount" <<'ROOT_MOUNT'
+#!/usr/bin/env bash
+mount_options=''
+while [ "$#" -gt 0 ]; do
+    if [ "$1" = -o ]; then
+        shift
+        mount_options="$1"
+        break
+    fi
+    shift
+done
+printf '%s\n' "$mount_options" > "$ROOT_MOUNT_OPTIONS"
+ROOT_MOUNT
+        cat > "$root_mount_fakebin/debootstrap" <<'ROOT_DEBOOTSTRAP'
+#!/usr/bin/env bash
+mount_options="$(<"$ROOT_MOUNT_OPTIONS")"
+case ",$mount_options," in
+    *,nodev,*|*,noexec,*)
+        echo 'Cannot install into target mounted with noexec or nodev' >&2
+        exit 86
+        ;;
+esac
+case ",$mount_options," in
+    *,loop,*) ;;
+    *)
+        echo 'rootfs image was not mounted through a loop device' >&2
+        exit 87
+        ;;
+esac
+: > "$ROOT_DEBOOTSTRAP_OK"
+ROOT_DEBOOTSTRAP
+        chmod +x "$root_mount_fakebin/mount" \
+            "$root_mount_fakebin/debootstrap"
+
+        root_mount_status=0
+        (
+            export ROOT_MOUNT_OPTIONS="$root_mount_case/mount-options"
+            export ROOT_DEBOOTSTRAP_OK="$root_mount_case/debootstrap-ok"
+            PATH="$root_mount_fakebin:$PATH"
+            # shellcheck source=/dev/null
+            source "$builder_library"
+            MOUNT_DIR="$root_mount_case/root"
+            ROOTFS_IMAGE="$root_mount_case/rootfs.ext4"
+            # shellcheck source=/dev/null
+            source "$root_mount_snippet"
+        ) > "$root_mount_case/output" 2>&1 || root_mount_status=$?
+        [ "$root_mount_status" -eq 0 ] ||
+            fail "writable rootfs mount blocked debootstrap with status $root_mount_status"
+        [ -e "$root_mount_case/debootstrap-ok" ] ||
+            fail 'debootstrap fixture did not accept the writable rootfs mount'
+
         password_case="$work/password-case"
         password_fakebin="$password_case/fakebin"
         mkdir -p "$password_fakebin"

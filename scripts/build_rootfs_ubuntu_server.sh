@@ -814,7 +814,7 @@ install -d -m 0700 "${MOUNT_DIR}"
 echo "Creating sparse ${ROOTFS_SIZE} ext4 image"
 truncate -s "${ROOTFS_SIZE}" "${ROOTFS_IMAGE}"
 mkfs.ext4 -F "${ROOTFS_IMAGE}"
-tracked_mount mounted_root "${MOUNT_DIR}" mount -o loop,nosuid,nodev \
+tracked_mount mounted_root "${MOUNT_DIR}" mount -o loop,nosuid \
     "${ROOTFS_IMAGE}" "${MOUNT_DIR}"
 
 echo "Bootstrapping Ubuntu ${SUITE}"
