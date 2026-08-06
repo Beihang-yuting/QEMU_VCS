@@ -2,9 +2,10 @@
 // Invoke from repo root, linking the VCS bridge DPI (static whole-archive):
 //   vcs -sverilog -full64 -ntb_opts uvm-1.2 -timescale=1ns/1ps +define+PCIE_COSIM_ENABLE \
 //       -CFLAGS "-I bridge/common -I bridge/vcs" \
-//       -LDFLAGS "-Wl,--whole-archive build/lib/libcosim_bridge.a -Wl,--no-whole-archive -lrt -lpthread" \
+//       -LDFLAGS "-Wl,--whole-archive $PWD/build/lib/libcosim_bridge.a -Wl,--no-whole-archive -lrt -lpthread" \
 //       -f pcie_tl_vip/sim/filelist_cosim.f -o pcie_tl_vip/sim/simv_cosim
-// Run:  ./simv_cosim +UVM_TESTNAME=pcie_tl_cosim_test +COSIM +REMOTE_HOST=<QEMU> +PORT_BASE=9100
+// $PWD keeps the archive absolute when VCS performs its final link from csrc/.
+// Batch run: ./simv_cosim +UVM_TESTNAME=pcie_tl_cosim_test +COSIM +COSIM_AUTOSTART +REMOTE_HOST=<QEMU> +PORT_BASE=9100
 // Order: host_mem -> axis_vip -> pcie_tl -> xilinx adapter -> bridge_vcs -> cosim_xrc_pkg -> tests -> tb_top.
 
 +define+PCIE_COSIM_ENABLE

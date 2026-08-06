@@ -116,10 +116,13 @@ The Ubuntu Server Guest supports native builds:
 ```bash
 tar -xf host-driver-net-pf0only-vnetcache.tar.gz
 cd host-driver-net
-make KERNELDIR=/lib/modules/$(uname -r)/build
+make KERNELDIR=/lib/modules/$(uname -r)/build CFLAGS=-UDPU_LACP
 modinfo ./dpu_snd1.ko | grep vermagic
 sudo insmod ./dpu_snd1.ko
 ```
+
+`CFLAGS=-UDPU_LACP` skips the bundled LACP compatibility sources, which do not
+compile against Linux 6.8, and uses system bonding instead.
 
 The compact Guest does not promise in-Guest module builds. It continues to use
 the existing workflow in which `10.11.10.53` builds against the exact Guest

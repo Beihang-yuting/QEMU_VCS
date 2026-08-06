@@ -504,12 +504,15 @@ ssh -p 2222 ryan@127.0.0.1
 cd /tmp
 tar -xf host-driver-net-pf0only-vnetcache.tar.gz
 cd host-driver-net
-make KERNELDIR=/lib/modules/$(uname -r)/build
+make KERNELDIR=/lib/modules/$(uname -r)/build CFLAGS=-UDPU_LACP
 modinfo ./dpu_snd1.ko | grep vermagic
 sudo insmod ./dpu_snd1.ko
 ```
 
 State that QEMU uses `-snapshot`, port 2222 is management rather than `PORT_BASE`, BAR access needs sudo, and no DPU module loads automatically.
+State that `CFLAGS=-UDPU_LACP` skips the Linux 6.8-incompatible bundled LACP
+compatibility sources and uses system bonding; this workflow is not a bare
+`make KERNELDIR=...` build.
 
 - [ ] **Step 2: Run all fast tests**
 
@@ -605,11 +608,14 @@ Expected: both profiles have tools and no DPU module; only server must report Ub
 SCP debug and driver source. Rebuild debug programs, compile C/C++ smoke programs, then:
 
 ```bash
-make KERNELDIR=/lib/modules/$(uname -r)/build
+make KERNELDIR=/lib/modules/$(uname -r)/build CFLAGS=-UDPU_LACP
 test "$(modinfo -F vermagic ./dpu_snd1.ko | awk '{print $1}')" = "$(uname -r)"
 modinfo ./dpu_snd1.ko | grep -F 'pci:v000020F9d00005011'
 if modinfo ./dpu_snd1.ko | grep -Fq 'pci:v000020F9d00005012'; then exit 1; fi
 ```
+
+`CFLAGS=-UDPU_LACP` selects system bonding instead of compiling the bundled LACP
+compatibility sources that are incompatible with Linux 6.8.
 
 Expected: matching vermagic, PF0 alias present, PF1 absent.
 
@@ -622,11 +628,14 @@ mkdir -p build/ubuntu-server-vcs
 vcs -sverilog -full64 -ntb_opts uvm-1.2 -timescale=1ns/1ps \
   +define+PCIE_COSIM_ENABLE \
   -CFLAGS "-I bridge/common -I bridge/vcs" \
-  -LDFLAGS "-Wl,--whole-archive build/lib/libcosim_bridge.a -Wl,--no-whole-archive -lrt -lpthread" \
+  -LDFLAGS "-Wl,--whole-archive $PWD/build/lib/libcosim_bridge.a -Wl,--no-whole-archive -lrt -lpthread" \
   -f pcie_tl_vip/sim/filelist_cosim.f \
   -o build/ubuntu-server-vcs/simv_cosim \
   -l build/ubuntu-server-vcs/compile.log
 ```
+
+The archive path must remain absolute because VCS performs the final link from
+its generated `csrc/` directory.
 
 Expected: zero compile errors.
 
@@ -643,13 +652,16 @@ VCS:
 
 ```bash
 build/ubuntu-server-vcs/simv_cosim \
-  +UVM_TESTNAME=pcie_tl_cosim_test +COSIM \
+  +UVM_TESTNAME=pcie_tl_cosim_test +COSIM +COSIM_AUTOSTART \
   +REMOTE_HOST=127.0.0.1 +PORT_BASE=28100 +INSTANCE_ID=0 \
   +BYPASS_CONFIG=1 +CFG_PROFILE=DPU_20F9_501X \
   +NUM_PFS=1 +MAX_VFS=16 +NUM_VFS=0 +TAG_BIT=8 \
   +UVM_VERBOSITY=UVM_MEDIUM \
   -l build/ubuntu-server-vcs/run.log
 ```
+
+This is a non-interactive batch run, so it opts in to `+COSIM_AUTOSTART`
+instead of waiting for the staged UCLI `start_cosim` event.
 
 Expected: Guest enumerates `0000:01:00.0 [20f9:5011]` without tag-map/completion errors before smoke actions.
 
@@ -741,4 +753,3 @@ git push origin feature/qemu-vcs-isolated-tcp
 ```
 
 Report remote commit, archive/checksum paths, validation evidence, and launch commands.
-

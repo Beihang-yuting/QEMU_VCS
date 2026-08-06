@@ -159,10 +159,13 @@ make run-qemu NUM_PFS=4 PCIE_PREF64_RESERVE=256M
 > `pcie_tl_vip/sim/simv_cosim` 配套的 `pcie_tl_cosim_test` 是独立的
 > **TLM stand-in** 测试，不包含用户的 RTL DUT。它的 `ENV_LOOP` 和 EP driver
 > 会模拟 Completion；仅在命令行加 `+REAL_DUT` 不能把它变成真实 DUT 测试，
-> 还会让同一 Completion 同时经过 TLM 直调和 monitor/rx_loop，形成误导性的
-> `Unexpected Completion`/`no QEMU tag map` 日志。真实 DUT 验证必须使用用户
-> 自己的 top、`SV_IF_MODE` 和 DUT 的 CC/RQ 通道；该模式下 DUT 是 MMIO
-> Completion 的唯一来源。
+> 当前 completion ownership 已保证每种模式只选择一条消费路径。真实 DUT 验证
+> 仍必须使用用户自己的 top、`SV_IF_MODE` 和 DUT 的 CC/RQ 通道；该模式下 DUT
+> 是 MMIO Completion 的唯一来源。
+
+批处理运行应加 `+COSIM_AUTOSTART`，在没有 UCLI 操作时直接进入 QEMU 主导阶段；
+需要先运行 VIP 再切换的分阶段交互模式则省略该 plusarg，并在 UCLI 中执行
+`start_cosim`。两种启动方式二选一；`+COSIM_AUTOSTART` 不是全局默认。
 
 ---
 

@@ -87,12 +87,16 @@ ssh -p 2222 ryan@127.0.0.1
 cd /tmp
 tar -xf host-driver-net-pf0only-vnetcache.tar.gz
 cd host-driver-net
-make KERNELDIR=/lib/modules/$(uname -r)/build
+make KERNELDIR=/lib/modules/$(uname -r)/build CFLAGS=-UDPU_LACP
 modinfo ./dpu_snd1.ko | grep vermagic
 sudo insmod ./dpu_snd1.ko
 lsmod | grep dpu_snd1
 sudo rmmod dpu_snd1
 ```
+
+`CFLAGS=-UDPU_LACP` 会跳过源码包内与 Linux 6.8 不兼容的 bundled LACP
+compatibility 实现，并改用内核的 system bonding；不要在此 Guest 中改回裸
+`make KERNELDIR=...`。
 
 `modinfo` 输出的 vermagic 必须与 `uname -r` 对应；当前 server profile 是
 `6.8.0-107-generic`。只有 `ubuntu-server` 提供匹配 headers 并支持上述原生
