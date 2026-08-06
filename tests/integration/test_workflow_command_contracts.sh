@@ -1,7 +1,17 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-repo=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
+if (($# > 1)); then
+    echo "usage: $0 [repo-root]" >&2
+    exit 2
+fi
+
+if (($# == 1)); then
+    repo=$(cd "$1" && pwd)
+else
+    repo=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
+fi
+
 guest_doc="$repo/docs/GUEST-MANAGEMENT-SCP.md"
 vcs_doc="$repo/docs/COSIM-VCS-INTEGRATION.md"
 filelist="$repo/pcie_tl_vip/sim/filelist_cosim.f"
@@ -14,20 +24,93 @@ fail() {
     failures=$((failures + 1))
 }
 
-require_literal() {
-    local file=$1
-    local literal=$2
-    local description=$3
+get_section() {
+    local result_name=$1
+    local file=$2
+    local start=$3
+    local end=$4
+    local description=$5
+    local section
 
-    grep -Fq -- "$literal" "$file" || fail "$description"
+    if ! section=$(awk -v start="$start" -v end="$end" '
+        $0 == start {
+            starts++
+            active = 1
+            next
+        }
+        active && $0 == end {
+            ends++
+            active = 0
+            next
+        }
+        active { print }
+        END {
+            if (starts != 1 || ends != 1 || active)
+                exit 1
+        }
+    ' "$file"); then
+        fail "$description must occur exactly once"
+        section=
+    fi
+    printf -v "$result_name" '%s' "$section"
 }
 
-forbid_literal() {
-    local file=$1
-    local literal=$2
+get_fenced_block() {
+    local result_name=$1
+    local section=$2
+    local opening_fence=$3
+    local anchor=$4
+    local description=$5
+    local block
+
+    if ! block=$(awk -v opening="$opening_fence" -v anchor="$anchor" '
+        $0 == opening {
+            inside = 1
+            current = ""
+            next
+        }
+        inside && $0 == "```" {
+            if (index(current, anchor) != 0) {
+                matches++
+                selected = current
+            }
+            inside = 0
+            next
+        }
+        inside { current = current $0 ORS }
+        END {
+            if (matches != 1)
+                exit 1
+            printf "%s", selected
+        }
+    ' <<<"$section"); then
+        fail "$description must identify exactly one fenced command block"
+        block=
+    fi
+    printf -v "$result_name" '%s' "$block"
+}
+
+has_exact_line() {
+    local content=$1
+    local expected=$2
+
+    grep -Fxq -- "$expected" <<<"$content"
+}
+
+require_exact_line() {
+    local content=$1
+    local expected=$2
     local description=$3
 
-    if grep -Fq -- "$literal" "$file"; then
+    has_exact_line "$content" "$expected" || fail "$description"
+}
+
+forbid_exact_line() {
+    local content=$1
+    local forbidden=$2
+    local description=$3
+
+    if has_exact_line "$content" "$forbidden"; then
         fail "$description"
     fi
 }
@@ -50,102 +133,204 @@ forbid_text_literal() {
     fi
 }
 
-extract_section() {
-    local file=$1
-    local start=$2
-    local end=$3
-
-    awk -v start="$start" -v end="$end" '
-        $0 == start { active = 1 }
-        active && $0 == end { exit }
-        active { print }
-    ' "$file"
-}
-
 driver_cmd='make KERNELDIR=/lib/modules/$(uname -r)/build CFLAGS=-UDPU_LACP'
 bare_driver_cmd='make KERNELDIR=/lib/modules/$(uname -r)/build'
+absolute_bridge_line='  -LDFLAGS "-Wl,--whole-archive $PWD/build/lib/libcosim_bridge.a -Wl,--no-whole-archive -lrt -lpthread" \'
+relative_bridge_line='  -LDFLAGS "-Wl,--whole-archive build/lib/libcosim_bridge.a -Wl,--no-whole-archive -lrt -lpthread" \'
+autostart_line='  +UVM_TESTNAME=pcie_tl_cosim_test +COSIM +COSIM_AUTOSTART \'
+no_autostart_line='  +UVM_TESTNAME=pcie_tl_cosim_test +COSIM \'
 
-for file in "$guest_doc" "$spec"; do
-    require_literal "$file" "$driver_cmd" \
-        "$(basename "$file") must disable the incompatible bundled LACP sources"
-    require_literal "$file" 'bundled LACP' \
-        "$(basename "$file") must explain the bundled LACP compatibility exception"
-    require_literal "$file" 'system bonding' \
-        "$(basename "$file") must explain that the build uses system bonding"
-    if grep -Fxq -- "$bare_driver_cmd" "$file"; then
-        fail "$(basename "$file") still documents the failing bare driver build"
+driver_block_is_valid() {
+    local block=$1
+
+    has_exact_line "$block" "$driver_cmd" &&
+        ! has_exact_line "$block" "$bare_driver_cmd"
+}
+
+task9_compile_block_is_valid() {
+    local block=$1
+
+    has_exact_line "$block" "$absolute_bridge_line" &&
+        ! has_exact_line "$block" "$relative_bridge_line"
+}
+
+task9_run_block_is_valid() {
+    local block=$1
+
+    has_exact_line "$block" 'build/ubuntu-server-vcs/simv_cosim \' &&
+        has_exact_line "$block" "$autostart_line" &&
+        ! has_exact_line "$block" "$no_autostart_line"
+}
+
+require_driver_block() {
+    local label=$1
+    local block=$2
+
+    if ! driver_block_is_valid "$block"; then
+        fail "$label driver fenced block must use CFLAGS=-UDPU_LACP and forbid the bare command"
     fi
-done
+}
 
-plan_task7=$(extract_section \
+expect_mutation_rejected() {
+    local checker=$1
+    local original=$2
+    local expected=$3
+    local replacement=$4
+    local description=$5
+    local mutated=${original/"$expected"/"$replacement"}
+
+    # An already-invalid fixture is reported by its real contract check above;
+    # mutation probes only exercise validators from a valid starting block.
+    if [[ "$mutated" == "$original" ]]; then
+        return 0
+    elif "$checker" "$mutated"; then
+        fail "$description mutation probe was incorrectly accepted"
+    fi
+}
+
+get_section guest_driver_section \
+    "$guest_doc" \
+    '## 在 Ubuntu Server 内编译并手工加载 DPU 驱动' \
+    '## setup、离线导入与 relocated archive' \
+    'the Guest management driver section'
+get_fenced_block guest_driver_block \
+    "$guest_driver_section" '```bash' 'cd host-driver-net' \
+    'the Guest management driver build'
+require_driver_block 'Guest management' "$guest_driver_block"
+require_text_literal "$guest_driver_section" 'bundled LACP' \
+    'the Guest management driver section must explain the bundled LACP exception'
+require_text_literal "$guest_driver_section" 'system bonding' \
+    'the Guest management driver section must explain system bonding'
+
+get_section spec_driver_section \
+    "$spec" \
+    '### Driver build workflows' \
+    '## Setup and offline packaging' \
+    'the design driver workflow section'
+get_fenced_block spec_driver_block \
+    "$spec_driver_section" '```bash' 'cd host-driver-net' \
+    'the design driver build'
+require_driver_block 'Design workflow' "$spec_driver_block"
+require_text_literal "$spec_driver_section" 'bundled LACP' \
+    'the design driver section must explain the bundled LACP exception'
+require_text_literal "$spec_driver_section" 'system bonding' \
+    'the design driver section must explain system bonding'
+
+get_section plan_task7 \
     "$plan" \
     '## Task 7: Document workflows and run the fast suite' \
-    '## Task 8: Build and inspect both real images on 53')
-plan_task9=$(extract_section \
+    '## Task 8: Build and inspect both real images on 53' \
+    'Task 7 in the current Ubuntu Server plan'
+get_fenced_block task7_driver_block \
+    "$plan_task7" '```bash' 'cd host-driver-net' \
+    'the Task 7 documented driver workflow'
+require_driver_block 'Task 7' "$task7_driver_block"
+require_text_literal "$plan_task7" 'bundled LACP' \
+    'Task 7 must explain the bundled LACP exception'
+require_text_literal "$plan_task7" 'system bonding' \
+    'Task 7 must explain system bonding'
+
+get_section plan_task9 \
     "$plan" \
     '## Task 9: Boot validation, native driver build, and VCS BAR read' \
-    '## Task 10: Produce and relocate-test the offline archive')
+    '## Task 10: Produce and relocate-test the offline archive' \
+    'Task 9 in the current Ubuntu Server plan'
+get_fenced_block task9_driver_block \
+    "$plan_task9" '```bash' "modinfo ./dpu_snd1.ko | grep -F 'pci:v000020F9d00005011'" \
+    'the Task 9 native driver build'
+require_driver_block 'Task 9' "$task9_driver_block"
+require_text_literal "$plan_task9" 'bundled LACP' \
+    'Task 9 must explain the bundled LACP exception'
+require_text_literal "$plan_task9" 'system bonding' \
+    'Task 9 must explain system bonding'
 
-for task in "$plan_task7" "$plan_task9"; do
-    require_text_literal "$task" "$driver_cmd" \
-        'the current plan task must use the compatible Ubuntu Server driver build command'
-    require_text_literal "$task" 'bundled LACP' \
-        'the current plan task must explain the bundled LACP compatibility exception'
-    require_text_literal "$task" 'system bonding' \
-        'the current plan task must explain that the build uses system bonding'
-    if grep -Fxq -- "$bare_driver_cmd" <<<"$task"; then
-        fail 'the current plan task still documents the failing bare driver build'
-    fi
-done
+get_fenced_block task9_compile_block \
+    "$plan_task9" '```bash' 'vcs -sverilog' \
+    'the Task 9 VCS compile command'
+if ! task9_compile_block_is_valid "$task9_compile_block"; then
+    fail 'Task 9 VCS compile fenced block must use the absolute bridge archive and forbid the relative path'
+fi
 
-absolute_bridge_arg='-Wl,--whole-archive $PWD/build/lib/libcosim_bridge.a'
-relative_bridge_arg='-Wl,--whole-archive build/lib/libcosim_bridge.a'
-require_literal "$filelist" "$absolute_bridge_arg" \
-    'filelist_cosim.f must pass an absolute bridge archive path to the VCS csrc link'
-forbid_literal "$filelist" "$relative_bridge_arg" \
-    'filelist_cosim.f still passes a csrc-relative bridge archive path'
-require_text_literal "$plan_task9" "$absolute_bridge_arg" \
-    'the Task 9 VCS command must pass an absolute bridge archive path to the csrc link'
-forbid_text_literal "$plan_task9" "$relative_bridge_arg" \
-    'the Task 9 VCS command still passes a csrc-relative bridge archive path'
+get_fenced_block task9_run_block \
+    "$plan_task9" '```bash' '+REMOTE_HOST=127.0.0.1 +PORT_BASE=28100' \
+    'the Task 9 VCS batch run command'
+if ! task9_run_block_is_valid "$task9_run_block"; then
+    fail 'Task 9 VCS run fenced block must execute simv_cosim with +COSIM_AUTOSTART and forbid the staged command'
+fi
 
-require_literal "$filelist" \
+filelist_content=$(<"$filelist")
+require_exact_line "$filelist_content" \
+    '//       -LDFLAGS "-Wl,--whole-archive $PWD/build/lib/libcosim_bridge.a -Wl,--no-whole-archive -lrt -lpthread" \' \
+    'the filelist compile recipe must use the absolute bridge archive'
+forbid_exact_line "$filelist_content" \
+    '//       -LDFLAGS "-Wl,--whole-archive build/lib/libcosim_bridge.a -Wl,--no-whole-archive -lrt -lpthread" \' \
+    'the filelist compile recipe must forbid the relative bridge archive'
+require_exact_line "$filelist_content" \
+    '//       -f pcie_tl_vip/sim/filelist_cosim.f -o pcie_tl_vip/sim/simv_cosim' \
+    'the filelist compile recipe must name the repository-relative simv output'
+require_exact_line "$filelist_content" \
+    '// Batch run: ./pcie_tl_vip/sim/simv_cosim +UVM_TESTNAME=pcie_tl_cosim_test +COSIM +COSIM_AUTOSTART +REMOTE_HOST=<QEMU> +PORT_BASE=9100' \
+    'the filelist batch recipe must execute the simv path produced from the repository root'
+forbid_exact_line "$filelist_content" \
     '// Batch run: ./simv_cosim +UVM_TESTNAME=pcie_tl_cosim_test +COSIM +COSIM_AUTOSTART +REMOTE_HOST=<QEMU> +PORT_BASE=9100' \
-    'the filelist batch run command must opt in to COSIM autostart'
-require_text_literal "$plan_task9" \
-    '  +UVM_TESTNAME=pcie_tl_cosim_test +COSIM +COSIM_AUTOSTART' \
-    'the Task 9 batch run command must opt in to COSIM autostart'
+    'the filelist batch recipe must forbid the nonexistent repository-root simv path'
 
-vcs_section8=$(extract_section \
+get_section vcs_section8 \
     "$vcs_doc" \
     '## 8. DPU_20F9_501X 多 PF 启动' \
-    '## 9. QEMU iCount 时间模式')
+    '## 9. QEMU iCount 时间模式' \
+    'section 8 in the VCS integration guide'
+get_fenced_block vcs_qemu_block \
+    "$vcs_section8" '```bash' 'PCIE_PREF64_RESERVE=256M' \
+    'the section 8 QEMU launch command'
+require_exact_line "$vcs_qemu_block" \
+    'make run-qemu NUM_PFS=4 PCIE_PREF64_RESERVE=256M' \
+    'section 8 must retain the matching four-PF QEMU command'
+get_fenced_block vcs_real_dut_block \
+    "$vcs_section8" '```text' '+CFG_PROFILE=DPU_20F9_501X' \
+    'the section 8 real-DUT plusargs'
+require_exact_line "$vcs_real_dut_block" \
+    '+REAL_DUT +BYPASS_CONFIG=1 +CFG_PROFILE=DPU_20F9_501X +NUM_PFS=4 +MAX_VFS=16' \
+    'section 8 must retain the real-DUT plusarg command'
+
 require_text_literal "$vcs_section8" '批处理运行应加 `+COSIM_AUTOSTART`' \
-    'the VCS guide must describe the batch autostart mode'
+    'section 8 must describe the batch autostart mode'
 require_text_literal "$vcs_section8" \
     '需要先运行 VIP 再切换的分阶段交互模式则省略该 plusarg，并在 UCLI 中执行' \
-    'the VCS guide must retain the staged UCLI mode'
+    'section 8 must retain the staged UCLI mode'
 require_text_literal "$vcs_section8" '`start_cosim`。两种启动方式二选一' \
-    'the VCS guide must name the staged UCLI transition command'
+    'section 8 must name the staged UCLI transition command'
 require_text_literal "$vcs_section8" '`+COSIM_AUTOSTART` 不是全局默认' \
-    'the VCS guide must state that autostart is not a global default'
-
+    'section 8 must state that autostart is not a global default'
 require_text_literal "$vcs_section8" '**TLM stand-in** 测试，不包含用户的 RTL DUT' \
-    'the VCS guide must state that the standalone TLM test has no user RTL DUT'
+    'section 8 must state that the standalone TLM test has no user RTL DUT'
 require_text_literal "$vcs_section8" \
     '仅在命令行加 `+REAL_DUT` 不能把它变成真实 DUT 测试' \
-    'the VCS guide must state that +REAL_DUT cannot create a real RTL DUT'
+    'section 8 must state that +REAL_DUT cannot create a real RTL DUT'
 require_text_literal "$vcs_section8" \
     '当前 completion ownership 已保证每种模式只选择一条消费路径' \
-    'the VCS guide must describe the repaired completion ownership'
+    'section 8 must describe the repaired completion ownership'
 require_text_literal "$vcs_section8" '用户自己的 top' \
-    'the VCS guide must require a user real-DUT top'
+    'section 8 must require a user real-DUT top'
 require_text_literal "$vcs_section8" 'Completion 的唯一来源' \
-    'the VCS guide must require one DUT completion source'
+    'section 8 must require one DUT completion source'
 forbid_text_literal "$vcs_section8" 'Unexpected Completion' \
-    'the VCS guide still claims the repaired direct/monitor path must duplicate completions'
+    'section 8 still claims the repaired direct/monitor path must duplicate completions'
 forbid_text_literal "$vcs_section8" 'no QEMU tag map' \
-    'the VCS guide still claims the repaired ownership path must lose the QEMU tag map'
+    'section 8 still claims the repaired ownership path must lose the QEMU tag map'
+
+expect_mutation_rejected driver_block_is_valid \
+    "$task7_driver_block" "$driver_cmd" "$bare_driver_cmd" \
+    'Task 7 bare-driver command'
+expect_mutation_rejected driver_block_is_valid \
+    "$task9_driver_block" "$driver_cmd" "$bare_driver_cmd" \
+    'Task 9 bare-driver command'
+expect_mutation_rejected task9_compile_block_is_valid \
+    "$task9_compile_block" "$absolute_bridge_line" "$relative_bridge_line" \
+    'Task 9 relative-archive command'
+expect_mutation_rejected task9_run_block_is_valid \
+    "$task9_run_block" "$autostart_line" "$no_autostart_line" \
+    'Task 9 no-autostart command'
 
 if ((failures != 0)); then
     echo "[workflow-command-contracts] $failures contract check(s) failed" >&2

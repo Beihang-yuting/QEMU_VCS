@@ -5,7 +5,7 @@
 //       -LDFLAGS "-Wl,--whole-archive $PWD/build/lib/libcosim_bridge.a -Wl,--no-whole-archive -lrt -lpthread" \
 //       -f pcie_tl_vip/sim/filelist_cosim.f -o pcie_tl_vip/sim/simv_cosim
 // $PWD keeps the archive absolute when VCS performs its final link from csrc/.
-// Batch run: ./simv_cosim +UVM_TESTNAME=pcie_tl_cosim_test +COSIM +COSIM_AUTOSTART +REMOTE_HOST=<QEMU> +PORT_BASE=9100
+// Batch run: ./pcie_tl_vip/sim/simv_cosim +UVM_TESTNAME=pcie_tl_cosim_test +COSIM +COSIM_AUTOSTART +REMOTE_HOST=<QEMU> +PORT_BASE=9100
 // Order: host_mem -> axis_vip -> pcie_tl -> xilinx adapter -> bridge_vcs -> cosim_xrc_pkg -> tests -> tb_top.
 
 +define+PCIE_COSIM_ENABLE
