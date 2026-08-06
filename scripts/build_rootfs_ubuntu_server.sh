@@ -12,6 +12,8 @@ ROOTFS_SIZE="8G"
 ARCHIVE_MIRROR="http://archive.ubuntu.com/ubuntu"
 SECURITY_MIRROR="http://security.ubuntu.com/ubuntu"
 GUEST_USER="ryan"
+unset GUEST_PASSWORD
+GUEST_PASSWORD=''
 
 PACKAGES=(
 ubuntu-minimal
@@ -51,6 +53,8 @@ WORK_DIR=''
 MOUNT_DIR=''
 ROOTFS_IMAGE=''
 PUBLISH_STAGE=''
+PUBLISH_STAGE_ID=''
+NEW_OUTPUT_ID=''
 OUTPUT_BACKUP=''
 PUBLISH_PARENT=''
 PUBLISH_NAME=''
@@ -59,6 +63,10 @@ old_output_moved=false
 new_output_installed=false
 publish_committed=false
 publish_transition=false
+OUTPUT_LOCK_DIR=''
+OUTPUT_LOCK_CANDIDATE=''
+OUTPUT_LOCK_OWNER=''
+output_lock_held=false
 mounted_root=false
 mounted_sys=false
 mounted_proc=false
@@ -170,6 +178,8 @@ remove_publish_temp() {
 }
 
 cleanup_publication() {
+    local current_output_id=''
+
     [[ "${publish_boundary_ready}" == true ]] || return 0
     if [[ "${OUTPUT_DIR}" != "${PUBLISH_PARENT}/${PUBLISH_NAME}" ]]; then
         echo "WARNING: refusing publication cleanup outside its boundary: ${OUTPUT_DIR}" >&2
@@ -188,11 +198,18 @@ cleanup_publication() {
     fi
 
     if [[ "${new_output_installed}" == true ]]; then
-        rm -rf -- "${OUTPUT_DIR}"
+        if [[ -d "${OUTPUT_DIR}" && ! -L "${OUTPUT_DIR}" ]]; then
+            current_output_id="$(stat -c '%d:%i' "${OUTPUT_DIR}" 2>/dev/null || true)"
+        fi
+        if [[ -n "${NEW_OUTPUT_ID}" && "${current_output_id}" == "${NEW_OUTPUT_ID}" ]]; then
+            rm -rf -- "${OUTPUT_DIR}"
+        else
+            echo "WARNING: refusing to remove a replaced uncommitted output: ${OUTPUT_DIR}" >&2
+            cleanup_publish_failed=true
+        fi
         if [[ -e "${OUTPUT_DIR}" || -L "${OUTPUT_DIR}" ]]; then
             echo "WARNING: could not remove uncommitted output: ${OUTPUT_DIR}" >&2
             cleanup_publish_failed=true
-            return 1
         fi
     fi
 
@@ -201,20 +218,16 @@ cleanup_publication() {
                 [[ ! -d "${OUTPUT_BACKUP}" || -L "${OUTPUT_BACKUP}" ]]; then
             echo "WARNING: previous output backup is missing or unsafe: ${OUTPUT_BACKUP}" >&2
             cleanup_publish_failed=true
-            return 1
-        fi
-        if [[ -e "${OUTPUT_DIR}" || -L "${OUTPUT_DIR}" ]]; then
+        elif [[ -e "${OUTPUT_DIR}" || -L "${OUTPUT_DIR}" ]]; then
             echo "WARNING: refusing to overwrite output while restoring backup: ${OUTPUT_DIR}" >&2
             cleanup_publish_failed=true
-            return 1
-        fi
-        if ! mv -- "${OUTPUT_BACKUP}" "${OUTPUT_DIR}"; then
+        elif ! mv -T -- "${OUTPUT_BACKUP}" "${OUTPUT_DIR}"; then
             echo "WARNING: could not restore previous output: ${OUTPUT_BACKUP}" >&2
             cleanup_publish_failed=true
-            return 1
+        else
+            OUTPUT_BACKUP=''
+            old_output_moved=false
         fi
-        OUTPUT_BACKUP=''
-        old_output_moved=false
     elif [[ -n "${OUTPUT_BACKUP}" ]]; then
         remove_publish_temp "${OUTPUT_BACKUP}" old || true
         OUTPUT_BACKUP=''
@@ -244,9 +257,178 @@ finish_publish_transition() {
     return "${command_status}"
 }
 
+output_lock_path_is_safe() {
+    local prefix="${BUILD_TMP}/ubuntu-server-output."
+    local suffix
+
+    [[ -n "${OUTPUT_LOCK_DIR}" && "${OUTPUT_LOCK_DIR}" == "${prefix}"*.lock ]] ||
+        return 1
+    suffix="${OUTPUT_LOCK_DIR#"${prefix}"}"
+    suffix="${suffix%.lock}"
+    [[ "${suffix}" =~ ^[[:xdigit:]]{64}$ ]]
+}
+
+output_lock_candidate_is_safe() {
+    local prefix="${BUILD_TMP}/.ubuntu-server-lock-candidate."
+    local suffix
+
+    [[ -n "${OUTPUT_LOCK_CANDIDATE}" &&
+       "${OUTPUT_LOCK_CANDIDATE}" == "${prefix}"* ]] || return 1
+    suffix="${OUTPUT_LOCK_CANDIDATE#"${prefix}"}"
+    [[ -n "${suffix}" && "${suffix}" != */* ]]
+}
+
+prepare_output_lock_candidate() {
+    local candidate_suffix
+    local prepare_status=0
+
+    begin_publish_transition
+    if OUTPUT_LOCK_CANDIDATE="$(mktemp -d \
+            "${BUILD_TMP}/.ubuntu-server-lock-candidate.XXXXXX")"; then
+        :
+    else
+        prepare_status=$?
+    fi
+    if [[ "${prepare_status}" -eq 0 ]]; then
+        if chmod 0700 "${OUTPUT_LOCK_CANDIDATE}"; then
+            :
+        else
+            prepare_status=$?
+        fi
+    fi
+    if [[ "${prepare_status}" -eq 0 ]] &&
+            ! output_lock_candidate_is_safe; then
+        prepare_status=1
+    fi
+    if [[ "${prepare_status}" -eq 0 ]]; then
+        candidate_suffix="${OUTPUT_LOCK_CANDIDATE##*.}"
+        OUTPUT_LOCK_OWNER="${BASHPID}:${candidate_suffix}"
+        if printf '%s\n' "${OUTPUT_LOCK_OWNER}" \
+                > "${OUTPUT_LOCK_CANDIDATE}/owner"; then
+            :
+        else
+            prepare_status=$?
+        fi
+        if [[ "${prepare_status}" -eq 0 ]]; then
+            if chmod 0600 "${OUTPUT_LOCK_CANDIDATE}/owner"; then
+                :
+            else
+                prepare_status=$?
+            fi
+        fi
+    fi
+    finish_publish_transition "${prepare_status}" || return $?
+}
+
+claim_output_lock_once() {
+    local move_status
+    local current_owner=''
+
+    begin_publish_transition
+    if mv -T -- "${OUTPUT_LOCK_CANDIDATE}" "${OUTPUT_LOCK_DIR}" 2>/dev/null; then
+        move_status=0
+    else
+        move_status=$?
+    fi
+    if [[ -f "${OUTPUT_LOCK_DIR}/owner" && ! -L "${OUTPUT_LOCK_DIR}/owner" ]]; then
+        current_owner="$(<"${OUTPUT_LOCK_DIR}/owner")"
+    fi
+    if [[ -n "${OUTPUT_LOCK_OWNER}" && "${current_owner}" == "${OUTPUT_LOCK_OWNER}" ]]; then
+        output_lock_held=true
+        OUTPUT_LOCK_CANDIDATE=''
+    fi
+    finish_publish_transition 0
+
+    [[ "${output_lock_held}" == true ]] || return "${move_status:-1}"
+}
+
+acquire_output_lock() {
+    local lock_key
+    local owner_pid=''
+    local owner_record=''
+
+    [[ -d "${BUILD_TMP}" && ! -L "${BUILD_TMP}" ]] ||
+        fail "invalid output lock parent: ${BUILD_TMP}"
+    [[ "$(cd "${BUILD_TMP}" && pwd -P)" == "${BUILD_TMP}" ]] ||
+        fail "output lock parent escaped build/tmp: ${BUILD_TMP}"
+
+    lock_key="$(printf '%s' "${OUTPUT_DIR}" | sha256sum)"
+    lock_key="${lock_key%% *}"
+    OUTPUT_LOCK_DIR="${BUILD_TMP}/ubuntu-server-output.${lock_key}.lock"
+    output_lock_path_is_safe || fail "unsafe output lock path: ${OUTPUT_LOCK_DIR}"
+    prepare_output_lock_candidate
+
+    if ! claim_output_lock_once; then
+        [[ -d "${OUTPUT_LOCK_DIR}" && ! -L "${OUTPUT_LOCK_DIR}" ]] ||
+            fail "output lock is not a real directory: ${OUTPUT_LOCK_DIR}"
+        [[ "$(cd "${OUTPUT_LOCK_DIR}" && pwd -P)" == "${OUTPUT_LOCK_DIR}" ]] ||
+            fail "output lock escaped build/tmp: ${OUTPUT_LOCK_DIR}"
+        if [[ -e "${OUTPUT_LOCK_DIR}/owner" || -L "${OUTPUT_LOCK_DIR}/owner" ]]; then
+            [[ -f "${OUTPUT_LOCK_DIR}/owner" && ! -L "${OUTPUT_LOCK_DIR}/owner" ]] ||
+                fail "unsafe output lock owner file: ${OUTPUT_LOCK_DIR}/owner"
+            owner_record="$(<"${OUTPUT_LOCK_DIR}/owner")"
+            [[ "${owner_record}" =~ ^[1-9][0-9]*:[[:alnum:]]+$ ]] ||
+                fail "invalid output lock owner: ${OUTPUT_LOCK_DIR}/owner"
+            owner_pid="${owner_record%%:*}"
+            if kill -0 "${owner_pid}" 2>/dev/null; then
+                fail "output is locked by active process ${owner_pid}: ${OUTPUT_DIR}"
+            fi
+            rm -f -- "${OUTPUT_LOCK_DIR}/owner"
+        fi
+        rmdir -- "${OUTPUT_LOCK_DIR}" ||
+            fail "stale output lock contains unexpected state: ${OUTPUT_LOCK_DIR}"
+        claim_output_lock_once ||
+            fail "could not acquire output lock after stale-lock cleanup: ${OUTPUT_DIR}"
+    fi
+}
+
+release_output_lock() {
+    if [[ -n "${OUTPUT_LOCK_CANDIDATE}" ]]; then
+        if ! output_lock_candidate_is_safe; then
+            echo "WARNING: refusing unexpected output lock candidate: ${OUTPUT_LOCK_CANDIDATE}" >&2
+            cleanup_publish_failed=true
+        elif [[ -d "${OUTPUT_LOCK_CANDIDATE}" && ! -L "${OUTPUT_LOCK_CANDIDATE}" ]]; then
+            rm -f -- "${OUTPUT_LOCK_CANDIDATE}/owner"
+            if ! rmdir -- "${OUTPUT_LOCK_CANDIDATE}"; then
+                echo "WARNING: could not remove output lock candidate: ${OUTPUT_LOCK_CANDIDATE}" >&2
+                cleanup_publish_failed=true
+            fi
+        fi
+        OUTPUT_LOCK_CANDIDATE=''
+    fi
+
+    [[ "${output_lock_held}" == true ]] || return 0
+    if ! output_lock_path_is_safe; then
+        echo "WARNING: refusing to release unexpected output lock: ${OUTPUT_LOCK_DIR}" >&2
+        cleanup_publish_failed=true
+        return 1
+    fi
+    if [[ -e "${OUTPUT_LOCK_DIR}/owner" || -L "${OUTPUT_LOCK_DIR}/owner" ]]; then
+        if [[ ! -f "${OUTPUT_LOCK_DIR}/owner" || -L "${OUTPUT_LOCK_DIR}/owner" ]]; then
+            echo "WARNING: refusing unsafe output lock owner file: ${OUTPUT_LOCK_DIR}/owner" >&2
+            cleanup_publish_failed=true
+            return 1
+        fi
+        if [[ "$(<"${OUTPUT_LOCK_DIR}/owner")" != "${OUTPUT_LOCK_OWNER}" ]]; then
+            echo "WARNING: refusing to release an output lock owned by another process" >&2
+            cleanup_publish_failed=true
+            return 1
+        fi
+        rm -f -- "${OUTPUT_LOCK_DIR}/owner"
+    fi
+    if ! rmdir -- "${OUTPUT_LOCK_DIR}"; then
+        echo "WARNING: could not release output lock: ${OUTPUT_LOCK_DIR}" >&2
+        cleanup_publish_failed=true
+        return 1
+    fi
+    output_lock_held=false
+    OUTPUT_LOCK_DIR=''
+}
+
 cleanup() {
     local status=$?
-    trap - EXIT INT TERM
+    trap - EXIT
+    trap '' INT TERM
     set +e
 
     if [[ "${mounted_root}" == true && -n "${MOUNT_DIR}" ]]; then
@@ -259,6 +441,7 @@ cleanup() {
 
     cleanup_publish_failed=false
     cleanup_publication || true
+    release_output_lock || true
 
     if [[ -n "${WORK_DIR}" ]]; then
         if [[ "${mounted_root}" == false && "${mounted_sys}" == false &&
@@ -300,12 +483,44 @@ handle_term() {
     handle_signal 143
 }
 
+capture_guest_password() {
+    local password_was_set=false
+
+    if [[ -v COSIM_GUEST_SSH_PASSWORD ]]; then
+        GUEST_PASSWORD="${COSIM_GUEST_SSH_PASSWORD}"
+        password_was_set=true
+    fi
+    unset COSIM_GUEST_SSH_PASSWORD
+
+    [[ "${password_was_set}" == true && -n "${GUEST_PASSWORD}" ]] ||
+        fail 'COSIM_GUEST_SSH_PASSWORD must be set to a non-empty value'
+    if [[ "${GUEST_PASSWORD}" == *$'\r'* || "${GUEST_PASSWORD}" == *$'\n'* ]]; then
+        fail 'COSIM_GUEST_SSH_PASSWORD must not contain CR or LF'
+    fi
+}
+
+install_guest_password() {
+    local guest_root="$1"
+    local password_status
+
+    if printf '%s:%s\n' "${GUEST_USER}" "${GUEST_PASSWORD}" |
+            chroot "${guest_root}" chpasswd; then
+        password_status=0
+    else
+        password_status=$?
+    fi
+    GUEST_PASSWORD=''
+    return "${password_status}"
+}
+
 publish_results() {
     local publish_parent
     local publish_name
     local move_status
     local output_uid
     local output_gid
+    local published_artifact
+    local current_output_id=''
 
     publish_parent="${OUTPUT_DIR%/*}"
     publish_name="${OUTPUT_DIR##*/}"
@@ -319,6 +534,7 @@ publish_results() {
     PUBLISH_NAME="${publish_name}"
     OUTPUT_DIR="${PUBLISH_PARENT}/${PUBLISH_NAME}"
     publish_boundary_ready=true
+    acquire_output_lock
     if [[ -e "${OUTPUT_DIR}" || -L "${OUTPUT_DIR}" ]]; then
         [[ -d "${OUTPUT_DIR}" && ! -L "${OUTPUT_DIR}" ]] ||
             fail "output path is not a real directory: ${OUTPUT_DIR}"
@@ -329,6 +545,7 @@ publish_results() {
     cp --sparse=always -- "${ROOTFS_IMAGE}" "${PUBLISH_STAGE}/rootfs.ext4"
     cp -- "${KERNEL_IMAGE}" "${PUBLISH_STAGE}/vmlinuz"
     cp -- "${KERNEL_MODULES}" "${PUBLISH_STAGE}/modules.tar.gz"
+    PUBLISH_STAGE_ID="$(stat -c '%d:%i' "${PUBLISH_STAGE}")"
 
     if [[ -n "${SUDO_USER:-}" && "${SUDO_USER}" =~ ^[a-z_][a-z0-9_-]{0,30}$ ]] &&
             id -u "${SUDO_USER}" >/dev/null 2>&1; then
@@ -347,7 +564,7 @@ publish_results() {
         rmdir -- "${OUTPUT_BACKUP}"
 
         begin_publish_transition
-        if mv -- "${OUTPUT_DIR}" "${OUTPUT_BACKUP}"; then
+        if mv -T -- "${OUTPUT_DIR}" "${OUTPUT_BACKUP}"; then
             move_status=0
         else
             move_status=$?
@@ -361,18 +578,36 @@ publish_results() {
     fi
 
     begin_publish_transition
-    if mv -- "${PUBLISH_STAGE}" "${OUTPUT_DIR}"; then
+    if mv -T -- "${PUBLISH_STAGE}" "${OUTPUT_DIR}"; then
         move_status=0
     else
         move_status=$?
     fi
-    if [[ "${move_status}" -eq 0 ]] ||
+    if [[ -d "${OUTPUT_DIR}" && ! -L "${OUTPUT_DIR}" ]]; then
+        current_output_id="$(stat -c '%d:%i' "${OUTPUT_DIR}" 2>/dev/null || true)"
+    fi
+    if { [[ "${move_status}" -eq 0 ]] ||
             { [[ -d "${OUTPUT_DIR}" && ! -L "${OUTPUT_DIR}" ]] &&
-              [[ ! -e "${PUBLISH_STAGE}" && ! -L "${PUBLISH_STAGE}" ]]; }; then
+              [[ ! -e "${PUBLISH_STAGE}" && ! -L "${PUBLISH_STAGE}" ]]; }; } &&
+            [[ -n "${PUBLISH_STAGE_ID}" &&
+               "${current_output_id}" == "${PUBLISH_STAGE_ID}" ]]; then
         new_output_installed=true
+        NEW_OUTPUT_ID="${current_output_id}"
         PUBLISH_STAGE=''
+    elif [[ "${move_status}" -eq 0 ]]; then
+        echo "WARNING: published output identity changed during rename" >&2
+        move_status=1
     fi
     finish_publish_transition "${move_status}" || return $?
+
+    for published_artifact in rootfs.ext4 vmlinuz modules.tar.gz; do
+        [[ -f "${OUTPUT_DIR}/${published_artifact}" &&
+           ! -L "${OUTPUT_DIR}/${published_artifact}" ]] ||
+            fail "published output is missing a top-level artifact: ${published_artifact}"
+    done
+    current_output_id="$(stat -c '%d:%i' "${OUTPUT_DIR}")"
+    [[ -n "${NEW_OUTPUT_ID}" && "${current_output_id}" == "${NEW_OUTPUT_ID}" ]] ||
+        fail 'published output identity changed before commit'
 
     # This assignment is the commit point.  Signals after it retain the new
     # complete output; all earlier exits are rolled back by cleanup.
@@ -450,10 +685,12 @@ EOF
 }
 
 if [[ "${DRY_RUN}" == true ]]; then
+    unset COSIM_GUEST_SSH_PASSWORD
     print_plan
     exit 0
 fi
 
+capture_guest_password
 [[ "${EUID}" -eq 0 ]] || fail 'real Ubuntu Server image builds require root'
 [[ "${OUTPUT_DIR}" != / ]] || fail 'refusing to replace the filesystem root'
 output_leaf="${OUTPUT_DIR##*/}"
@@ -467,7 +704,7 @@ fi
 for required_command in \
     debootstrap truncate mkfs.ext4 mount umount chroot tar e2fsck depmod \
     install cp find mkdir mktemp chmod stat mv rm rmdir ln dirname id chown cat \
-    mountpoint; do
+    mountpoint sha256sum; do
     command -v "${required_command}" >/dev/null 2>&1 ||
         fail "missing required command: ${required_command}"
 done
@@ -631,10 +868,7 @@ APTCONF
 if ! chroot "${MOUNT_DIR}" id -u "${GUEST_USER}" >/dev/null 2>&1; then
     chroot "${MOUNT_DIR}" useradd --create-home --shell /bin/bash "${GUEST_USER}"
 fi
-GUEST_PASSWORD="${COSIM_GUEST_SSH_PASSWORD:-123}"
-printf '%s:%s\n' "${GUEST_USER}" "${GUEST_PASSWORD}" |
-    chroot "${MOUNT_DIR}" chpasswd
-unset GUEST_PASSWORD
+install_guest_password "${MOUNT_DIR}"
 chroot "${MOUNT_DIR}" usermod --append --groups sudo "${GUEST_USER}"
 chroot "${MOUNT_DIR}" ssh-keygen -A
 install -d -m 0755 "${MOUNT_DIR}/run/sshd"

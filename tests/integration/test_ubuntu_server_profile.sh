@@ -55,18 +55,6 @@ snapshot_tree() {
     )
 }
 
-snapshot_optional_tree() {
-    local root="$1"
-    if [ -d "$root" ]; then
-        printf 'present\n'
-        snapshot_tree "$root"
-    elif [ -e "$root" ] || [ -L "$root" ]; then
-        printf 'other\t%s\n' "$(stat -c '%F' -- "$root")"
-    else
-        printf 'absent\n'
-    fi
-}
-
 # Public selectors and Make defaults.
 help="$(bash "$repo/setup.sh" --help)" || fail 'setup --help failed'
 assert_contains 'ubuntu-server' "$help" 'setup help omits ubuntu-server'
@@ -117,6 +105,12 @@ builder="$repo/scripts/build_rootfs_ubuntu_server.sh"
 if [ ! -x "$builder" ]; then
     fail 'Ubuntu Server rootfs builder is missing or not executable'
 else
+    dry_project="$work/dry-project"
+    dry_builder="$dry_project/scripts/build_rootfs_ubuntu_server.sh"
+    mkdir -p "$dry_project/scripts"
+    cp "$builder" "$dry_builder"
+    chmod +x "$dry_builder"
+
     builder_fakebin="$work/builder-fakebin"
     mkdir -p "$builder_fakebin"
     printf '#!/usr/bin/env bash\n: > "$BLOCKED_SENTINEL"\nexit 97\n' \
@@ -128,13 +122,15 @@ else
         ln -s blocked "$builder_fakebin/$command_name"
     done
 
-    snapshot_optional_tree "$repo/build/tmp" > "$work/builder-tree-before"
-    builder_output_dir="$work/images/ubuntu-server"
+    if ! snapshot_tree "$dry_project" > "$work/builder-tree-before"; then
+        fail 'could not snapshot the isolated builder project before dry-run'
+    fi
+    builder_output_dir="$dry_project/guest/images/ubuntu-server"
     blocked_sentinel="$work/builder-blocked-command"
     if ! builder_output="$(COSIM_GUEST_SSH_PASSWORD=not-printed \
             BLOCKED_SENTINEL="$blocked_sentinel" \
             PATH="$builder_fakebin:$PATH" \
-            "$builder" --dry-run "$builder_output_dir" 2>&1)"; then
+            "$dry_builder" --dry-run "$builder_output_dir" 2>&1)"; then
         fail "Ubuntu Server builder dry-run failed: $builder_output"
     fi
 
@@ -168,14 +164,20 @@ else
         fail 'Ubuntu Server builder dry-run created its output directory'
     [ ! -e "$blocked_sentinel" ] || \
         fail 'Ubuntu Server builder dry-run invoked a blocked privileged/network command'
-    snapshot_optional_tree "$repo/build/tmp" > "$work/builder-tree-after"
-    assert_same "$work/builder-tree-before" "$work/builder-tree-after" \
-        'Ubuntu Server builder dry-run changed repo build/tmp'
-
+    if ! dry_without_password="$(
+            unset COSIM_GUEST_SSH_PASSWORD
+            BLOCKED_SENTINEL="$work/builder-blocked-no-password" \
+                PATH="$builder_fakebin:$PATH" \
+                "$dry_builder" --dry-run "$builder_output_dir" 2>&1
+        )"; then
+        fail "Ubuntu Server dry-run required a Guest password: $dry_without_password"
+    fi
+    [ ! -e "$work/builder-blocked-no-password" ] ||
+        fail 'passwordless dry-run invoked a blocked privileged/network command'
     if COSIM_GUEST_SSH_PASSWORD=not-printed \
             BLOCKED_SENTINEL="$work/builder-blocked-unknown" \
             PATH="$builder_fakebin:$PATH" \
-            "$builder" --unknown >/dev/null 2>&1; then
+            "$dry_builder" --unknown >/dev/null 2>&1; then
         fail 'Ubuntu Server builder accepted an unknown option'
     fi
     [ ! -e "$work/builder-blocked-unknown" ] || \
@@ -183,11 +185,16 @@ else
     if COSIM_GUEST_SSH_PASSWORD=not-printed \
             BLOCKED_SENTINEL="$work/builder-blocked-extra" \
             PATH="$builder_fakebin:$PATH" \
-            "$builder" --dry-run "$builder_output_dir" extra >/dev/null 2>&1; then
+            "$dry_builder" --dry-run "$builder_output_dir" extra >/dev/null 2>&1; then
         fail 'Ubuntu Server builder accepted an extra positional argument'
     fi
     [ ! -e "$work/builder-blocked-extra" ] || \
         fail 'builder extra-argument validation invoked a blocked command'
+    if ! snapshot_tree "$dry_project" > "$work/builder-tree-after"; then
+        fail 'could not snapshot the isolated builder project after dry-run'
+    fi
+    assert_same "$work/builder-tree-before" "$work/builder-tree-after" \
+        'Ubuntu Server builder dry-run changed the isolated project tree'
 
     builder_source="$(<"$builder")"
     assert_contains 'set -euo pipefail' "$builder_source" \
@@ -230,6 +237,17 @@ else
         'builder has no independent INT trap'
     assert_contains 'trap handle_term TERM' "$builder_source" \
         'builder has no independent TERM trap'
+    expected_cleanup_traps=$'trap - EXIT\n    trap \'\' INT TERM'
+    assert_contains "$expected_cleanup_traps" "$builder_source" \
+        'builder cleanup does not ignore secondary INT/TERM signals'
+    assert_contains 'capture_guest_password' "$builder_source" \
+        'builder does not capture the Guest password before child processes'
+    assert_contains 'unset COSIM_GUEST_SSH_PASSWORD' "$builder_source" \
+        'builder does not remove the Guest password from the inherited environment'
+    assert_contains 'mv -T --' "$builder_source" \
+        'builder publication does not use no-target-directory renames'
+    assert_contains '${BUILD_TMP}/ubuntu-server-output.' "$builder_source" \
+        'builder output lock is not rooted in repo build/tmp'
     assert_contains 'tracked_mount mounted_root "${MOUNT_DIR}" mount -o loop,nosuid,nodev' \
         "$builder_source" 'root mount is not signal-safe and tracked'
     assert_contains 'tracked_mount mounted_sys "${MOUNT_DIR}/sys" mount -t sysfs' \
@@ -270,12 +288,90 @@ else
         { print }
         END { if (!found) exit 1 }
     ' "$builder" > "$builder_library"; then
+        password_case="$work/password-case"
+        password_fakebin="$password_case/fakebin"
+        mkdir -p "$password_fakebin"
+        cat > "$password_fakebin/password-env-probe" <<'PASSWORD_ENV_PROBE'
+#!/usr/bin/env bash
+if [[ -v COSIM_GUEST_SSH_PASSWORD || -v GUEST_PASSWORD ]]; then
+    : > "$PASSWORD_ENV_LEAK"
+fi
+PASSWORD_ENV_PROBE
+        cat > "$password_fakebin/chroot" <<'PASSWORD_CHROOT'
+#!/usr/bin/env bash
+printf '%s\n' "$@" > "$CHPASSWD_ARGS"
+if [[ -v COSIM_GUEST_SSH_PASSWORD || -v GUEST_PASSWORD ]]; then
+    : > "$PASSWORD_ENV_LEAK"
+fi
+cat > "$CHPASSWD_INPUT"
+PASSWORD_CHROOT
+        chmod +x "$password_fakebin/password-env-probe" \
+            "$password_fakebin/chroot"
+
+        if grep -Fq 'capture_guest_password() {' "$builder_library" &&
+                grep -Fq 'install_guest_password() {' "$builder_library"; then
+            password_status=0
+            (
+                export COSIM_GUEST_SSH_PASSWORD='safe password:42'
+                export GUEST_PASSWORD='attacker-exported-value'
+                export PASSWORD_ENV_LEAK="$password_case/environment-leak"
+                export CHPASSWD_ARGS="$password_case/chpasswd-args"
+                export CHPASSWD_INPUT="$password_case/chpasswd-input"
+                PATH="$password_fakebin:$PATH"
+                # shellcheck source=/dev/null
+                source "$builder_library"
+                capture_guest_password
+                [[ ! -v COSIM_GUEST_SSH_PASSWORD ]]
+                password-env-probe
+                install_guest_password /guest-root
+            ) || password_status=$?
+            [ "$password_status" -eq 0 ] ||
+                fail "valid Guest password handling failed with status $password_status"
+            [ ! -e "$password_case/environment-leak" ] ||
+                fail 'Guest password variable leaked into a child process'
+            printf '%s\n' '/guest-root' 'chpasswd' > "$password_case/expected-args"
+            assert_same "$password_case/expected-args" "$password_case/chpasswd-args" \
+                'Guest password helper invoked the wrong chroot command'
+            printf '%s\n' 'ryan:safe password:42' > "$password_case/expected-input"
+            assert_same "$password_case/expected-input" "$password_case/chpasswd-input" \
+                'chpasswd did not receive exactly one controlled user/password record'
+
+            bad_passwords=($'bad\rroot:injected' $'bad\nroot:injected' '')
+            for bad_password in "${bad_passwords[@]}"; do
+                bad_password_status=0
+                (
+                    export COSIM_GUEST_SSH_PASSWORD="$bad_password"
+                    # shellcheck source=/dev/null
+                    source "$builder_library"
+                    capture_guest_password
+                ) > "$password_case/rejected-output" 2>&1 ||
+                    bad_password_status=$?
+                [ "$bad_password_status" -ne 0 ] ||
+                    fail 'builder accepted an empty or CR/LF Guest password'
+            done
+            missing_password_status=0
+            (
+                unset COSIM_GUEST_SSH_PASSWORD
+                # shellcheck source=/dev/null
+                source "$builder_library"
+                capture_guest_password
+            ) > "$password_case/missing-output" 2>&1 ||
+                missing_password_status=$?
+            [ "$missing_password_status" -ne 0 ] ||
+                fail 'builder accepted a missing Guest password'
+        else
+            fail 'builder has no sourceable secure Guest password helpers'
+        fi
+
         signal_fakebin="$work/signal-fakebin"
-        signal_root="$work/signal-root"
+        signal_build_tmp="$work/signal-build/tmp"
+        signal_work_dir="$signal_build_tmp/ubuntu-server.signal-test"
+        signal_root="$signal_work_dir/root"
         mkdir -p "$signal_fakebin" \
             "$signal_root/sys" "$signal_root/proc" \
             "$signal_root/dev/pts"
         printf '0\n' > "$work/mount-count"
+        printf '0\n' > "$work/umount-count"
         : > "$work/mounted-targets"
         : > "$work/unmount-log"
         cat > "$signal_fakebin/mount" <<'FAKE_MOUNT'
@@ -299,6 +395,11 @@ FAKE_MOUNTPOINT
         cat > "$signal_fakebin/umount" <<'FAKE_UMOUNT'
 #!/usr/bin/env bash
 printf '%s\n' "$1" >> "$UNMOUNT_LOG"
+count=$(( $(<"$UMOUNT_COUNT") + 1 ))
+printf '%s\n' "$count" > "$UMOUNT_COUNT"
+if [ "$count" -eq 1 ]; then
+    kill -TERM "$PPID"
+fi
 exit 0
 FAKE_UMOUNT
         chmod +x "$signal_fakebin/mount" \
@@ -307,11 +408,14 @@ FAKE_UMOUNT
         signal_status=0
         (
             export MOUNT_COUNT="$work/mount-count"
+            export UMOUNT_COUNT="$work/umount-count"
             export MOUNTED_TARGETS="$work/mounted-targets"
             export UNMOUNT_LOG="$work/unmount-log"
             PATH="$signal_fakebin:$PATH"
             # shellcheck source=/dev/null
             source "$builder_library"
+            BUILD_TMP="$signal_build_tmp"
+            WORK_DIR="$signal_work_dir"
             MOUNT_DIR="$signal_root"
             trap cleanup EXIT
             trap handle_int INT
@@ -333,6 +437,8 @@ $signal_root
 EOF
         assert_same "$work/expected-unmount-log" "$work/unmount-log" \
             'TERM mount cleanup did not unmount every tracked target in reverse order'
+        [ ! -e "$signal_work_dir" ] ||
+            fail 'secondary TERM interrupted temporary work cleanup'
 
         # Reproduce the publication return-point window: the second mv has
         # installed the new output, then signals the parent before the next
@@ -343,7 +449,9 @@ EOF
             publish_output="$publish_parent/ubuntu-server"
             publish_inputs="$publish_case/inputs"
             publish_fakebin="$publish_case/fakebin"
-            mkdir -p "$publish_output" "$publish_inputs" "$publish_fakebin"
+            publish_build_tmp="$publish_case/build/tmp"
+            mkdir -p "$publish_output" "$publish_inputs" \
+                "$publish_fakebin" "$publish_build_tmp"
             printf 'old-output\n' > "$publish_output/old-sentinel"
             printf 'new-rootfs\n' > "$publish_inputs/rootfs.ext4"
             printf 'new-kernel\n' > "$publish_inputs/vmlinuz"
@@ -352,6 +460,13 @@ EOF
             real_mv="$(command -v mv)"
             cat > "$publish_fakebin/mv" <<'FAKE_MV'
 #!/usr/bin/env bash
+tracked=false
+for argument in "$@"; do
+    if [ "$argument" = "$PUBLISH_OUTPUT" ]; then tracked=true; fi
+done
+if [ "$tracked" != true ]; then
+    exec "$REAL_MV" "$@"
+fi
 count=$(( $(<"$MV_COUNT") + 1 ))
 printf '%s\n' "$count" > "$MV_COUNT"
 "$REAL_MV" "$@"
@@ -367,9 +482,11 @@ FAKE_MV
             (
                 export MV_COUNT="$publish_case/mv-count"
                 export REAL_MV="$real_mv"
+                export PUBLISH_OUTPUT="$publish_output"
                 PATH="$publish_fakebin:$PATH"
                 # shellcheck source=/dev/null
                 source "$builder_library"
+                BUILD_TMP="$publish_build_tmp"
                 OUTPUT_DIR="$publish_output"
                 ROOTFS_IMAGE="$publish_inputs/rootfs.ext4"
                 KERNEL_IMAGE="$publish_inputs/vmlinuz"
@@ -394,6 +511,86 @@ FAKE_MV
                 -print -quit)"
             [ -z "$publish_leftover" ] ||
                 fail "publication TERM left transaction state behind: $publish_leftover"
+            publish_lock_leftover="$(find "$publish_build_tmp" -mindepth 1 -maxdepth 1 \
+                -name 'ubuntu-server-output.*.lock' -print -quit)"
+            [ -z "$publish_lock_leftover" ] ||
+                fail "publication TERM left its output lock behind: $publish_lock_leftover"
+
+            # A non-cooperating writer creates OUTPUT_DIR just before the new
+            # stage rename.  Publication must fail without nesting the stage,
+            # deleting that directory, or discarding the displaced old output.
+            concurrent_case="$work/publish-concurrent-case"
+            concurrent_parent="$concurrent_case/images"
+            concurrent_output="$concurrent_parent/ubuntu-server"
+            concurrent_inputs="$concurrent_case/inputs"
+            concurrent_fakebin="$concurrent_case/fakebin"
+            concurrent_build_tmp="$concurrent_case/build/tmp"
+            mkdir -p "$concurrent_output" "$concurrent_inputs" \
+                "$concurrent_fakebin" "$concurrent_build_tmp"
+            printf 'old-output\n' > "$concurrent_output/old-sentinel"
+            printf 'new-rootfs\n' > "$concurrent_inputs/rootfs.ext4"
+            printf 'new-kernel\n' > "$concurrent_inputs/vmlinuz"
+            printf 'new-modules\n' > "$concurrent_inputs/modules.tar.gz"
+            printf '0\n' > "$concurrent_case/mv-count"
+            cat > "$concurrent_fakebin/mv" <<'CONCURRENT_MV'
+#!/usr/bin/env bash
+tracked=false
+for argument in "$@"; do
+    if [ "$argument" = "$PUBLISH_OUTPUT" ]; then tracked=true; fi
+done
+if [ "$tracked" != true ]; then
+    exec "$REAL_MV" "$@"
+fi
+count=$(( $(<"$MV_COUNT") + 1 ))
+printf '%s\n' "$count" > "$MV_COUNT"
+if [ "$count" -eq 2 ]; then
+    mkdir -p "$CONCURRENT_OUTPUT"
+    printf 'third-party\n' > "$CONCURRENT_OUTPUT/third-party-sentinel"
+fi
+"$REAL_MV" "$@"
+CONCURRENT_MV
+            chmod +x "$concurrent_fakebin/mv"
+
+            concurrent_status=0
+            (
+                export MV_COUNT="$concurrent_case/mv-count"
+                export REAL_MV="$real_mv"
+                export CONCURRENT_OUTPUT="$concurrent_output"
+                export PUBLISH_OUTPUT="$concurrent_output"
+                PATH="$concurrent_fakebin:$PATH"
+                # shellcheck source=/dev/null
+                source "$builder_library"
+                BUILD_TMP="$concurrent_build_tmp"
+                OUTPUT_DIR="$concurrent_output"
+                ROOTFS_IMAGE="$concurrent_inputs/rootfs.ext4"
+                KERNEL_IMAGE="$concurrent_inputs/vmlinuz"
+                KERNEL_MODULES="$concurrent_inputs/modules.tar.gz"
+                trap cleanup EXIT
+                trap handle_int INT
+                trap handle_term TERM
+                publish_results
+            ) > "$concurrent_case/publish-output" 2>&1 || concurrent_status=$?
+            [ "$concurrent_status" -ne 0 ] ||
+                fail 'publication reported success after a concurrent target appeared'
+            grep -Fxq 'third-party' "$concurrent_output/third-party-sentinel" ||
+                fail 'publication deleted or changed the concurrent target directory'
+            nested_stage="$(find "$concurrent_output" -mindepth 1 \
+                -name '.ubuntu-server.new.*' -print -quit)"
+            [ -z "$nested_stage" ] ||
+                fail "publication nested its stage inside the concurrent target: $nested_stage"
+            concurrent_new_leftover="$(find "$concurrent_parent" -mindepth 1 -maxdepth 1 \
+                -name '.ubuntu-server.new.*' -print -quit)"
+            [ -z "$concurrent_new_leftover" ] ||
+                fail "publication left its new stage behind: $concurrent_new_leftover"
+            recovery_dir="$(find "$concurrent_parent" -mindepth 1 -maxdepth 1 \
+                -type d -name '.ubuntu-server.old.*' -print -quit)"
+            [ -n "$recovery_dir" ] && [ -f "$recovery_dir/old-sentinel" ] ||
+                fail 'publication did not preserve the displaced old output for recovery'
+            concurrent_lock_leftover="$(find "$concurrent_build_tmp" \
+                -mindepth 1 -maxdepth 1 -name 'ubuntu-server-output.*.lock' \
+                -print -quit)"
+            [ -z "$concurrent_lock_leftover" ] ||
+                fail "failed publication left its output lock behind: $concurrent_lock_leftover"
         else
             fail 'builder has no sourceable transactional publish_results function'
         fi
