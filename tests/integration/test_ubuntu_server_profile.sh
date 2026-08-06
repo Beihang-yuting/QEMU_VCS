@@ -383,12 +383,25 @@ PASSWORD_CHROOT
         real_mv="$(command -v mv)"
         cat > "$lock_claim_fakebin/mv" <<'LOCK_CLAIM_MV'
 #!/usr/bin/env bash
+if [ "$CLAIM_MUTATION" = replaced-directory ]; then
+    lock_mv_count=$(( $(<"$LOCK_MV_COUNT") + 1 ))
+    printf '%s\n' "$lock_mv_count" > "$LOCK_MV_COUNT"
+    if [ "$lock_mv_count" -gt 1 ]; then
+        : > "$STALE_CLEANUP_ATTEMPT"
+    fi
+fi
 "$REAL_MV" "$@" || exit $?
 lock_target=''
 for lock_target in "$@"; do :; done
 case "$CLAIM_MUTATION" in
     missing) rm -f -- "$lock_target/owner" ;;
     replaced) printf '%s\n' '999999999:third-party' > "$lock_target/owner" ;;
+    replaced-directory)
+        "$REAL_MV" -T -- "$lock_target" "$DISPLACED_LOCK"
+        mkdir "$lock_target"
+        printf '%s\n' '999999999:replacement' > "$lock_target/owner"
+        stat -c '%d:%i' "$lock_target" > "$REPLACEMENT_ID"
+        ;;
 esac
 LOCK_CLAIM_MV
         chmod +x "$lock_claim_fakebin/mv"
@@ -461,6 +474,50 @@ LOCK_CLAIM_MV
         [ -n "$acquire_lock" ] &&
                 grep -Fxq '999999999:third-party' "$acquire_lock/owner" ||
             fail 'failed acquire removed or changed a replacement lock owner'
+
+        directory_case="$lock_claim_case/acquire-directory-replaced"
+        directory_build_tmp="$directory_case/build/tmp"
+        directory_displaced="$directory_case/displaced-claim.lock"
+        directory_replacement_id="$directory_case/replacement-id"
+        directory_mv_count="$directory_case/mv-count"
+        directory_stale_attempt="$directory_case/stale-cleanup-attempt"
+        mkdir -p "$directory_build_tmp"
+        printf '0\n' > "$directory_mv_count"
+        directory_status=0
+        (
+            export REAL_MV="$real_mv"
+            export CLAIM_MUTATION=replaced-directory
+            export DISPLACED_LOCK="$directory_displaced"
+            export REPLACEMENT_ID="$directory_replacement_id"
+            export LOCK_MV_COUNT="$directory_mv_count"
+            export STALE_CLEANUP_ATTEMPT="$directory_stale_attempt"
+            PATH="$lock_claim_fakebin:$PATH"
+            # shellcheck source=/dev/null
+            source "$builder_library"
+            BUILD_TMP="$directory_build_tmp"
+            OUTPUT_DIR="$directory_case/output"
+            acquire_output_lock
+            : > "$directory_case/publication-continued"
+        ) > "$directory_case/acquire-output" 2>&1 || directory_status=$?
+        [ "$directory_status" -ne 0 ] ||
+            fail 'acquire continued after its whole lock directory was replaced'
+        [ ! -e "$directory_case/publication-continued" ] ||
+            fail 'publication continued after an uncertain lock claim'
+        directory_lock="$(find "$directory_build_tmp" -mindepth 1 -maxdepth 1 \
+            -name 'ubuntu-server-output.*.lock' -print -quit)"
+        directory_expected_id="$(<"$directory_replacement_id")"
+        directory_current_id="$(stat -c '%d:%i' "$directory_lock" 2>/dev/null || true)"
+        [ -n "$directory_lock" ] &&
+                [ "$directory_current_id" = "$directory_expected_id" ] &&
+                grep -Fxq '999999999:replacement' "$directory_lock/owner" ||
+            fail 'acquire deleted or changed the replacement lock directory'
+        [ -d "$directory_displaced" ] && [ ! -L "$directory_displaced" ] &&
+                grep -Eq '^[1-9][0-9]*:[[:alnum:]]+$' \
+                    "$directory_displaced/owner" ||
+            fail 'acquire did not preserve the displaced original claim'
+        [ ! -e "$directory_stale_attempt" ] &&
+                [ "$(<"$directory_mv_count")" -eq 1 ] ||
+            fail 'uncertain claim entered stale-lock cleanup or retried its candidate'
 
         signal_fakebin="$work/signal-fakebin"
         signal_build_tmp="$work/signal-build/tmp"

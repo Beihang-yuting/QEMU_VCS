@@ -78,6 +78,7 @@ OUTPUT_LOCK_DIR=''
 OUTPUT_LOCK_CANDIDATE=''
 OUTPUT_LOCK_OWNER=''
 output_lock_held=false
+output_lock_claim_uncertain=false
 mounted_root=false
 mounted_sys=false
 mounted_proc=false
@@ -338,6 +339,7 @@ claim_output_lock_once() {
     local current_lock_id=''
     local current_owner=''
 
+    output_lock_claim_uncertain=false
     if [[ -d "${OUTPUT_LOCK_CANDIDATE}" && ! -L "${OUTPUT_LOCK_CANDIDATE}" ]]; then
         candidate_id="$(stat -c '%d:%i' "${OUTPUT_LOCK_CANDIDATE}" 2>/dev/null || true)"
     fi
@@ -368,6 +370,13 @@ claim_output_lock_once() {
     else
         claim_status="${move_status}"
         [[ "${claim_status}" -ne 0 ]] || claim_status=1
+        if [[ "${move_status}" -eq 0 ]] ||
+                { [[ -n "${OUTPUT_LOCK_CANDIDATE}" ]] &&
+                  [[ ! -e "${OUTPUT_LOCK_CANDIDATE}" &&
+                     ! -L "${OUTPUT_LOCK_CANDIDATE}" ]]; }; then
+            OUTPUT_LOCK_CANDIDATE=''
+            output_lock_claim_uncertain=true
+        fi
     fi
     finish_publish_transition "${claim_status}" || return $?
 
@@ -391,6 +400,8 @@ acquire_output_lock() {
     prepare_output_lock_candidate
 
     if ! claim_output_lock_once; then
+        [[ "${output_lock_claim_uncertain}" == false ]] ||
+            fail "output lock claim changed identity before verification: ${OUTPUT_DIR}"
         [[ -n "${OUTPUT_LOCK_CANDIDATE}" ]] ||
             fail "could not verify newly claimed output lock: ${OUTPUT_DIR}"
         [[ -d "${OUTPUT_LOCK_DIR}" && ! -L "${OUTPUT_LOCK_DIR}" ]] ||
