@@ -3,6 +3,7 @@
 - Original archive: `ubuntu@10.11.10.53:/home/ubuntu/workspace/dpu-debugutils.tar`
 - Archive SHA-256: `1da850673e19b04a239456ae119527a7937cf13bfefdc7236c7570ffdd3d11ab`
 - Source Git branch: `V2-DISPLAY-DEVELOP`
+- Source Git commit: `3dc8b60b2a2691fb47ba6aecf0ae873bc303b3aa`
 
 ## Imported files
 

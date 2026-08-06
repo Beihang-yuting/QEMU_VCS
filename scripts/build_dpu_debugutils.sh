@@ -5,6 +5,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 SOURCE_DIR="${REPO_ROOT}/third_party/dpu-debugutils"
 OUTPUT_DIR="${1:-${REPO_ROOT}/build/guest_tools/dpu-debugutils}"
+VENDOR_COMMIT_SHORT="3dc8b60"
+VENDOR_CPPFLAGS="-DGIT_COMMIT_HASH=\\\"${VENDOR_COMMIT_SHORT}\\\""
 
 for required_command in make gcc file install; do
     if ! command -v "${required_command}" >/dev/null 2>&1; then
@@ -26,8 +28,11 @@ trap 'rm -rf "${WORK_DIR}"' EXIT
 
 cp -a "${SOURCE_DIR}/." "${WORK_DIR}/"
 
-make -C "${WORK_DIR}" clean
-CC=gcc make -C "${WORK_DIR}" -j"$(nproc)" LDFLAGS=-static LIBS='-lreadline -ltinfo'
+make -C "${WORK_DIR}" clean \
+    CC=gcc CROSS_COMPILE= ARCH= CPPFLAGS="${VENDOR_CPPFLAGS}"
+make -C "${WORK_DIR}" -j"$(nproc)" \
+    CC=gcc CROSS_COMPILE= ARCH= CPPFLAGS="${VENDOR_CPPFLAGS}" \
+    LDFLAGS=-static LIBS='-lreadline -ltinfo'
 
 install -d "${OUTPUT_DIR}"
 install -m 0755 "${WORK_DIR}/pcie_debug/bin/pci_debug" "${OUTPUT_DIR}/pci_debug"
