@@ -486,6 +486,21 @@ resolve_offline_custom_driver() {
     fi
 }
 
+build_ubuntu_server_guest() {
+    local output_dir="$1"
+    local builder="${PROJECT_DIR}/scripts/build_rootfs_ubuntu_server.sh"
+
+    if [ ! -x "$builder" ]; then
+        fail "Ubuntu Server rootfs 构建脚本不存在或不可执行: $builder"
+        fail "请先提供 Task 4 的 builder，或导入 guest/ubuntu-server 镜像后重试"
+        return 1
+    fi
+    if ! "$builder" "$output_dir"; then
+        fail "Ubuntu Server rootfs 构建失败: $builder"
+        return 1
+    fi
+}
+
 # ============================================================
 # 交互式菜单（无参数时）
 # ============================================================
@@ -688,6 +703,7 @@ interactive_menu() {
     ok "QEMU 源码: ${QEMU_SRC_OPT}"
 }
 
+# === setup.sh main flow ===
 # 命令行指定 --import 时，先导入再继续。
 if [ "$IMPORT_ONLY" = true ]; then
     if [ -z "$OFFLINE_ZIP" ]; then
@@ -1596,13 +1612,7 @@ if [ "$NEED_GUEST" = true ]; then
         _DEBIAN_ROOTFS="${PROJECT_DIR}/guest/images/debian/rootfs.ext4"
 
         if [ "$GUEST_TYPE" = "ubuntu-server" ]; then
-            _UBUNTU_SERVER_BUILDER="${PROJECT_DIR}/scripts/build_rootfs_ubuntu_server.sh"
-            if [ ! -x "$_UBUNTU_SERVER_BUILDER" ]; then
-                fail "Ubuntu Server rootfs 构建脚本不存在或不可执行: $_UBUNTU_SERVER_BUILDER"
-                fail "请先提供 Task 4 的 builder，或导入 guest/ubuntu-server 镜像后重试"
-                FAIL_COUNT=$((FAIL_COUNT + 1))
-            elif ! "$_UBUNTU_SERVER_BUILDER" "$IMAGES_DIR"; then
-                fail "Ubuntu Server rootfs 构建失败: $_UBUNTU_SERVER_BUILDER"
+            if ! build_ubuntu_server_guest "$IMAGES_DIR"; then
                 FAIL_COUNT=$((FAIL_COUNT + 1))
             fi
         else
