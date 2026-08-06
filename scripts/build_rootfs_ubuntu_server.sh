@@ -578,7 +578,7 @@ publish_results() {
     fi
 
     begin_publish_transition
-    if mv -T -- "${PUBLISH_STAGE}" "${OUTPUT_DIR}"; then
+    if mv -nT -- "${PUBLISH_STAGE}" "${OUTPUT_DIR}"; then
         move_status=0
     else
         move_status=$?

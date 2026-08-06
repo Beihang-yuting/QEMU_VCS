@@ -591,6 +591,91 @@ CONCURRENT_MV
                 -print -quit)"
             [ -z "$concurrent_lock_leftover" ] ||
                 fail "failed publication left its output lock behind: $concurrent_lock_leftover"
+
+            # GNU mv -T replaces an empty destination directory.  A writer
+            # racing in an empty placeholder must retain that exact directory,
+            # not merely leave some directory at OUTPUT_DIR after publication.
+            empty_case="$work/publish-empty-concurrent-case"
+            empty_parent="$empty_case/images"
+            empty_output="$empty_parent/ubuntu-server"
+            empty_inputs="$empty_case/inputs"
+            empty_fakebin="$empty_case/fakebin"
+            empty_build_tmp="$empty_case/build/tmp"
+            mkdir -p "$empty_output" "$empty_inputs" \
+                "$empty_fakebin" "$empty_build_tmp"
+            printf 'old-output\n' > "$empty_output/old-sentinel"
+            printf 'new-rootfs\n' > "$empty_inputs/rootfs.ext4"
+            printf 'new-kernel\n' > "$empty_inputs/vmlinuz"
+            printf 'new-modules\n' > "$empty_inputs/modules.tar.gz"
+            printf '0\n' > "$empty_case/mv-count"
+            cat > "$empty_fakebin/mv" <<'EMPTY_CONCURRENT_MV'
+#!/usr/bin/env bash
+tracked=false
+for argument in "$@"; do
+    if [ "$argument" = "$PUBLISH_OUTPUT" ]; then tracked=true; fi
+done
+if [ "$tracked" != true ]; then
+    exec "$REAL_MV" "$@"
+fi
+count=$(( $(<"$MV_COUNT") + 1 ))
+printf '%s\n' "$count" > "$MV_COUNT"
+if [ "$count" -eq 2 ]; then
+    mkdir -p "$CONCURRENT_OUTPUT"
+    stat -c '%d:%i' "$CONCURRENT_OUTPUT" > "$PLACEHOLDER_ID"
+fi
+"$REAL_MV" "$@"
+EMPTY_CONCURRENT_MV
+            chmod +x "$empty_fakebin/mv"
+
+            empty_status=0
+            (
+                export MV_COUNT="$empty_case/mv-count"
+                export REAL_MV="$real_mv"
+                export CONCURRENT_OUTPUT="$empty_output"
+                export PLACEHOLDER_ID="$empty_case/placeholder-id"
+                export PUBLISH_OUTPUT="$empty_output"
+                PATH="$empty_fakebin:$PATH"
+                # shellcheck source=/dev/null
+                source "$builder_library"
+                BUILD_TMP="$empty_build_tmp"
+                OUTPUT_DIR="$empty_output"
+                ROOTFS_IMAGE="$empty_inputs/rootfs.ext4"
+                KERNEL_IMAGE="$empty_inputs/vmlinuz"
+                KERNEL_MODULES="$empty_inputs/modules.tar.gz"
+                trap cleanup EXIT
+                trap handle_int INT
+                trap handle_term TERM
+                publish_results
+            ) > "$empty_case/publish-output" 2>&1 || empty_status=$?
+            [ "$empty_status" -ne 0 ] ||
+                fail 'publication reported success after an empty concurrent target appeared'
+            [ -d "$empty_output" ] && [ ! -L "$empty_output" ] ||
+                fail 'publication removed the empty concurrent target directory'
+            empty_placeholder_id="$(<"$empty_case/placeholder-id")"
+            empty_current_id="$(stat -c '%d:%i' "$empty_output" 2>/dev/null || true)"
+            [ "$empty_current_id" = "$empty_placeholder_id" ] ||
+                fail 'publication replaced the empty concurrent target directory inode'
+            empty_nested_entry="$(find "$empty_output" -mindepth 1 -print -quit)"
+            [ -z "$empty_nested_entry" ] ||
+                fail "publication populated the empty concurrent target: $empty_nested_entry"
+            empty_new_leftover="$(find "$empty_parent" -mindepth 1 -maxdepth 1 \
+                -name '.ubuntu-server.new.*' -print -quit)"
+            [ -z "$empty_new_leftover" ] ||
+                fail "empty-target failure left its new stage behind: $empty_new_leftover"
+            empty_recovery_list="$empty_case/recovery-list"
+            find "$empty_parent" -mindepth 1 -maxdepth 1 -type d \
+                -name '.ubuntu-server.old.*' -print > "$empty_recovery_list"
+            empty_recovery_count="$(wc -l < "$empty_recovery_list")"
+            empty_recovery_dir="$(head -n 1 "$empty_recovery_list")"
+            [ "$empty_recovery_count" -eq 1 ] &&
+                    [ -f "$empty_recovery_dir/old-sentinel" ] &&
+                    grep -Fxq 'old-output' "$empty_recovery_dir/old-sentinel" ||
+                fail 'empty-target failure did not retain exactly one old-output recovery directory'
+            empty_lock_leftover="$(find "$empty_build_tmp" \
+                -mindepth 1 -maxdepth 1 -name 'ubuntu-server-output.*.lock' \
+                -print -quit)"
+            [ -z "$empty_lock_leftover" ] ||
+                fail "empty-target failure left its output lock behind: $empty_lock_leftover"
         else
             fail 'builder has no sourceable transactional publish_results function'
         fi
