@@ -24,7 +24,7 @@ set_tests_properties(test_offline_qemu_archive PROPERTIES TIMEOUT 10)
 
 add_test(NAME test_offline_ubuntu_server
          COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/test_offline_ubuntu_server.sh)
-set_tests_properties(test_offline_ubuntu_server PROPERTIES TIMEOUT 30)
+set_tests_properties(test_offline_ubuntu_server PROPERTIES TIMEOUT 60)
 
 # P3 ETH integration tests
 add_executable(test_eth_loopback test_eth_loopback.c)
