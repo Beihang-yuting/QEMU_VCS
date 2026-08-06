@@ -140,6 +140,26 @@ relative_bridge_line='  -LDFLAGS "-Wl,--whole-archive build/lib/libcosim_bridge.
 autostart_line='  +UVM_TESTNAME=pcie_tl_cosim_test +COSIM +COSIM_AUTOSTART \'
 no_autostart_line='  +UVM_TESTNAME=pcie_tl_cosim_test +COSIM \'
 
+task10_archive_assignment='archive="$out/qemu-vcs-offline-ubuntu-server-debugutils-20260806.zip"'
+task10_import_line='./setup.sh --import "$archive" --import-only'
+task10_old_extract_line='unzip -q "$archive" setup.sh'
+task10_quoted_extract_line='unzip -q "$archive" "setup.sh"'
+task10_project_tar_assignment='project_tar="$verify/project-$source_commit.tar"'
+task10_git_archive_line='git archive --format=tar --output="$project_tar" "$source_commit" || exit 1'
+task10_tar_extract_line='tar -xf "$project_tar" -C "$project" || exit 1'
+task10_fresh_project_check='if [ -e "$project" ]; then
+  echo "relocated project path already exists: $project" >&2
+  exit 1
+fi'
+task10_absolute_path_check='if [[ "$archive" != /* || "$verify" != /* ]]; then
+  echo "archive and relocated project paths must be absolute" >&2
+  exit 1
+fi'
+task10_data_only_check='if unzip -Z1 "$archive" | grep -Fxq setup.sh; then
+  echo "data-only archive unexpectedly contains setup.sh" >&2
+  exit 1
+fi'
+
 driver_block_is_valid() {
     local block=$1
 
@@ -160,6 +180,25 @@ task9_run_block_is_valid() {
     has_exact_line "$block" 'build/ubuntu-server-vcs/simv_cosim \' &&
         has_exact_line "$block" "$autostart_line" &&
         ! has_exact_line "$block" "$no_autostart_line"
+}
+
+task10_relocated_import_block_is_valid() {
+    local block=$1
+
+    has_exact_line "$block" 'verify="$out/import-check"' &&
+        has_exact_line "$block" 'project="$verify/project"' &&
+        has_exact_line "$block" "$task10_archive_assignment" &&
+        grep -Fq -- "$task10_absolute_path_check" <<<"$block" &&
+        grep -Fq -- "$task10_data_only_check" <<<"$block" &&
+        has_exact_line "$block" 'source_commit=$(git rev-parse HEAD)' &&
+        has_exact_line "$block" "$task10_project_tar_assignment" &&
+        grep -Fq -- "$task10_fresh_project_check" <<<"$block" &&
+        has_exact_line "$block" 'mkdir -p "$project" || exit 1' &&
+        has_exact_line "$block" "$task10_git_archive_line" &&
+        has_exact_line "$block" "$task10_tar_extract_line" &&
+        has_exact_line "$block" 'cd "$project" || exit 1' &&
+        has_exact_line "$block" "$task10_import_line" &&
+        ! grep -Eq '^[[:space:]]*unzip[[:space:]].*setup\.sh' <<<"$block"
 }
 
 require_driver_block() {
@@ -185,6 +224,25 @@ expect_mutation_rejected() {
         return 0
     elif "$checker" "$mutated"; then
         fail "$description mutation probe was incorrectly accepted"
+    fi
+}
+
+expect_insertion_rejected() {
+    local checker=$1
+    local original=$2
+    local anchor=$3
+    local insertion=$4
+    local description=$5
+    local mutated
+
+    if ! grep -Fq -- "$anchor" <<<"$original"; then
+        # The primary contract reports an invalid starting block. Mutation
+        # probes become meaningful only after every required line is present.
+        return 0
+    fi
+    mutated=${original/"$anchor"/"$anchor"$'\n'"$insertion"}
+    if "$checker" "$mutated"; then
+        fail "$description insertion mutation was incorrectly accepted"
     fi
 }
 
@@ -256,6 +314,18 @@ get_fenced_block task9_run_block \
     'the Task 9 VCS batch run command'
 if ! task9_run_block_is_valid "$task9_run_block"; then
     fail 'Task 9 VCS run fenced block must execute simv_cosim with +COSIM_AUTOSTART and forbid the staged command'
+fi
+
+get_section plan_task10 \
+    "$plan" \
+    '## Task 10: Produce and relocate-test the offline archive' \
+    '## Task 11: Final regression review and publication' \
+    'Task 10 in the current Ubuntu Server plan'
+get_fenced_block task10_relocated_import_block \
+    "$plan_task10" '```bash' 'verify="$out/import-check"' \
+    'the Task 10 Step 3 relocated-import command'
+if ! task10_relocated_import_block_is_valid "$task10_relocated_import_block"; then
+    fail 'Task 10 Step 3 fenced block must import the absolute data-only archive from a complete exact-commit relocated project tree and forbid extracting setup.sh from the zip'
 fi
 
 filelist_content=$(<"$filelist")
@@ -331,6 +401,14 @@ expect_mutation_rejected task9_compile_block_is_valid \
 expect_mutation_rejected task9_run_block_is_valid \
     "$task9_run_block" "$autostart_line" "$no_autostart_line" \
     'Task 9 no-autostart command'
+expect_insertion_rejected task10_relocated_import_block_is_valid \
+    "$task10_relocated_import_block" "$task10_git_archive_line" \
+    "$task10_old_extract_line" \
+    'Task 10 setup-from-data-archive command'
+expect_insertion_rejected task10_relocated_import_block_is_valid \
+    "$task10_relocated_import_block" "$task10_git_archive_line" \
+    "$task10_quoted_extract_line" \
+    'Task 10 quoted-setup-from-data-archive command'
 
 if ((failures != 0)); then
     echo "[workflow-command-contracts] $failures contract check(s) failed" >&2

@@ -710,13 +710,34 @@ if unzip -Z1 "$out/qemu-vcs-offline-ubuntu-server-debugutils-20260806.zip" \
 
 - [ ] **Step 3: Import under another absolute path**
 
+The offline zip is data-only and intentionally does not contain `setup.sh`.
+Materialize a complete project tree from the same source commit at the relocated
+path, then run that project's `setup.sh` with the absolute archive path.  Do not
+try to extract `setup.sh` from the zip.
+
 ```bash
 verify="$out/import-check"
-mkdir -p "$verify"
-cd "$verify"
-unzip -q "$out/qemu-vcs-offline-ubuntu-server-debugutils-20260806.zip" setup.sh
-chmod +x setup.sh
-./setup.sh --import "$out/qemu-vcs-offline-ubuntu-server-debugutils-20260806.zip" --import-only
+project="$verify/project"
+archive="$out/qemu-vcs-offline-ubuntu-server-debugutils-20260806.zip"
+if [[ "$archive" != /* || "$verify" != /* ]]; then
+  echo "archive and relocated project paths must be absolute" >&2
+  exit 1
+fi
+if unzip -Z1 "$archive" | grep -Fxq setup.sh; then
+  echo "data-only archive unexpectedly contains setup.sh" >&2
+  exit 1
+fi
+source_commit=$(git rev-parse HEAD)
+project_tar="$verify/project-$source_commit.tar"
+if [ -e "$project" ]; then
+  echo "relocated project path already exists: $project" >&2
+  exit 1
+fi
+mkdir -p "$project" || exit 1
+git archive --format=tar --output="$project_tar" "$source_commit" || exit 1
+tar -xf "$project_tar" -C "$project" || exit 1
+cd "$project" || exit 1
+./setup.sh --import "$archive" --import-only
 ```
 
 Verify both image directories, no original path, and repeat both boot/tool smoke checks.
