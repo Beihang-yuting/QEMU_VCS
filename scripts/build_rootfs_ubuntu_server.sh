@@ -52,7 +52,13 @@ MOUNT_DIR=''
 ROOTFS_IMAGE=''
 PUBLISH_STAGE=''
 OUTPUT_BACKUP=''
-OUTPUT_PUBLISHED=false
+PUBLISH_PARENT=''
+PUBLISH_NAME=''
+publish_boundary_ready=false
+old_output_moved=false
+new_output_installed=false
+publish_committed=false
+publish_transition=false
 mounted_root=false
 mounted_sys=false
 mounted_proc=false
@@ -61,6 +67,7 @@ mounted_devpts=false
 cleanup_unmount_failed=false
 mount_transition=false
 pending_signal=0
+cleanup_publish_failed=false
 
 usage() {
     cat <<'USAGE'
@@ -131,6 +138,112 @@ unmount_all() {
     unmount_if_mounted mounted_root "${MOUNT_DIR}"
 }
 
+publish_temp_path_is_safe() {
+    local path="$1"
+    local kind="$2"
+    local prefix
+    local suffix
+
+    [[ "${publish_boundary_ready}" == true ]] || return 1
+    [[ -n "${PUBLISH_PARENT}" && -n "${PUBLISH_NAME}" ]] || return 1
+    prefix="${PUBLISH_PARENT}/.${PUBLISH_NAME}.${kind}."
+    [[ "${path}" == "${prefix}"* ]] || return 1
+    suffix="${path#"${prefix}"}"
+    [[ -n "${suffix}" && "${suffix}" != */* ]]
+}
+
+remove_publish_temp() {
+    local path="$1"
+    local kind="$2"
+
+    [[ -n "${path}" ]] || return 0
+    if ! publish_temp_path_is_safe "${path}" "${kind}"; then
+        echo "WARNING: refusing to remove unexpected publish path: ${path}" >&2
+        cleanup_publish_failed=true
+        return 1
+    fi
+    if ! rm -rf -- "${path}"; then
+        echo "WARNING: could not remove publish path: ${path}" >&2
+        cleanup_publish_failed=true
+        return 1
+    fi
+}
+
+cleanup_publication() {
+    [[ "${publish_boundary_ready}" == true ]] || return 0
+    if [[ "${OUTPUT_DIR}" != "${PUBLISH_PARENT}/${PUBLISH_NAME}" ]]; then
+        echo "WARNING: refusing publication cleanup outside its boundary: ${OUTPUT_DIR}" >&2
+        cleanup_publish_failed=true
+        return 1
+    fi
+
+    if [[ "${publish_committed}" == true ]]; then
+        if [[ -n "${OUTPUT_BACKUP}" ]]; then
+            remove_publish_temp "${OUTPUT_BACKUP}" old || true
+        fi
+        if [[ -n "${PUBLISH_STAGE}" ]]; then
+            remove_publish_temp "${PUBLISH_STAGE}" new || true
+        fi
+        return 0
+    fi
+
+    if [[ "${new_output_installed}" == true ]]; then
+        rm -rf -- "${OUTPUT_DIR}"
+        if [[ -e "${OUTPUT_DIR}" || -L "${OUTPUT_DIR}" ]]; then
+            echo "WARNING: could not remove uncommitted output: ${OUTPUT_DIR}" >&2
+            cleanup_publish_failed=true
+            return 1
+        fi
+    fi
+
+    if [[ "${old_output_moved}" == true ]]; then
+        if ! publish_temp_path_is_safe "${OUTPUT_BACKUP}" old ||
+                [[ ! -d "${OUTPUT_BACKUP}" || -L "${OUTPUT_BACKUP}" ]]; then
+            echo "WARNING: previous output backup is missing or unsafe: ${OUTPUT_BACKUP}" >&2
+            cleanup_publish_failed=true
+            return 1
+        fi
+        if [[ -e "${OUTPUT_DIR}" || -L "${OUTPUT_DIR}" ]]; then
+            echo "WARNING: refusing to overwrite output while restoring backup: ${OUTPUT_DIR}" >&2
+            cleanup_publish_failed=true
+            return 1
+        fi
+        if ! mv -- "${OUTPUT_BACKUP}" "${OUTPUT_DIR}"; then
+            echo "WARNING: could not restore previous output: ${OUTPUT_BACKUP}" >&2
+            cleanup_publish_failed=true
+            return 1
+        fi
+        OUTPUT_BACKUP=''
+        old_output_moved=false
+    elif [[ -n "${OUTPUT_BACKUP}" ]]; then
+        remove_publish_temp "${OUTPUT_BACKUP}" old || true
+        OUTPUT_BACKUP=''
+    fi
+
+    if [[ -n "${PUBLISH_STAGE}" ]]; then
+        remove_publish_temp "${PUBLISH_STAGE}" new || true
+        PUBLISH_STAGE=''
+    fi
+}
+
+begin_publish_transition() {
+    pending_signal=0
+    publish_transition=true
+}
+
+finish_publish_transition() {
+    local command_status="$1"
+    local signal_status
+
+    publish_transition=false
+    if [[ "${pending_signal}" -ne 0 ]]; then
+        signal_status="${pending_signal}"
+        pending_signal=0
+        exit "${signal_status}"
+    fi
+    return "${command_status}"
+}
+
 cleanup() {
     local status=$?
     trap - EXIT INT TERM
@@ -144,16 +257,8 @@ cleanup() {
         unmount_all
     fi
 
-    if [[ -n "${OUTPUT_BACKUP}" && -d "${OUTPUT_BACKUP}" ]]; then
-        if [[ "${OUTPUT_PUBLISHED}" == true ]]; then
-            rm -rf -- "${OUTPUT_BACKUP}"
-        elif [[ ! -e "${OUTPUT_DIR}" && ! -L "${OUTPUT_DIR}" ]]; then
-            mv -- "${OUTPUT_BACKUP}" "${OUTPUT_DIR}"
-        fi
-    fi
-    if [[ -n "${PUBLISH_STAGE}" && -d "${PUBLISH_STAGE}" ]]; then
-        rm -rf -- "${PUBLISH_STAGE}"
-    fi
+    cleanup_publish_failed=false
+    cleanup_publication || true
 
     if [[ -n "${WORK_DIR}" ]]; then
         if [[ "${mounted_root}" == false && "${mounted_sys}" == false &&
@@ -171,13 +276,16 @@ cleanup() {
     if [[ "${cleanup_unmount_failed}" == true && "${status}" -eq 0 ]]; then
         status=1
     fi
+    if [[ "${cleanup_publish_failed}" == true && "${status}" -eq 0 ]]; then
+        status=1
+    fi
     exit "${status}"
 }
 
 handle_signal() {
     local signal_status="$1"
 
-    if [[ "${mount_transition}" == true ]]; then
+    if [[ "${mount_transition}" == true || "${publish_transition}" == true ]]; then
         pending_signal="${signal_status}"
         return 0
     fi
@@ -190,6 +298,89 @@ handle_int() {
 
 handle_term() {
     handle_signal 143
+}
+
+publish_results() {
+    local publish_parent
+    local publish_name
+    local move_status
+    local output_uid
+    local output_gid
+
+    publish_parent="${OUTPUT_DIR%/*}"
+    publish_name="${OUTPUT_DIR##*/}"
+    [[ -n "${publish_parent}" && -n "${publish_name}" &&
+       "${publish_name}" != . && "${publish_name}" != .. ]] ||
+        fail "unsafe output directory: ${OUTPUT_DIR}"
+    mkdir -p "${publish_parent}"
+    publish_parent="$(cd "${publish_parent}" && pwd -P)"
+
+    PUBLISH_PARENT="${publish_parent}"
+    PUBLISH_NAME="${publish_name}"
+    OUTPUT_DIR="${PUBLISH_PARENT}/${PUBLISH_NAME}"
+    publish_boundary_ready=true
+    if [[ -e "${OUTPUT_DIR}" || -L "${OUTPUT_DIR}" ]]; then
+        [[ -d "${OUTPUT_DIR}" && ! -L "${OUTPUT_DIR}" ]] ||
+            fail "output path is not a real directory: ${OUTPUT_DIR}"
+    fi
+
+    PUBLISH_STAGE="$(mktemp -d "${PUBLISH_PARENT}/.${PUBLISH_NAME}.new.XXXXXX")"
+    chmod 0700 "${PUBLISH_STAGE}"
+    cp --sparse=always -- "${ROOTFS_IMAGE}" "${PUBLISH_STAGE}/rootfs.ext4"
+    cp -- "${KERNEL_IMAGE}" "${PUBLISH_STAGE}/vmlinuz"
+    cp -- "${KERNEL_MODULES}" "${PUBLISH_STAGE}/modules.tar.gz"
+
+    if [[ -n "${SUDO_USER:-}" && "${SUDO_USER}" =~ ^[a-z_][a-z0-9_-]{0,30}$ ]] &&
+            id -u "${SUDO_USER}" >/dev/null 2>&1; then
+        output_uid="$(id -u "${SUDO_USER}")"
+        output_gid="$(id -g "${SUDO_USER}")"
+        chown "${output_uid}:${output_gid}" \
+            "${PUBLISH_STAGE}" \
+            "${PUBLISH_STAGE}/rootfs.ext4" \
+            "${PUBLISH_STAGE}/vmlinuz" \
+            "${PUBLISH_STAGE}/modules.tar.gz"
+    fi
+
+    if [[ -d "${OUTPUT_DIR}" ]]; then
+        OUTPUT_BACKUP="$(mktemp -d \
+            "${PUBLISH_PARENT}/.${PUBLISH_NAME}.old.XXXXXX")"
+        rmdir -- "${OUTPUT_BACKUP}"
+
+        begin_publish_transition
+        if mv -- "${OUTPUT_DIR}" "${OUTPUT_BACKUP}"; then
+            move_status=0
+        else
+            move_status=$?
+        fi
+        if [[ "${move_status}" -eq 0 ]] ||
+                { [[ -d "${OUTPUT_BACKUP}" && ! -L "${OUTPUT_BACKUP}" ]] &&
+                  [[ ! -e "${OUTPUT_DIR}" && ! -L "${OUTPUT_DIR}" ]]; }; then
+            old_output_moved=true
+        fi
+        finish_publish_transition "${move_status}" || return $?
+    fi
+
+    begin_publish_transition
+    if mv -- "${PUBLISH_STAGE}" "${OUTPUT_DIR}"; then
+        move_status=0
+    else
+        move_status=$?
+    fi
+    if [[ "${move_status}" -eq 0 ]] ||
+            { [[ -d "${OUTPUT_DIR}" && ! -L "${OUTPUT_DIR}" ]] &&
+              [[ ! -e "${PUBLISH_STAGE}" && ! -L "${PUBLISH_STAGE}" ]]; }; then
+        new_output_installed=true
+        PUBLISH_STAGE=''
+    fi
+    finish_publish_transition "${move_status}" || return $?
+
+    # This assignment is the commit point.  Signals after it retain the new
+    # complete output; all earlier exits are rolled back by cleanup.
+    publish_committed=true
+    if [[ -n "${OUTPUT_BACKUP}" ]]; then
+        remove_publish_temp "${OUTPUT_BACKUP}" old
+        OUTPUT_BACKUP=''
+    fi
 }
 
 # === builder main ===
@@ -510,47 +701,5 @@ case "${fsck_status}" in
     *) fail "e2fsck failed with status ${fsck_status}" ;;
 esac
 
-publish_parent="${OUTPUT_DIR%/*}"
-publish_name="${OUTPUT_DIR##*/}"
-[[ -n "${publish_parent}" && -n "${publish_name}" &&
-   "${publish_name}" != . && "${publish_name}" != .. ]] ||
-    fail "unsafe output directory: ${OUTPUT_DIR}"
-mkdir -p "${publish_parent}"
-publish_parent="$(cd "${publish_parent}" && pwd -P)"
-OUTPUT_DIR="${publish_parent}/${publish_name}"
-if [[ -e "${OUTPUT_DIR}" || -L "${OUTPUT_DIR}" ]]; then
-    [[ -d "${OUTPUT_DIR}" && ! -L "${OUTPUT_DIR}" ]] ||
-        fail "output path is not a real directory: ${OUTPUT_DIR}"
-fi
-
-PUBLISH_STAGE="$(mktemp -d "${publish_parent}/.${publish_name}.new.XXXXXX")"
-chmod 0700 "${PUBLISH_STAGE}"
-cp --sparse=always -- "${ROOTFS_IMAGE}" "${PUBLISH_STAGE}/rootfs.ext4"
-cp -- "${KERNEL_IMAGE}" "${PUBLISH_STAGE}/vmlinuz"
-cp -- "${KERNEL_MODULES}" "${PUBLISH_STAGE}/modules.tar.gz"
-
-if [[ -n "${SUDO_USER:-}" && "${SUDO_USER}" =~ ^[a-z_][a-z0-9_-]{0,30}$ ]] &&
-        id -u "${SUDO_USER}" >/dev/null 2>&1; then
-    output_uid="$(id -u "${SUDO_USER}")"
-    output_gid="$(id -g "${SUDO_USER}")"
-    chown "${output_uid}:${output_gid}" \
-        "${PUBLISH_STAGE}" \
-        "${PUBLISH_STAGE}/rootfs.ext4" \
-        "${PUBLISH_STAGE}/vmlinuz" \
-        "${PUBLISH_STAGE}/modules.tar.gz"
-fi
-
-if [[ -d "${OUTPUT_DIR}" ]]; then
-    OUTPUT_BACKUP="$(mktemp -d "${publish_parent}/.${publish_name}.old.XXXXXX")"
-    rmdir -- "${OUTPUT_BACKUP}"
-    mv -- "${OUTPUT_DIR}" "${OUTPUT_BACKUP}"
-fi
-mv -- "${PUBLISH_STAGE}" "${OUTPUT_DIR}"
-PUBLISH_STAGE=''
-OUTPUT_PUBLISHED=true
-if [[ -n "${OUTPUT_BACKUP}" ]]; then
-    rm -rf -- "${OUTPUT_BACKUP}"
-    OUTPUT_BACKUP=''
-fi
-
+publish_results
 echo "Ubuntu Server rootfs built at ${OUTPUT_DIR}/rootfs.ext4"

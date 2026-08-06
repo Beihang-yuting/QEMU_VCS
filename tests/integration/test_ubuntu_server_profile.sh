@@ -333,6 +333,70 @@ $signal_root
 EOF
         assert_same "$work/expected-unmount-log" "$work/unmount-log" \
             'TERM mount cleanup did not unmount every tracked target in reverse order'
+
+        # Reproduce the publication return-point window: the second mv has
+        # installed the new output, then signals the parent before the next
+        # shell statement can update transaction state.
+        if grep -Fq 'publish_results() {' "$builder_library"; then
+            publish_case="$work/publish-case"
+            publish_parent="$publish_case/images"
+            publish_output="$publish_parent/ubuntu-server"
+            publish_inputs="$publish_case/inputs"
+            publish_fakebin="$publish_case/fakebin"
+            mkdir -p "$publish_output" "$publish_inputs" "$publish_fakebin"
+            printf 'old-output\n' > "$publish_output/old-sentinel"
+            printf 'new-rootfs\n' > "$publish_inputs/rootfs.ext4"
+            printf 'new-kernel\n' > "$publish_inputs/vmlinuz"
+            printf 'new-modules\n' > "$publish_inputs/modules.tar.gz"
+            printf '0\n' > "$publish_case/mv-count"
+            real_mv="$(command -v mv)"
+            cat > "$publish_fakebin/mv" <<'FAKE_MV'
+#!/usr/bin/env bash
+count=$(( $(<"$MV_COUNT") + 1 ))
+printf '%s\n' "$count" > "$MV_COUNT"
+"$REAL_MV" "$@"
+status=$?
+if [ "$status" -eq 0 ] && [ "$count" -eq 2 ]; then
+    kill -TERM "$PPID"
+fi
+exit "$status"
+FAKE_MV
+            chmod +x "$publish_fakebin/mv"
+
+            publish_status=0
+            (
+                export MV_COUNT="$publish_case/mv-count"
+                export REAL_MV="$real_mv"
+                PATH="$publish_fakebin:$PATH"
+                # shellcheck source=/dev/null
+                source "$builder_library"
+                OUTPUT_DIR="$publish_output"
+                ROOTFS_IMAGE="$publish_inputs/rootfs.ext4"
+                KERNEL_IMAGE="$publish_inputs/vmlinuz"
+                KERNEL_MODULES="$publish_inputs/modules.tar.gz"
+                trap cleanup EXIT
+                trap handle_int INT
+                trap handle_term TERM
+                publish_results
+            ) || publish_status=$?
+            [ "$publish_status" -eq 143 ] ||
+                fail "TERM after output mv returned $publish_status instead of 143"
+            [ -f "$publish_output/old-sentinel" ] ||
+                fail 'publication TERM did not restore the previous output'
+            grep -Fxq 'old-output' "$publish_output/old-sentinel" ||
+                fail 'publication TERM changed the previous output content'
+            for uncommitted_artifact in rootfs.ext4 vmlinuz modules.tar.gz; do
+                [ ! -e "$publish_output/$uncommitted_artifact" ] ||
+                    fail "publication TERM left an uncommitted artifact: $uncommitted_artifact"
+            done
+            publish_leftover="$(find "$publish_parent" -mindepth 1 -maxdepth 1 \
+                \( -name '.ubuntu-server.old.*' -o -name '.ubuntu-server.new.*' \) \
+                -print -quit)"
+            [ -z "$publish_leftover" ] ||
+                fail "publication TERM left transaction state behind: $publish_leftover"
+        else
+            fail 'builder has no sourceable transactional publish_results function'
+        fi
     else
         fail 'builder has no sourceable boundary for mount-transition behavior testing'
     fi
