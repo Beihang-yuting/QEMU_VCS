@@ -223,11 +223,18 @@ OFFLINE_ZIP=""
 IMPORT_ONLY=false
 UBUNTU_IMAGE_PATH=""
 OFFLINE_DATE=""
+OFFLINE_VERSION=""
 OFFLINE_GUEST_TYPE=""
 OFFLINE_KVER=""
 OFFLINE_CUSTOM_DRIVER_DIR=""
 OFFLINE_CUSTOM_DRIVER_ARCHIVE=""
 OFFLINE_CUSTOM_DRIVER_COMPAT_RUNTIME=""
+OFFLINE_CUSTOM_DPU_ARCHIVE=""
+OFFLINE_CUSTOM_DPU_RUNTIME=""
+OFFLINE_HAS_UBUNTU_ROOTFS=""
+OFFLINE_HAS_UBUNTU_SERVER_ROOTFS=""
+OFFLINE_UBUNTU_SERVER_HAS_HEADERS=""
+OFFLINE_DPU_DEBUGUTILS_SHA256=""
 
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -267,17 +274,50 @@ read_offline_metadata() {
     [ -f "$metadata_file" ] || return 0
     while IFS="=" read -r key value; do
         case "$key" in
-            OFFLINE_DATE|OFFLINE_GUEST_TYPE|OFFLINE_KVER|OFFLINE_CUSTOM_DPU_ARCHIVE|OFFLINE_CUSTOM_DPU_RUNTIME)
+            OFFLINE_VERSION|OFFLINE_DATE|OFFLINE_GUEST_TYPE|OFFLINE_KVER|OFFLINE_CUSTOM_DPU_ARCHIVE|OFFLINE_CUSTOM_DPU_RUNTIME|OFFLINE_HAS_UBUNTU_ROOTFS|OFFLINE_HAS_UBUNTU_SERVER_ROOTFS|OFFLINE_UBUNTU_SERVER_HAS_HEADERS|OFFLINE_DPU_DEBUGUTILS_SHA256)
                 printf -v "$key" "%s" "$value"
                 ;;
         esac
     done < "$metadata_file"
 }
 
+validate_offline_metadata() {
+    case "$OFFLINE_VERSION" in
+        ''|1|2|3) ;;
+        *) fail "不支持的离线包版本: $OFFLINE_VERSION"; return 1 ;;
+    esac
+    case "$OFFLINE_GUEST_TYPE" in
+        ''|ubuntu|ubuntu-server|debian) ;;
+        *) fail "不安全的离线包 Guest 类型: $OFFLINE_GUEST_TYPE"; return 1 ;;
+    esac
+    if [ -n "$OFFLINE_KVER" ] && \
+            [[ ! "$OFFLINE_KVER" =~ ^[A-Za-z0-9._+-]+$ ]]; then
+        fail "不安全的离线包内核版本: $OFFLINE_KVER"
+        return 1
+    fi
+    for value in "$OFFLINE_CUSTOM_DPU_ARCHIVE" "$OFFLINE_CUSTOM_DPU_RUNTIME"; do
+        if [ -n "$value" ] && \
+                [[ ! "$value" =~ ^[A-Za-z0-9._+-]+$ ]]; then
+            fail "不安全的离线包文件名元数据: $value"
+            return 1
+        fi
+    done
+    if [ "$OFFLINE_VERSION" = 3 ] && [ "$OFFLINE_GUEST_TYPE" = ubuntu-server ]; then
+        if [ "$OFFLINE_HAS_UBUNTU_ROOTFS" != true ] || \
+                [ "$OFFLINE_HAS_UBUNTU_SERVER_ROOTFS" != true ] || \
+                [ "$OFFLINE_UBUNTU_SERVER_HAS_HEADERS" != true ] || \
+                [ "$OFFLINE_DPU_DEBUGUTILS_SHA256" != \
+                    1da850673e19b04a239456ae119527a7937cf13bfefdc7236c7570ffdd3d11ab ]; then
+            fail 'Ubuntu Server v3 离线包元数据不完整或未经验证'
+            return 1
+        fi
+    fi
+}
+
 extract_offline_headers() {
     local kver="$1"
     local source_dir="$2"
-    local headers_dest="${PROJECT_DIR}/build/kheaders-${kver}"
+    local headers_dest="${3:-${PROJECT_DIR}/build/kheaders-${kver}}"
     local deb kdir extracted=false
 
     [ -n "$kver" ] || return 0
@@ -305,6 +345,217 @@ extract_offline_headers() {
             warn "离线 kernel headers 未提供精确目录: linux-headers-${kver}"
         fi
     fi
+}
+
+stage_offline_destination() {
+    local transaction_root="$1" relative_dest="$2" preserve_existing="$3"
+    local staged_dest="${transaction_root}/new/${relative_dest}"
+    local final_dest="${PROJECT_DIR}/${relative_dest}"
+
+    validate_scoped_transaction_path "$PROJECT_DIR" "$final_dest" || return 1
+    validate_scoped_transaction_path "$transaction_root" "$staged_dest" || return 1
+    mkdir -p "$staged_dest"
+    if [ "$preserve_existing" = true ] && [ -d "$final_dest" ]; then
+        cp -a -- "$final_dest/." "$staged_dest/"
+    fi
+}
+
+validate_scoped_transaction_path() {
+    local scope="$1" candidate="$2"
+    local scope_canonical candidate_canonical relative component current
+    local -a path_components=()
+    scope_canonical=$(realpath -m -- "$scope")
+    candidate_canonical=$(realpath -m -- "$candidate")
+    case "$candidate_canonical" in
+        "$scope_canonical"|"$scope_canonical"/*) ;;
+        *) fail "离线事务路径越界: $candidate"; return 1 ;;
+    esac
+
+    relative="${candidate#"$scope"/}"
+    current="$scope"
+    IFS='/' read -r -a path_components <<< "$relative"
+    for component in "${path_components[@]}"; do
+        [ -n "$component" ] || continue
+        current="${current}/${component}"
+        if [ -L "$current" ]; then
+            fail "离线事务路径包含符号链接: $current"
+            return 1
+        fi
+    done
+}
+
+offline_tree_identity() {
+    local tree="$1" inode_identity content_identity
+    [ -d "$tree" ] && [ ! -L "$tree" ] || return 1
+    inode_identity=$(stat -c '%d:%i' -- "$tree") || return 1
+    content_identity=$(
+        tar -C "$tree" --sort=name --format=gnu --mtime='@0' \
+            --owner=0 --group=0 --numeric-owner -cf - . | sha256sum | awk '{ print $1 }'
+    ) || return 1
+    printf '%s:%s\n' "$inode_identity" "$content_identity"
+}
+
+offline_tree_matches_identity() {
+    local expected_identity="$1" tree="$2" actual_identity
+    actual_identity=$(offline_tree_identity "$tree") || return 1
+    [ "$expected_identity" = "$actual_identity" ]
+}
+
+stage_and_verify_offline_files() {
+    local source_dir="$1" staged_dest="$2"
+    local source_file staged_file
+
+    while IFS= read -r -d '' source_file; do
+        staged_file="${staged_dest}/$(basename "$source_file")"
+        cp -a -- "$source_file" "$staged_file"
+        cmp -s -- "$source_file" "$staged_file" || return 1
+    done < <(find "$source_dir" -mindepth 1 -maxdepth 1 -type f -print0)
+}
+
+OFFLINE_IMPORT_TMPDIR=""
+OFFLINE_TRANSACTION_ROOT=""
+OFFLINE_TRANSACTION_ACTIVE=false
+OFFLINE_TRANSACTION_RELATIVES=()
+OFFLINE_TRANSACTION_STATES=()
+OFFLINE_TRANSACTION_ORIGINAL_ABSENT=()
+OFFLINE_TRANSACTION_INSTALLED_IDENTITIES=()
+OFFLINE_TRANSACTION_TRANSITION=false
+OFFLINE_TRANSACTION_PENDING_SIGNAL=""
+OFFLINE_TRANSACTION_CONFLICT=false
+
+rollback_offline_transaction() {
+    local index relative_dest final_dest backup_dest staged_dest state original_absent installed_identity
+    [ "$OFFLINE_TRANSACTION_ACTIVE" = true ] || return 0
+
+    OFFLINE_TRANSACTION_CONFLICT=false
+
+    for ((index=${#OFFLINE_TRANSACTION_RELATIVES[@]} - 1; index >= 0; index--)); do
+        relative_dest="${OFFLINE_TRANSACTION_RELATIVES[$index]}"
+        state="${OFFLINE_TRANSACTION_STATES[$index]}"
+        original_absent="${OFFLINE_TRANSACTION_ORIGINAL_ABSENT[$index]}"
+        installed_identity="${OFFLINE_TRANSACTION_INSTALLED_IDENTITIES[$index]}"
+        final_dest="${PROJECT_DIR}/${relative_dest}"
+        backup_dest="${OFFLINE_TRANSACTION_ROOT}/backup/${relative_dest}"
+        staged_dest="${OFFLINE_TRANSACTION_ROOT}/new/${relative_dest}"
+
+        validate_scoped_transaction_path "$PROJECT_DIR" "$final_dest" || {
+            OFFLINE_TRANSACTION_CONFLICT=true
+            continue
+        }
+        validate_scoped_transaction_path "$OFFLINE_TRANSACTION_ROOT" "$backup_dest" || {
+            OFFLINE_TRANSACTION_CONFLICT=true
+            continue
+        }
+
+        if [ -e "$backup_dest" ]; then
+            if [ ! -e "$final_dest" ]; then
+                mkdir -p "$(dirname "$final_dest")"
+                mv -T -- "$backup_dest" "$final_dest"
+            elif [[ "$state" = INSTALLED || "$state" = COMMITTED ]] && \
+                    offline_tree_matches_identity "$installed_identity" "$final_dest"; then
+                rm -rf -- "$final_dest"
+                mv -T -- "$backup_dest" "$final_dest"
+            else
+                fail "离线导入回滚发现并发冲突，保留 final 与 backup: $relative_dest"
+                OFFLINE_TRANSACTION_CONFLICT=true
+            fi
+        elif [ "$original_absent" = true ] && [ -e "$final_dest" ]; then
+            if [[ "$state" = INSTALLED || "$state" = COMMITTED ]] && \
+                    offline_tree_matches_identity "$installed_identity" "$final_dest"; then
+                rm -rf -- "$final_dest"
+            elif [ "$state" != PREPARED ]; then
+                fail "离线导入回滚发现并发冲突，保留新 final: $relative_dest"
+                OFFLINE_TRANSACTION_CONFLICT=true
+            fi
+        fi
+    done
+    OFFLINE_TRANSACTION_ACTIVE=false
+    [ "$OFFLINE_TRANSACTION_CONFLICT" = false ]
+}
+
+cleanup_offline_import_temporaries() {
+    if [ -n "$OFFLINE_IMPORT_TMPDIR" ]; then
+        rm -rf -- "$OFFLINE_IMPORT_TMPDIR"
+        OFFLINE_IMPORT_TMPDIR=""
+    fi
+    if [ -n "$OFFLINE_TRANSACTION_ROOT" ] && \
+            [ "$OFFLINE_TRANSACTION_CONFLICT" = false ]; then
+        rm -rf -- "$OFFLINE_TRANSACTION_ROOT"
+        OFFLINE_TRANSACTION_ROOT=""
+    fi
+}
+
+queue_offline_import_signal() {
+    local signal_name="$1"
+    if [ "$OFFLINE_TRANSACTION_TRANSITION" = true ]; then
+        [ -n "$OFFLINE_TRANSACTION_PENDING_SIGNAL" ] || \
+            OFFLINE_TRANSACTION_PENDING_SIGNAL="$signal_name"
+        return 0
+    fi
+    interrupt_offline_import "$signal_name"
+}
+
+finish_offline_transaction_transition() {
+    local pending_signal
+    OFFLINE_TRANSACTION_TRANSITION=false
+    pending_signal="$OFFLINE_TRANSACTION_PENDING_SIGNAL"
+    OFFLINE_TRANSACTION_PENDING_SIGNAL=""
+    if [ -n "$pending_signal" ]; then
+        interrupt_offline_import "$pending_signal"
+    fi
+}
+
+interrupt_offline_import() {
+    local signal_name="$1" exit_status=1
+    case "$signal_name" in
+        INT) exit_status=130 ;;
+        TERM) exit_status=143 ;;
+        HUP) exit_status=129 ;;
+    esac
+    trap - INT TERM HUP
+    warn "离线包导入被 ${signal_name} 中断，正在回滚"
+    rollback_offline_transaction || true
+    cleanup_offline_import_temporaries
+    exit "$exit_status"
+}
+
+validate_offline_archive_entries() {
+    local zip_file="$1" entry mode
+    local entry_count mode_count
+
+    entry_count=$(zipinfo -1 -- "$zip_file" | wc -l)
+    mode_count=$(zipinfo -l -- "$zip_file" | awk '$1 ~ /^[-dlcbps]/ { count++ } END { print count + 0 }')
+    if [ "$entry_count" -ne "$mode_count" ]; then
+        fail '不安全的离线包条目: 文件名包含换行或无法解析的类型'
+        return 1
+    fi
+
+    while IFS= read -r entry; do
+        case "$entry" in
+            ''|/*|*\\*|../*|*/../*|*/..|..|./*|*/./*|*/.|.)
+                fail "不安全的离线包条目: $entry"
+                return 1
+                ;;
+        esac
+    done < <(zipinfo -1 -- "$zip_file")
+
+    if [ -n "$(zipinfo -1 -- "$zip_file" | LC_ALL=C sort | uniq -d)" ]; then
+        fail '不安全的离线包条目: 存在重复路径'
+        return 1
+    fi
+
+    while read -r mode; do
+        case "$mode" in
+            -*|d*) ;;
+            *)
+                # ZIP has no hard-link extraction primitive.  Rejecting every
+                # non-regular/non-directory Unix entry also rejects symlinks
+                # and any hard-link-like special entry before extraction.
+                fail "不安全的离线包条目类型: $mode"
+                return 1
+                ;;
+        esac
+    done < <(zipinfo -l -- "$zip_file" | awk '$1 ~ /^[-dlcbps]/ { print $1 }')
 }
 
 # ============================================================
@@ -356,113 +607,301 @@ import_offline() {
     fi
     ok "zip 校验通过"
 
+    if ! validate_offline_archive_entries "$zip_file"; then
+        return 1
+    fi
+
     info "解压离线包..."
-    local tmpdir="${PROJECT_DIR}/build/offline-import"
-    rm -rf "$tmpdir"
-    mkdir -p "$tmpdir"
-    unzip -qo "$zip_file" -d "$tmpdir"
+    local import_tmp_root="${PROJECT_DIR}/build/tmp"
+    local tmpdir
+    mkdir -p "$import_tmp_root"
+    tmpdir=$(mktemp -d "$import_tmp_root/offline-import.XXXXXX")
+    OFFLINE_IMPORT_TMPDIR="$tmpdir"
+    if ! unzip -qo "$zip_file" -d "$tmpdir"; then
+        cleanup_offline_import_temporaries
+        fail '离线包解压失败'
+        return 1
+    fi
 
     # 读取元数据
     if [ -f "$tmpdir/offline-meta.env" ]; then
         read_offline_metadata "$tmpdir/offline-meta.env"
-        ok "离线包版本: ${OFFLINE_DATE:-unknown}"
+        if ! validate_offline_metadata; then
+            cleanup_offline_import_temporaries
+            return 1
+        fi
+        ok "离线包版本: ${OFFLINE_VERSION:-${OFFLINE_DATE:-unknown}}"
         ok "Guest 类型:  ${OFFLINE_GUEST_TYPE:-unknown}"
         ok "内核版本:    ${OFFLINE_KVER:-unknown}"
     else
         warn "离线包缺少元数据文件，尝试继续导入..."
     fi
 
-    local imported=0
-    local custom_dest artifact artifact_count=0
+    local imported=0 index relative_dest preserve_existing
+    local source_file final_file final_dest backup_dest staged_dest
+    local qemu_tar custom_dest artifact_count=0
+    local -a source_dirs=() relative_dirs=() preserve_flags=() messages=()
+    local -a transaction_dirs=()
 
-    # QEMU 源码
-    local qemu_tar
-    qemu_tar=$(ls "$tmpdir"/qemu-src/qemu-*.tar.* 2>/dev/null | head -1 || true)
+    OFFLINE_TRANSACTION_ROOT=$(mktemp -d "$import_tmp_root/offline-transaction.XXXXXX")
+    mkdir -p "$OFFLINE_TRANSACTION_ROOT/new" "$OFFLINE_TRANSACTION_ROOT/backup"
+    OFFLINE_TRANSACTION_RELATIVES=()
+    OFFLINE_TRANSACTION_STATES=()
+    OFFLINE_TRANSACTION_ORIGINAL_ABSENT=()
+    OFFLINE_TRANSACTION_INSTALLED_IDENTITIES=()
+    OFFLINE_TRANSACTION_TRANSITION=false
+    OFFLINE_TRANSACTION_PENDING_SIGNAL=""
+    OFFLINE_TRANSACTION_CONFLICT=false
+    OFFLINE_TRANSACTION_ACTIVE=true
+    trap 'queue_offline_import_signal INT' INT
+    trap 'queue_offline_import_signal TERM' TERM
+    trap 'queue_offline_import_signal HUP' HUP
+
+    qemu_tar=$(find "$tmpdir/qemu-src" -maxdepth 1 -type f \
+        -name 'qemu-*.tar.*' -print -quit 2>/dev/null || true)
     if [ -n "$qemu_tar" ]; then
-        mkdir -p "${PROJECT_DIR}/third_party"
-        cp "$qemu_tar" "${PROJECT_DIR}/third_party/"
-        ok "QEMU 源码已导入: third_party/$(basename "$qemu_tar")"
-        imported=$((imported + 1))
+        mkdir -p "$OFFLINE_TRANSACTION_ROOT/sources/qemu"
+        cp -a -- "$qemu_tar" "$OFFLINE_TRANSACTION_ROOT/sources/qemu/"
+        source_dirs+=("$OFFLINE_TRANSACTION_ROOT/sources/qemu")
+        relative_dirs+=("third_party")
+        preserve_flags+=(true)
+        messages+=("QEMU 源码已导入: third_party/$(basename "$qemu_tar")")
     fi
-
-    # Debian 镜像
     if [ -f "$tmpdir/guest/debian/rootfs.ext4" ]; then
-        mkdir -p "${PROJECT_DIR}/guest/images/debian"
-        cp "$tmpdir"/guest/debian/* "${PROJECT_DIR}/guest/images/debian/"
-        ok "Debian 镜像已导入: guest/images/debian/"
-        imported=$((imported + 1))
+        source_dirs+=("$tmpdir/guest/debian")
+        relative_dirs+=("guest/images/debian")
+        preserve_flags+=(true)
+        messages+=("Debian 镜像已导入: guest/images/debian/")
     fi
-
-    # Ubuntu 镜像
     if [ -f "$tmpdir/guest/ubuntu/vmlinuz" ]; then
-        mkdir -p "${PROJECT_DIR}/guest/images/ubuntu"
-        cp "$tmpdir"/guest/ubuntu/* "${PROJECT_DIR}/guest/images/ubuntu/"
-        ok "Ubuntu 镜像已导入: guest/images/ubuntu/"
-        imported=$((imported + 1))
+        source_dirs+=("$tmpdir/guest/ubuntu")
+        relative_dirs+=("guest/images/ubuntu")
+        preserve_flags+=(true)
+        messages+=("Ubuntu 镜像已导入: guest/images/ubuntu/")
     fi
-
-    # Ubuntu Server 镜像
     if [ -f "$tmpdir/guest/ubuntu-server/vmlinuz" ]; then
-        mkdir -p "${PROJECT_DIR}/guest/images/ubuntu-server"
-        cp "$tmpdir"/guest/ubuntu-server/* "${PROJECT_DIR}/guest/images/ubuntu-server/"
-        ok "Ubuntu Server 镜像已导入: guest/images/ubuntu-server/"
-        imported=$((imported + 1))
+        source_dirs+=("$tmpdir/guest/ubuntu-server")
+        relative_dirs+=("guest/images/ubuntu-server")
+        preserve_flags+=(true)
+        messages+=("Ubuntu Server 镜像已导入: guest/images/ubuntu-server/")
+    fi
+    if find "$tmpdir/kheaders" -maxdepth 1 -type f -name '*.deb' -print -quit \
+            2>/dev/null | grep -q .; then
+        source_dirs+=("$tmpdir/kheaders")
+        relative_dirs+=("build/kheaders-download")
+        preserve_flags+=(true)
+        messages+=("Kernel headers 已导入: build/kheaders-download/")
+    fi
+    if find "$tmpdir/custom-driver" -maxdepth 1 -type f -print -quit \
+            2>/dev/null | grep -q .; then
+        source_dirs+=("$tmpdir/custom-driver")
+        relative_dirs+=("build/offline-custom-driver")
+        preserve_flags+=(false)
+        messages+=("自定义 DPU 驱动素材已导入: build/offline-custom-driver/")
+        artifact_count=1
+    fi
+    if find "$tmpdir/driver" -maxdepth 1 -type f -name 'cosim_nic_*.ko' \
+            -print -quit 2>/dev/null | grep -q .; then
+        source_dirs+=("$tmpdir/driver")
+        relative_dirs+=("guest/driver/prebuilt")
+        preserve_flags+=(true)
+        messages+=("cosim_nic.ko 已导入: guest/driver/prebuilt/")
+    fi
+    if find "$tmpdir/guest_tools" -maxdepth 1 -type f -print -quit \
+            2>/dev/null | grep -q .; then
+        source_dirs+=("$tmpdir/guest_tools")
+        relative_dirs+=("build/guest_tools")
+        preserve_flags+=(true)
+        messages+=("Guest 测试工具已导入: build/guest_tools/")
     fi
 
-    # Kernel headers
-    if ls "$tmpdir"/kheaders/*.deb &>/dev/null; then
-        local kheaders_dest="${PROJECT_DIR}/build/kheaders-download"
-        mkdir -p "$kheaders_dest"
-        cp "$tmpdir"/kheaders/*.deb "$kheaders_dest/"
-        ok "Kernel headers 已导入: build/kheaders-download/"
-        extract_offline_headers "$OFFLINE_KVER" "$tmpdir/kheaders"
-        imported=$((imported + 1))
-    fi
-
-    # 可选的 DPU 自定义驱动源码与兼容运行库
-    if [ -d "$tmpdir/custom-driver" ]; then
-        custom_dest="${PROJECT_DIR}/build/offline-custom-driver"
-        rm -rf "$custom_dest"
-        mkdir -p "$custom_dest"
-        while IFS= read -r -d "" artifact; do
-            cp -- "$artifact" "$custom_dest/"
-            artifact_count=$((artifact_count + 1))
-        done < <(find "$tmpdir/custom-driver" -maxdepth 1 -type f -print0)
-
-        if [ "$artifact_count" -gt 0 ]; then
-            OFFLINE_CUSTOM_DRIVER_DIR="$custom_dest"
-            OFFLINE_CUSTOM_DRIVER_ARCHIVE=$(find "$custom_dest" -maxdepth 1 -type f \
-                \( -name "*.tar.gz" -o -name "*.tgz" \) -printf "%f\\n" | sort | head -1 || true)
-            OFFLINE_CUSTOM_DRIVER_COMPAT_RUNTIME=$(find "$custom_dest" -maxdepth 1 -type f \
-                -name "libc6_*amd64.deb" -printf "%f\\n" | sort | head -1 || true)
-            if [ -n "$OFFLINE_CUSTOM_DRIVER_ARCHIVE" ]; then
-                OFFLINE_CUSTOM_DRIVER_ARCHIVE="${custom_dest}/${OFFLINE_CUSTOM_DRIVER_ARCHIVE}"
-            fi
-            if [ -n "$OFFLINE_CUSTOM_DRIVER_COMPAT_RUNTIME" ]; then
-                OFFLINE_CUSTOM_DRIVER_COMPAT_RUNTIME="${custom_dest}/${OFFLINE_CUSTOM_DRIVER_COMPAT_RUNTIME}"
-            fi
-            ok "自定义 DPU 驱动素材已导入: build/offline-custom-driver/"
-            imported=$((imported + 1))
+    for ((index=0; index<${#source_dirs[@]}; index++)); do
+        relative_dest="${relative_dirs[$index]}"
+        preserve_existing="${preserve_flags[$index]}"
+        if ! stage_offline_destination "$OFFLINE_TRANSACTION_ROOT" \
+                "$relative_dest" "$preserve_existing" || \
+                ! stage_and_verify_offline_files "${source_dirs[$index]}" \
+                "$OFFLINE_TRANSACTION_ROOT/new/$relative_dest"; then
+            fail "离线包暂存或校验失败: $relative_dest"
+            rollback_offline_transaction || true
+            cleanup_offline_import_temporaries
+            trap - INT TERM HUP
+            return 1
         fi
-    fi
-
-    # 预编译 cosim_nic.ko
-    if ls "$tmpdir"/driver/cosim_nic_*.ko &>/dev/null; then
-        mkdir -p "${PROJECT_DIR}/guest/driver/prebuilt"
-        cp "$tmpdir"/driver/cosim_nic_*.ko "${PROJECT_DIR}/guest/driver/prebuilt/"
-        ok "cosim_nic.ko 已导入: guest/driver/prebuilt/"
+        transaction_dirs+=("$relative_dest")
         imported=$((imported + 1))
+    done
+
+    if find "$tmpdir/kheaders" -maxdepth 1 -type f -name '*.deb' -print -quit \
+            2>/dev/null | grep -q . && [ -n "$OFFLINE_KVER" ]; then
+        relative_dest="build/kheaders-${OFFLINE_KVER}"
+        if ! stage_offline_destination "$OFFLINE_TRANSACTION_ROOT" \
+                "$relative_dest" true || \
+                ! extract_offline_headers "$OFFLINE_KVER" "$tmpdir/kheaders" \
+                "$OFFLINE_TRANSACTION_ROOT/new/$relative_dest"; then
+            fail '离线 kernel headers 暂存失败'
+            rollback_offline_transaction || true
+            cleanup_offline_import_temporaries
+            trap - INT TERM HUP
+            return 1
+        fi
+        transaction_dirs+=("$relative_dest")
     fi
 
-    # Guest 测试工具
-    if [ -d "$tmpdir/guest_tools" ] && [ "$(ls "$tmpdir/guest_tools" 2>/dev/null | wc -l)" -gt 0 ]; then
-        mkdir -p "${PROJECT_DIR}/build/guest_tools"
-        cp "$tmpdir"/guest_tools/* "${PROJECT_DIR}/build/guest_tools/"
-        ok "Guest 测试工具已导入: build/guest_tools/"
-        imported=$((imported + 1))
-    fi
+    local staged_device final_parent_device
+    for relative_dest in "${transaction_dirs[@]}"; do
+        validate_scoped_transaction_path "$PROJECT_DIR" \
+            "${PROJECT_DIR}/${relative_dest}" || {
+            rollback_offline_transaction || true
+            cleanup_offline_import_temporaries
+            trap - INT TERM HUP
+            return 1
+        }
+        validate_scoped_transaction_path "$OFFLINE_TRANSACTION_ROOT" \
+            "$OFFLINE_TRANSACTION_ROOT/new/${relative_dest}" || {
+            rollback_offline_transaction || true
+            cleanup_offline_import_temporaries
+            trap - INT TERM HUP
+            return 1
+        }
+        validate_scoped_transaction_path "$OFFLINE_TRANSACTION_ROOT" \
+            "$OFFLINE_TRANSACTION_ROOT/backup/${relative_dest}" || {
+            rollback_offline_transaction || true
+            cleanup_offline_import_temporaries
+            trap - INT TERM HUP
+            return 1
+        }
+        mkdir -p "$(dirname "${PROJECT_DIR}/${relative_dest}")" \
+            "$(dirname "$OFFLINE_TRANSACTION_ROOT/backup/${relative_dest}")"
+        if ! staged_device=$(stat -c '%d' -- \
+                "$OFFLINE_TRANSACTION_ROOT/new/${relative_dest}") || \
+                ! final_parent_device=$(stat -c '%d' -- \
+                "$(dirname "${PROJECT_DIR}/${relative_dest}")"); then
+            fail "无法读取离线事务文件系统设备号: $relative_dest"
+            rollback_offline_transaction || true
+            cleanup_offline_import_temporaries
+            trap - INT TERM HUP
+            return 1
+        fi
+        if [ "$staged_device" != "$final_parent_device" ]; then
+            fail "离线事务 new 与 final parent 位于不同文件系统: $relative_dest"
+            rollback_offline_transaction || true
+            cleanup_offline_import_temporaries
+            trap - INT TERM HUP
+            return 1
+        fi
+    done
 
-    rm -rf "$tmpdir"
+    local transaction_status transaction_index original_absent installed_identity
+    for relative_dest in "${transaction_dirs[@]}"; do
+        final_dest="${PROJECT_DIR}/${relative_dest}"
+        backup_dest="${OFFLINE_TRANSACTION_ROOT}/backup/${relative_dest}"
+        staged_dest="${OFFLINE_TRANSACTION_ROOT}/new/${relative_dest}"
+        transaction_index=${#OFFLINE_TRANSACTION_RELATIVES[@]}
+        original_absent=false
+        [ -e "$final_dest" ] || original_absent=true
+        OFFLINE_TRANSACTION_RELATIVES+=("$relative_dest")
+        OFFLINE_TRANSACTION_STATES+=(PREPARED)
+        OFFLINE_TRANSACTION_ORIGINAL_ABSENT+=("$original_absent")
+        installed_identity=$(offline_tree_identity "$staged_dest") || {
+            fail "无法记录离线事务 new identity: $relative_dest"
+            rollback_offline_transaction || true
+            cleanup_offline_import_temporaries
+            trap - INT TERM HUP
+            return 1
+        }
+        OFFLINE_TRANSACTION_INSTALLED_IDENTITIES+=("$installed_identity")
+
+        if [ "$original_absent" = false ]; then
+            OFFLINE_TRANSACTION_TRANSITION=true
+            transaction_status=0
+            if mv -T -- "$final_dest" "$backup_dest"; then
+                OFFLINE_TRANSACTION_STATES[$transaction_index]=BACKED_UP
+            else
+                transaction_status=$?
+                if [ -e "$backup_dest" ] && [ ! -e "$final_dest" ]; then
+                    OFFLINE_TRANSACTION_STATES[$transaction_index]=BACKED_UP
+                fi
+            fi
+            finish_offline_transaction_transition
+            if [ "$transaction_status" -ne 0 ]; then
+                fail "离线包备份失败，正在回滚: $relative_dest"
+                rollback_offline_transaction || true
+                cleanup_offline_import_temporaries
+                trap - INT TERM HUP
+                return 1
+            fi
+        else
+            OFFLINE_TRANSACTION_STATES[$transaction_index]=BACKED_UP
+        fi
+
+        OFFLINE_TRANSACTION_TRANSITION=true
+        transaction_status=0
+        if ! mv -nT -- "$staged_dest" "$final_dest"; then
+            transaction_status=$?
+        fi
+        if [ -e "$staged_dest" ] || [ ! -d "$final_dest" ] || \
+                ! offline_tree_matches_identity "$installed_identity" "$final_dest"; then
+            transaction_status=75
+        else
+            OFFLINE_TRANSACTION_STATES[$transaction_index]=INSTALLED
+        fi
+        finish_offline_transaction_transition
+        if [ "$transaction_status" -ne 0 ]; then
+            fail "离线包提交失败，正在回滚: $relative_dest"
+            rollback_offline_transaction || true
+            cleanup_offline_import_temporaries
+            trap - INT TERM HUP
+            return 1
+        fi
+    done
+
+    for ((index=0; index<${#source_dirs[@]}; index++)); do
+        while IFS= read -r -d '' source_file; do
+            final_file="${PROJECT_DIR}/${relative_dirs[$index]}/$(basename "$source_file")"
+            if ! cmp -s -- "$source_file" "$final_file"; then
+                fail "离线包提交后校验失败，正在回滚: $final_file"
+                rollback_offline_transaction || true
+                cleanup_offline_import_temporaries
+                trap - INT TERM HUP
+                return 1
+            fi
+        done < <(find "${source_dirs[$index]}" -mindepth 1 -maxdepth 1 -type f -print0)
+    done
+
+    for ((index=0; index<${#transaction_dirs[@]}; index++)); do
+        relative_dest="${transaction_dirs[$index]}"
+        if ! offline_tree_matches_identity \
+                "${OFFLINE_TRANSACTION_INSTALLED_IDENTITIES[$index]}" \
+                "$PROJECT_DIR/$relative_dest"; then
+            fail "离线包最终目录校验失败，正在回滚: $relative_dest"
+            rollback_offline_transaction || true
+            cleanup_offline_import_temporaries
+            trap - INT TERM HUP
+            return 1
+        fi
+        OFFLINE_TRANSACTION_STATES[$index]=COMMITTED
+    done
+
+    OFFLINE_TRANSACTION_ACTIVE=false
+    trap - INT TERM HUP
+
+    if [ "$artifact_count" -gt 0 ]; then
+        custom_dest="${PROJECT_DIR}/build/offline-custom-driver"
+        OFFLINE_CUSTOM_DRIVER_DIR="$custom_dest"
+        OFFLINE_CUSTOM_DRIVER_ARCHIVE=$(find "$custom_dest" -maxdepth 1 -type f \
+            \( -name '*.tar.gz' -o -name '*.tgz' \) -printf '%f\n' | sort | head -1 || true)
+        OFFLINE_CUSTOM_DRIVER_COMPAT_RUNTIME=$(find "$custom_dest" -maxdepth 1 -type f \
+            -name 'libc6_*amd64.deb' -printf '%f\n' | sort | head -1 || true)
+        [ -z "$OFFLINE_CUSTOM_DRIVER_ARCHIVE" ] || \
+            OFFLINE_CUSTOM_DRIVER_ARCHIVE="${custom_dest}/${OFFLINE_CUSTOM_DRIVER_ARCHIVE}"
+        [ -z "$OFFLINE_CUSTOM_DRIVER_COMPAT_RUNTIME" ] || \
+            OFFLINE_CUSTOM_DRIVER_COMPAT_RUNTIME="${custom_dest}/${OFFLINE_CUSTOM_DRIVER_COMPAT_RUNTIME}"
+    fi
+    for message in "${messages[@]}"; do
+        ok "$message"
+    done
+    cleanup_offline_import_temporaries
 
     echo ""
     ok "离线包导入完成，共导入 ${imported} 个组件"

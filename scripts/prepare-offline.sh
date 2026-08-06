@@ -3,7 +3,7 @@
 # prepare-offline.sh — 在外网机器上打包离线安装包
 #
 # 用法: ./scripts/prepare-offline.sh [选项]
-#   --guest ubuntu|debian   Guest 类型（默认 ubuntu）
+#   --guest ubuntu|ubuntu-server|debian   Guest 类型（默认 ubuntu）
 #   --output <path>         输出 zip 路径（默认 cosim-offline-<date>.zip）
 #   --skip-rootfs           跳过 rootfs 构建（已有镜像时）
 #   --custom-driver <path>  DPU host-driver-net 源码包（可选）
@@ -45,14 +45,41 @@ while [ $# -gt 0 ]; do
         --custom-driver) CUSTOM_DRIVER_ARCHIVE="$2"; shift 2 ;;
         --compat-runtime-deb) COMPAT_RUNTIME_DEB="$2"; shift 2 ;;
         --help|-h)
-            echo "用法: $0 [--guest ubuntu|debian] [--output path.zip] [--custom-driver path.tar.gz] [--compat-runtime-deb libc6.deb] [--skip-rootfs]"
+            echo "用法: $0 [--guest ubuntu|ubuntu-server|debian] [--output path.zip] [--custom-driver path.tar.gz] [--compat-runtime-deb libc6.deb] [--skip-rootfs]"
             exit 0 ;;
         *) fail "未知参数: $1"; exit 1 ;;
     esac
 done
 
+case "$GUEST_TYPE" in
+    ubuntu|ubuntu-server|debian) ;;
+    *) fail "不支持的 Guest 类型: $GUEST_TYPE"; exit 1 ;;
+esac
+
 OUTPUT="${OUTPUT:-${PROJECT_DIR}/cosim-offline-$(date +%Y%m%d).zip}"
-STAGING="${PROJECT_DIR}/build/offline-staging"
+TMP_ROOT="${PROJECT_DIR}/build/tmp"
+mkdir -p "$TMP_ROOT"
+STAGING=$(mktemp -d "$TMP_ROOT/offline-staging.XXXXXX")
+PACKAGE_TMP=""
+MD5_TMP=""
+ACTIVE_MOUNT=""
+
+cleanup() {
+    local status=$?
+    trap - EXIT INT TERM HUP
+    if [ -n "$ACTIVE_MOUNT" ]; then
+        sudo umount -- "$ACTIVE_MOUNT" >/dev/null 2>&1 || true
+    fi
+    rm -rf -- "$STAGING"
+    if [ -n "$PACKAGE_TMP" ]; then
+        rm -f -- "$PACKAGE_TMP"
+    fi
+    if [ -n "$MD5_TMP" ]; then
+        rm -f -- "$MD5_TMP"
+    fi
+    exit "$status"
+}
+trap cleanup EXIT INT TERM HUP
 
 echo ""
 echo -e "${BOLD}============================================================${NC}"
@@ -79,9 +106,79 @@ for cmd in curl zip; do
     fi
 done
 
-# ---- 清理 staging 目录 ----
-rm -rf "$STAGING"
-mkdir -p "$STAGING"/{qemu-src,guest/debian,guest/ubuntu,kheaders,custom-driver}
+# ---- 准备 staging 目录 ----
+mkdir -p "$STAGING"/{qemu-src,guest/debian,guest/ubuntu,guest/ubuntu-server,kheaders}
+
+rootfs_path_exists() {
+    local root="$1" guest_path="$2"
+    local full_path="${root}${guest_path}" link_target resolved
+
+    if [ ! -L "$full_path" ]; then
+        [ -e "$full_path" ]
+        return
+    fi
+    link_target=$(readlink -- "$full_path") || return 1
+    case "$link_target" in
+        /*) resolved=$(realpath -m -- "${root}${link_target}") ;;
+        *) resolved=$(realpath -m -- "$(dirname "$full_path")/${link_target}") ;;
+    esac
+    case "$resolved" in
+        "$root"/*) [ -e "$resolved" ] ;;
+        *) return 1 ;;
+    esac
+}
+
+validate_rootfs() {
+    local image="$1" profile="$2"
+    local mount_dir validation_failed=0 unmount_failed=0
+    mount_dir=$(mktemp -d "$TMP_ROOT/offline-rootfs-${profile}.XXXXXX")
+
+    if ! sudo mount -o loop,ro,nosuid,nodev -- "$image" "$mount_dir"; then
+        fail "无法只读挂载 ${profile} rootfs: $image"
+        rm -rf -- "$mount_dir"
+        return 1
+    fi
+    ACTIVE_MOUNT="$mount_dir"
+
+    for required in /usr/local/bin/pci_debug /usr/local/bin/reg_display; do
+        if [ ! -x "${mount_dir}${required}" ]; then
+            fail "${profile} rootfs 缺少可执行文件: ${required}"
+            validation_failed=1
+        fi
+    done
+
+    if [ "$profile" = ubuntu-server ]; then
+        if ! grep -Eq '^ID=ubuntu$' "$mount_dir/etc/os-release" 2>/dev/null; then
+            fail 'ubuntu-server rootfs 的 /etc/os-release 缺少 ID=ubuntu'
+            validation_failed=1
+        fi
+        if ! grep -Eq '^VERSION_ID="?24\.04"?$' "$mount_dir/etc/os-release" 2>/dev/null; then
+            fail 'ubuntu-server rootfs 的 /etc/os-release 缺少 VERSION_ID="24.04"'
+            validation_failed=1
+        fi
+        for required in \
+            /usr/bin/gcc \
+            /usr/bin/make \
+            "/usr/src/linux-headers-${KVER}/Makefile" \
+            "/lib/modules/${KVER}/build" \
+            /opt/dpu-debugutils/Makefile; do
+            if ! rootfs_path_exists "$mount_dir" "$required"; then
+                fail "ubuntu-server rootfs 缺少: ${required}"
+                validation_failed=1
+            fi
+        done
+    fi
+
+    if ! sudo umount -- "$mount_dir"; then
+        fail "无法卸载 ${profile} rootfs: $mount_dir"
+        unmount_failed=1
+    else
+        ACTIVE_MOUNT=""
+        rm -rf -- "$mount_dir"
+    fi
+
+    [ "$validation_failed" -eq 0 ] && [ "$unmount_failed" -eq 0 ]
+}
 
 PASS=0
 FAIL_COUNT=0
@@ -198,6 +295,59 @@ else
 fi
 
 # ============================================================
+# Ubuntu Server kernel + rootfs（选择该 profile 时必须完整）
+# ============================================================
+UBUNTU_SERVER_DIR="${PROJECT_DIR}/guest/images/ubuntu-server"
+if [ "$GUEST_TYPE" = ubuntu-server ]; then
+    if [ ! -f "${UBUNTU_SERVER_DIR}/vmlinuz" ] || \
+            [ ! -f "${UBUNTU_SERVER_DIR}/modules.tar.gz" ] || \
+            [ ! -f "${UBUNTU_SERVER_DIR}/rootfs.ext4" ]; then
+        if [ "$SKIP_ROOTFS" = false ] && \
+                [ -x "${PROJECT_DIR}/scripts/build_rootfs_ubuntu_server.sh" ]; then
+            info "构建独立 Ubuntu Server rootfs..."
+            "${PROJECT_DIR}/scripts/build_rootfs_ubuntu_server.sh" "$UBUNTU_SERVER_DIR" || true
+        fi
+    fi
+
+    missing_artifacts=()
+    for artifact in vmlinuz modules.tar.gz rootfs.ext4; do
+        [ -f "${UBUNTU_SERVER_DIR}/${artifact}" ] || missing_artifacts+=("$artifact")
+    done
+    if [ "${#missing_artifacts[@]}" -ne 0 ]; then
+        fail "Ubuntu Server 离线包缺少完整产物: ${missing_artifacts[*]}"
+        exit 1
+    fi
+    if [ ! -f "${UBUNTU_DIR}/vmlinuz" ] || [ ! -f "${UBUNTU_DIR}/rootfs.ext4" ]; then
+        fail 'Ubuntu Server 离线包还要求完整 compact Ubuntu 产物: vmlinuz rootfs.ext4'
+        exit 1
+    fi
+
+    cp "${UBUNTU_SERVER_DIR}/vmlinuz" "${STAGING}/guest/ubuntu-server/"
+    cp "${UBUNTU_SERVER_DIR}/modules.tar.gz" "${STAGING}/guest/ubuntu-server/"
+    cp "${UBUNTU_SERVER_DIR}/rootfs.ext4" "${STAGING}/guest/ubuntu-server/"
+    ok "Ubuntu Server 镜像已复制"
+    PASS=$((PASS + 1))
+fi
+
+UBUNTU_SERVER_HAS_HEADERS=false
+case "$GUEST_TYPE" in
+    ubuntu)
+        validate_rootfs "${UBUNTU_DIR}/rootfs.ext4" ubuntu || exit 1
+        ;;
+    ubuntu-server)
+        validate_rootfs "${UBUNTU_DIR}/rootfs.ext4" ubuntu || exit 1
+        if validate_rootfs "${UBUNTU_SERVER_DIR}/rootfs.ext4" ubuntu-server; then
+            UBUNTU_SERVER_HAS_HEADERS=true
+        else
+            exit 1
+        fi
+        ;;
+    debian)
+        validate_rootfs "${DEBIAN_DIR}/rootfs.ext4" debian || exit 1
+        ;;
+esac
+
+# ============================================================
 # [4/5] Kernel headers（用于编译 cosim_nic.ko）
 # ============================================================
 echo ""
@@ -311,6 +461,7 @@ if [ -n "$CUSTOM_DRIVER_ARCHIVE" ]; then
         fail "DPU 驱动源码包结构校验失败"
         FAIL_COUNT=$((FAIL_COUNT + 1))
     else
+        mkdir -p "${STAGING}/custom-driver"
         CUSTOM_ARCHIVE_NAME=$(basename "$CUSTOM_DRIVER_ARCHIVE")
         cp "$CUSTOM_DRIVER_ARCHIVE" "${STAGING}/custom-driver/${CUSTOM_ARCHIVE_NAME}"
         if [ -n "$COMPAT_RUNTIME_DEB" ]; then
@@ -327,7 +478,7 @@ fi
 # ============================================================
 cat > "${STAGING}/offline-meta.env" << EOF
 # CoSim 离线包元数据（自动生成，请勿修改）
-OFFLINE_VERSION=2
+OFFLINE_VERSION=3
 OFFLINE_DATE=$(date +%Y-%m-%d)
 OFFLINE_GUEST_TYPE=${GUEST_TYPE}
 OFFLINE_KVER=${KVER}
@@ -337,6 +488,9 @@ OFFLINE_CUSTOM_DPU_RUNTIME=${COMPAT_RUNTIME_NAME}
 OFFLINE_QEMU_VERSION=${QEMU_VERSION}
 OFFLINE_HAS_DEBIAN_ROOTFS=$([ -f "${STAGING}/guest/debian/rootfs.ext4" ] && echo true || echo false)
 OFFLINE_HAS_UBUNTU_ROOTFS=$([ -f "${STAGING}/guest/ubuntu/rootfs.ext4" ] && echo true || echo false)
+OFFLINE_HAS_UBUNTU_SERVER_ROOTFS=$([ -f "${STAGING}/guest/ubuntu-server/rootfs.ext4" ] && echo true || echo false)
+OFFLINE_UBUNTU_SERVER_HAS_HEADERS=${UBUNTU_SERVER_HAS_HEADERS}
+OFFLINE_DPU_DEBUGUTILS_SHA256=1da850673e19b04a239456ae119527a7937cf13bfefdc7236c7570ffdd3d11ab
 OFFLINE_HAS_UBUNTU_KERNEL=$([ -f "${STAGING}/guest/ubuntu/vmlinuz" ] && echo true || echo false)
 OFFLINE_HAS_KHEADERS=$_headers_ok
 OFFLINE_HAS_COSIM_NIC=$([ -f "${STAGING}/driver/cosim_nic_${KVER}.ko" ] && echo true || echo false)
@@ -348,34 +502,42 @@ EOF
 echo ""
 echo -e "${BOLD}打包离线安装包...${NC}"
 
+if [ "$FAIL_COUNT" -gt 0 ]; then
+    fail "有 ${FAIL_COUNT} 个组件准备失败，拒绝发布不完整离线包"
+    exit 1
+fi
+
 cd "$STAGING"
 info "正在压缩（大文件可能需要几分钟）..."
-if ! zip -qr "$OUTPUT" .; then
+PACKAGE_TMP=$(mktemp "$TMP_ROOT/offline-package.XXXXXX.zip")
+rm -f -- "$PACKAGE_TMP"
+if ! zip -qr "$PACKAGE_TMP" .; then
     fail "zip 打包失败（磁盘空间不足？）"
     cd "$PROJECT_DIR"
-    rm -rf "$STAGING"
     exit 1
 fi
 
 # 校验 zip 完整性
 info "校验 zip 完整性..."
-if ! zip -T "$OUTPUT" &>/dev/null; then
+if ! zip -T "$PACKAGE_TMP" &>/dev/null; then
     fail "zip 文件校验失败，文件可能损坏"
     cd "$PROJECT_DIR"
-    rm -rf "$STAGING"
     exit 1
 fi
 ok "zip 校验通过"
 
 cd "$PROJECT_DIR"
-rm -rf "$STAGING"
-
-# 生成 md5sum 便于传输后校验
 output_dir=$(dirname "$OUTPUT")
 output_base=$(basename "$OUTPUT")
-(
-    cd "$output_dir" && md5sum "$output_base" > "${output_base}.md5"
-)
+mkdir -p "$output_dir"
+mv -f -- "$PACKAGE_TMP" "$OUTPUT"
+PACKAGE_TMP=""
+
+# 生成 md5sum 便于传输后校验
+MD5_TMP=$(mktemp "$TMP_ROOT/offline-package-md5.XXXXXX")
+printf '%s  %s\n' "$(md5sum -- "$OUTPUT" | awk '{ print $1 }')" "$output_base" > "$MD5_TMP"
+mv -f -- "$MD5_TMP" "${OUTPUT}.md5"
+MD5_TMP=""
 
 echo ""
 echo -e "${BOLD}============================================================${NC}"
