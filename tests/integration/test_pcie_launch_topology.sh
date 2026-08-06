@@ -6,9 +6,18 @@ makefile="$project_dir/Makefile"
 setup_script="$project_dir/setup.sh"
 xrc_driver=${XRC_DRIVER:-"$project_dir/vcs-tb/cosim_xrc_driver.sv"}
 qemu_rc="$project_dir/qemu-plugin/cosim_pcie_rc.c"
-qemu_mmio_header="$project_dir/qemu-plugin/cosim_mmio_be.h"
+qemu_mmio_include='hw/net/cosim_mmio_be.h'
+qemu_mmio_header_relative='qemu-plugin/cosim_mmio_be.h'
+qemu_mmio_header="$project_dir/$qemu_mmio_header_relative"
 make_mmio_sync_line=$'\t@cp "$(PROJECT_DIR)/qemu-plugin/cosim_mmio_be.h" "$(QEMU_SRC_DIR)/include/hw/net/cosim_mmio_be.h"'
 setup_mmio_sync_line='        cp "${PROJECT_DIR}/qemu-plugin/cosim_mmio_be.h" "${QEMU_DIR}/include/hw/net/"'
+fixture_parent="$project_dir/build/tmp"
+mkdir -p "$fixture_parent"
+fixture_root=$(mktemp -d "$fixture_parent/test-pcie-launch-topology.XXXXXX")
+cleanup() {
+    rm -rf -- "$fixture_root"
+}
+trap cleanup EXIT
 
 has_exact_line() {
     local content=$1
@@ -17,14 +26,111 @@ has_exact_line() {
     grep -Fxq -- "$expected" <<<"$content"
 }
 
+qemu_mmio_header_is_tracked() {
+    local header_path=$1
+    local tracked_path
+
+    [[ -f "$header_path" ]] || return 1
+    tracked_path=$(git -C "$project_dir" ls-files --error-unmatch -- \
+        "$qemu_mmio_header_relative" 2>/dev/null) || return 1
+    [[ "$tracked_path" == "$qemu_mmio_header_relative" ]] || return 1
+    [[ "$header_path" == "$project_dir/$tracked_path" ]]
+}
+
+qemu_rc_depends_on_mmio_header() {
+    local rc_path=$1
+    local dependencies
+
+    if ! dependencies=$(cpp -MM -MG "$rc_path"); then
+        return 1
+    fi
+    awk -v expected="$qemu_mmio_include" '
+        {
+            for (field = 1; field <= NF; field++) {
+                token = $field
+                sub(/\\$/, "", token)
+                if (token == expected)
+                    found = 1
+            }
+        }
+        END { exit !found }
+    ' <<<"$dependencies"
+}
+
+qemu_device_executes_mmio_sync() {
+    local make_body=$1
+    local make_fixture make_output expected_output
+
+    make_fixture=$(mktemp "$fixture_root/qemu-device.XXXXXX.mk")
+    {
+        printf 'PROJECT_DIR := %s\n' "$project_dir"
+        printf 'QEMU_SRC_DIR := $(PROJECT_DIR)/third_party/qemu\n'
+        printf 'QEMU_BUILD := $(QEMU_SRC_DIR)/build\n'
+        printf '.PHONY: bridge qemu-device\n'
+        printf 'bridge:\n\t@:\n'
+        printf '%s\n' "$make_body"
+    } >"$make_fixture"
+    if ! make_output=$(make --no-print-directory -n -f "$make_fixture" \
+            qemu-device 2>&1); then
+        return 1
+    fi
+    expected_output="cp \"$qemu_mmio_header\" \"$project_dir/third_party/qemu/include/hw/net/cosim_mmio_be.h\""
+    has_exact_line "$make_output" "$expected_output"
+}
+
+setup_injection_executes_mmio_sync() {
+    local setup_body=$1
+    local setup_fixture qemu_fixture target_header source_hash target_hash
+
+    setup_fixture=$(mktemp -d "$fixture_root/setup-injection.XXXXXX")
+    qemu_fixture="$setup_fixture/qemu"
+    mkdir -p "$qemu_fixture/hw/net" "$qemu_fixture/include/hw/net"
+    {
+        printf '#!/bin/bash\nset -euo pipefail\n'
+        printf 'info() { :; }\n'
+        printf '%s\n' "$setup_body"
+    } >"$setup_fixture/inject.sh"
+    if ! PROJECT_DIR="$project_dir" QEMU_DIR="$qemu_fixture" \
+            bash "$setup_fixture/inject.sh"; then
+        return 1
+    fi
+    target_header="$qemu_fixture/include/hw/net/cosim_mmio_be.h"
+    [[ -f "$target_header" ]] || return 1
+    source_hash=$(sha256sum "$qemu_mmio_header") || return 1
+    target_hash=$(sha256sum "$target_header") || return 1
+    [[ "${source_hash%% *}" == "${target_hash%% *}" ]]
+}
+
 qemu_mmio_injection_contract_is_valid() {
     local make_body=$1
     local setup_body=$2
+    local header_path=${3:-$qemu_mmio_header}
+    local rc_path=${4:-$qemu_rc}
 
-    [[ -f "$qemu_mmio_header" ]] &&
-        grep -Fxq '#include "hw/net/cosim_mmio_be.h"' "$qemu_rc" &&
-        has_exact_line "$make_body" "$make_mmio_sync_line" &&
-        has_exact_line "$setup_body" "$setup_mmio_sync_line"
+    qemu_mmio_header_is_tracked "$header_path" &&
+        qemu_rc_depends_on_mmio_header "$rc_path" &&
+        qemu_device_executes_mmio_sync "$make_body" &&
+        setup_injection_executes_mmio_sync "$setup_body"
+}
+
+extract_unique_setup_qemu_injection_body() {
+    awk '
+        $0 == "    if [ \"$NEED_QEMU\" = true ] && [ -d \"$QEMU_DIR\" ]; then" {
+            starts++
+            active = 1
+            next
+        }
+        active && $0 == "        MESON_FILE=\"${QEMU_DIR}/hw/net/meson.build\"" {
+            ends++
+            active = 0
+            next
+        }
+        active { print }
+        END {
+            if (starts != 1 || ends != 1 || active)
+                exit 1
+        }
+    ' "$setup_script"
 }
 
 require_profile_pattern() {
@@ -157,9 +263,10 @@ if ! grep -Eq '^run-qemu:[[:space:]]+validate-pcie-pref64-reserve([[:space:]]|$)
 fi
 
 qemu_device_body=$(sed -n '/^qemu-device:/,/^# host_mem/p' "$makefile")
-setup_qemu_injection_body=$(sed -n \
-    '/^    if \[ "$NEED_QEMU" = true \] && \[ -d "$QEMU_DIR" \]; then$/,/^        MESON_FILE=/p' \
-    "$setup_script")
+if ! setup_qemu_injection_body=$(extract_unique_setup_qemu_injection_body); then
+    echo "FAIL: setup.sh must contain exactly one initial QEMU injection block" >&2
+    exit 1
+fi
 if ! grep -Eq '^qemu-device:[[:space:]]+bridge([[:space:]]|$)' "$makefile"; then
     echo "FAIL: qemu-device does not rebuild its bridge library dependency" >&2
     exit 1
@@ -175,14 +282,14 @@ for sync_cmd in \
 done
 if ! qemu_mmio_injection_contract_is_valid \
         "$qemu_device_body" "$setup_qemu_injection_body"; then
-    if [[ ! -f "$qemu_mmio_header" ]]; then
-        echo "FAIL: tracked qemu-plugin/cosim_mmio_be.h is missing" >&2
-    elif ! grep -Fxq '#include "hw/net/cosim_mmio_be.h"' "$qemu_rc"; then
-        echo "FAIL: cosim_pcie_rc.c does not actively include hw/net/cosim_mmio_be.h" >&2
-    elif ! has_exact_line "$qemu_device_body" "$make_mmio_sync_line"; then
-        echo "FAIL: qemu-device does not actively sync cosim_mmio_be.h" >&2
+    if ! qemu_mmio_header_is_tracked "$qemu_mmio_header"; then
+        echo "FAIL: qemu-plugin/cosim_mmio_be.h is not the tracked source header" >&2
+    elif ! qemu_rc_depends_on_mmio_header "$qemu_rc"; then
+        echo "FAIL: cpp dependencies do not contain active hw/net/cosim_mmio_be.h" >&2
+    elif ! qemu_device_executes_mmio_sync "$qemu_device_body"; then
+        echo "FAIL: qemu-device dry run does not execute the cosim_mmio_be.h sync" >&2
     else
-        echo "FAIL: setup QEMU injection block does not actively sync cosim_mmio_be.h" >&2
+        echo "FAIL: setup QEMU injection does not copy matching cosim_mmio_be.h bytes" >&2
     fi
     exit 1
 fi
@@ -194,6 +301,47 @@ fi
 if qemu_mmio_injection_contract_is_valid \
         "$qemu_device_body" "$setup_without_mmio"; then
     echo "FAIL: setup cosim_mmio_be.h deletion mutation was incorrectly accepted" >&2
+    exit 1
+fi
+untracked_header="$fixture_root/untracked-cosim_mmio_be.h"
+commented_rc="$fixture_root/cosim_pcie_rc-block-comment.c"
+cp "$qemu_mmio_header" "$untracked_header"
+awk '
+    $0 == "#include \"hw/net/cosim_mmio_be.h\"" {
+        print "/*"
+        print
+        print "*/"
+        next
+    }
+    { print }
+' "$qemu_rc" >"$commented_rc"
+make_with_disabled_mmio=${qemu_device_body/"$make_mmio_sync_line"/$'ifeq (1,0)\n'"$make_mmio_sync_line"$'\nendif'}
+setup_with_disabled_mmio=${setup_qemu_injection_body/"$setup_mmio_sync_line"/$'        if false; then\n'"$setup_mmio_sync_line"$'\n        fi'}
+contract_false_greens=0
+if qemu_mmio_injection_contract_is_valid \
+        "$qemu_device_body" "$setup_qemu_injection_body" \
+        "$untracked_header" "$qemu_rc"; then
+    echo "FAIL: MMIO injection contract accepted an untracked header fixture" >&2
+    contract_false_greens=$((contract_false_greens + 1))
+fi
+if qemu_mmio_injection_contract_is_valid \
+        "$qemu_device_body" "$setup_qemu_injection_body" \
+        "$qemu_mmio_header" "$commented_rc"; then
+    echo "FAIL: MMIO injection contract accepted a block-comment include fixture" >&2
+    contract_false_greens=$((contract_false_greens + 1))
+fi
+if qemu_mmio_injection_contract_is_valid \
+        "$make_with_disabled_mmio" "$setup_qemu_injection_body"; then
+    echo "FAIL: MMIO injection contract accepted an ifeq-disabled Make recipe" >&2
+    contract_false_greens=$((contract_false_greens + 1))
+fi
+if qemu_mmio_injection_contract_is_valid \
+        "$qemu_device_body" "$setup_with_disabled_mmio"; then
+    echo "FAIL: MMIO injection contract accepted an if-false setup copy" >&2
+    contract_false_greens=$((contract_false_greens + 1))
+fi
+if ((contract_false_greens != 0)); then
+    echo "FAIL: MMIO injection contract false greens: $contract_false_greens/4" >&2
     exit 1
 fi
 
