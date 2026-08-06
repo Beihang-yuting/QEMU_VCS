@@ -96,3 +96,7 @@ set_tests_properties(test_tcp_roundtrip PROPERTIES TIMEOUT 30)
 add_test(NAME test_dpu_debugutils_build
          COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/test_dpu_debugutils_build.sh)
 set_tests_properties(test_dpu_debugutils_build PROPERTIES TIMEOUT 60)
+
+add_test(NAME test_stage_guest_debugutils
+         COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/test_stage_guest_debugutils.sh)
+set_tests_properties(test_stage_guest_debugutils PROPERTIES TIMEOUT 30)
