@@ -146,6 +146,16 @@ EARLY_DIRNAME
     fi
     [ ! -e "$work/early-password-leak" ] ||
         fail 'Guest password leaked into the builder earliest child process'
+    dry_mount_line="$(grep -F 'Mounts:' <<<"$builder_output")"
+    expected_dry_mount_line='Mounts: root loop,nosuid (exec); sys/proc nosuid,nodev,noexec; dev/devpts nosuid'
+    [ "$dry_mount_line" = "$expected_dry_mount_line" ] ||
+        fail 'Ubuntu Server dry-run does not report the exact writable root mount options'
+    dry_root_mount="${dry_mount_line%%;*}"
+    case "$dry_root_mount" in
+        *nodev*|*noexec*)
+            fail 'Ubuntu Server dry-run claims the writable root uses nodev/noexec'
+            ;;
+    esac
 
     for expected in \
         'noble' '8G' '6.8.0-107-generic' \

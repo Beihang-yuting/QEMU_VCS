@@ -700,7 +700,7 @@ Apt sources:
   ${ARCHIVE_MIRROR} ${SUITE}-updates main universe
   ${SECURITY_MIRROR} ${SUITE}-security main universe
 Packages: ${PACKAGES[*]}
-Mounts: root loop nosuid,nodev (exec); sys/proc nosuid,nodev,noexec; dev/devpts nosuid
+Mounts: root loop,nosuid (exec); sys/proc nosuid,nodev,noexec; dev/devpts nosuid
 Cleanup order: /dev/pts -> /dev -> /proc -> /sys -> root
 Modules: extract modules.tar.gz into ROOT; depmod -b ROOT ${KVER}
 Headers: verify /lib/modules/${KVER}/build/Makefile and exact installed header package
