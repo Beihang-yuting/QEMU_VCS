@@ -148,10 +148,9 @@ class cosim_xrc_driver extends pcie_tl_rc_driver;
 
     virtual function bit handle_completion(pcie_tl_cpl_tlp cpl);
         // The generic env also invokes this callback after publishing to the
-        // monitor.  During cosim, rx_loop owns the one real base-class consume.
-        if (cosim_active)
-            return 1;
-        return super.handle_completion(cpl);
+        // monitor. Its return value is ignored there; rx_loop owns the one real
+        // base-class consume in both the VIP and QEMU stages.
+        return 1;
     endfunction
 
     // -----------------------------------------------------------------------
@@ -368,7 +367,8 @@ class cosim_xrc_driver extends pcie_tl_rc_driver;
             `uvm_info(get_name(), $sformatf("RC%0d start_cosim: stop VIP, draining", rc_index),
                       UVM_LOW)
             disable vip_stage;                    // 停止 VIP 发新包
-            wait (get_pending_count() == 0);      // drain: rx_loop 收干净 in-flight cpl
+            while (get_pending_count() != 0)      // drain: rx_loop 收干净 in-flight cpl
+                #(polling_interval_ns * 1ns);
             `uvm_info(get_name(), $sformatf("RC%0d drained, switch to QEMU", rc_index),
                       UVM_LOW)
         end
