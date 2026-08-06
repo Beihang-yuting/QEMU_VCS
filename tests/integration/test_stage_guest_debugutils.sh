@@ -501,6 +501,11 @@ printf 'root:*:1:1:1:1:1:1:1\n' >"$root/etc/shadow"
 if [[ "${DEBIAN_WITH_INITRD:-0}" == 1 ]]; then
     printf 'fixture initrd\n' >"$root/boot/initrd.img-fixture"
 fi
+if [[ "${DEBIAN_SYMLINK_MOUNT_TARGET:-}" == /dev ]]; then
+    rmdir "$root/dev"
+    mkdir -p "${DEBIAN_FIXTURE}/escaped-mount-dev"
+    ln -s "${DEBIAN_FIXTURE}/escaped-mount-dev" "$root/dev"
+fi
 DEBIAN_DEBOOTSTRAP_SHIM
 
 cat >"${DEBIAN_FAKE_BIN}/dd" <<'DEBIAN_DD_SHIM'
@@ -559,6 +564,12 @@ if [[ "${DEBIAN_UMOUNT_STICKY_TARGET:-}" == "$target_kind" ]]; then
     printf 'umount-still-mounted:%s\n' "$target" >>"${DEBIAN_LOG}"
     exit 0
 fi
+if [[ "${DEBIAN_UMOUNT_STICKY_ONCE_TARGET:-}" == "$target_kind" &&
+      ! -e "${DEBIAN_SIGNAL_STATE}.umount-sticky-once" ]]; then
+    : >"${DEBIAN_SIGNAL_STATE}.umount-sticky-once"
+    printf 'umount-still-mounted-once:%s\n' "$target" >>"${DEBIAN_LOG}"
+    exit 0
+fi
 if awk -v prefix="$target/" 'index($0, prefix) == 1 { found = 1 } END { exit !found }' \
         "${DEBIAN_MOUNT_STATE}"; then
     printf 'umount-has-child:%s\n' "$target" >>"${DEBIAN_LOG}"
@@ -568,7 +579,10 @@ awk -v target="$target" '$0 != target' "${DEBIAN_MOUNT_STATE}" \
     >"${DEBIAN_MOUNT_STATE}.new"
 mv "${DEBIAN_MOUNT_STATE}.new" "${DEBIAN_MOUNT_STATE}"
 if [[ "$target" == "$root" ]]; then
-    rm -f "$target/.fixture-mounted"
+    /usr/bin/find "$target" -mindepth 1 -delete
+    if [[ "${DEBIAN_ROOT_UNMOUNT_SENTINEL:-0}" == 1 ]]; then
+        printf 'host mountpoint sentinel\n' >"$target/host-sentinel"
+    fi
     printf 'umount-root:%s\n' "$target" >>"${DEBIAN_LOG}"
 fi
 if [[ "${DEBIAN_SIGNAL_DURING_UMOUNT_TARGET:-}" == "$target_kind" &&
@@ -585,6 +599,11 @@ target=${@: -1}
 root=$(cat "${DEBIAN_MOUNT_FILE}")
 target_kind=${target#"${root}"}
 [[ -n "$target_kind" ]] || target_kind=root
+if [[ "${DEBIAN_MOUNTPOINT_ERROR_ONCE_TARGET:-}" == "$target_kind" &&
+      ! -e "${DEBIAN_SIGNAL_STATE}.mountpoint-error-once" ]]; then
+    : >"${DEBIAN_SIGNAL_STATE}.mountpoint-error-once"
+    exit 65
+fi
 if [[ "${DEBIAN_MOUNTPOINT_ERROR_TARGET:-}" == "$target_kind" ]]; then
     exit 65
 fi
@@ -597,7 +616,54 @@ if [[ "${DEBIAN_SECOND_SIGNAL_DURING_VERIFY_TARGET:-}" == "$target_kind" &&
     : >"${DEBIAN_SIGNAL_STATE}.second"
     kill -INT "$PPID"
 fi
-exit "${DEBIAN_MOUNTPOINT_INACTIVE_STATUS:-32}"
+inactive_status=${DEBIAN_MOUNTPOINT_INACTIVE_STATUS:-32}
+if [[ "${1:-}" != -q && "$inactive_status" -eq 1 ]]; then
+    [[ "${LC_ALL:-}" == C ]] || exit 97
+    diagnostic_kind=not-mounted
+    if [[ -z "${DEBIAN_MOUNTPOINT_DIAGNOSTIC_TARGET:-}" ||
+          "${DEBIAN_MOUNTPOINT_DIAGNOSTIC_TARGET}" == "$target_kind" ]]; then
+        diagnostic_kind=${DEBIAN_MOUNTPOINT_DIAGNOSTIC_KIND:-not-mounted}
+    fi
+    case "$diagnostic_kind" in
+        not-mounted)
+            printf '%s is not a mountpoint\n' "$target"
+            ;;
+        missing)
+            printf 'mountpoint: %s: No such file or directory\n' "$target" >&2
+            ;;
+        permission)
+            printf 'mountpoint: %s: Permission denied\n' "$target" >&2
+            ;;
+        system)
+            printf 'mountpoint: failed to read mount table: Input/output error\n' >&2
+            ;;
+        unexpected)
+            printf 'warning: %s is not a mountpoint\n' "$target" >&2
+            ;;
+        identity-change)
+            identity_counter_file="${DEBIAN_SIGNAL_STATE}.identity-change"
+            identity_counter=0
+            [[ ! -f "$identity_counter_file" ]] ||
+                identity_counter=$(<"$identity_counter_file")
+            identity_counter=$((identity_counter + 1))
+            printf '%s\n' "$identity_counter" >"$identity_counter_file"
+            mv "$target" "${target}.identity-${identity_counter}"
+            mkdir "$target"
+            printf '%s is not a mountpoint\n' "$target"
+            ;;
+        identity-change-once)
+            identity_once_file="${DEBIAN_SIGNAL_STATE}.identity-change-once"
+            if [[ ! -e "$identity_once_file" ]]; then
+                : >"$identity_once_file"
+                mv "$target" "${target}.identity-once"
+                mkdir "$target"
+            fi
+            printf '%s is not a mountpoint\n' "$target"
+            ;;
+        *) exit 96 ;;
+    esac
+fi
+exit "$inactive_status"
 DEBIAN_MOUNTPOINT_SHIM
 
 cat >"${DEBIAN_FAKE_BIN}/chroot" <<'DEBIAN_CHROOT_SHIM'
@@ -635,13 +701,22 @@ case "${DEBIAN_RM_FAIL_KIND:-}:$target" in
         printf 'rm-repack-failed:%s\n' "$target" >>"${DEBIAN_LOG}"
         exit 67
         ;;
-    root:"${DEBIAN_FIXTURE}/build/tmp/debian-rootfs."*)
-        printf 'rm-root-failed:%s\n' "$target" >>"${DEBIAN_LOG}"
-        exit 68
-        ;;
 esac
 exec /usr/bin/rm "$@"
 DEBIAN_RM_SHIM
+
+cat >"${DEBIAN_FAKE_BIN}/rmdir" <<'DEBIAN_RMDIR_SHIM'
+#!/usr/bin/env bash
+set -euo pipefail
+target=${@: -1}
+case "${DEBIAN_RMDIR_FAIL_KIND:-}:$target" in
+    root:"${DEBIAN_FIXTURE}/build/tmp/debian-rootfs."*)
+        printf 'rmdir-root-failed:%s\n' "$target" >>"${DEBIAN_LOG}"
+        exit 68
+        ;;
+esac
+exec /usr/bin/rmdir "$@"
+DEBIAN_RMDIR_SHIM
 
 cat >"${DEBIAN_FAKE_BIN}/ls" <<'DEBIAN_LS_SHIM'
 #!/usr/bin/env bash
@@ -687,7 +762,8 @@ test "${unmount_event}" = "umount-root:${DEBIAN_MOUNT_DIR}" ||
     fail 'Debian builder did not unmount its root after staging'
 
 # util-linux mountpoint commonly returns 1 for an ordinary non-mountpoint.
-# The builder must treat that documented result as safely unmounted too.
+# Accept it only after an exact C-locale non-quiet diagnostic for the same
+# existing, controlled directory.
 : >"${DEBIAN_LOG}"
 : >"${DEBIAN_MOUNT_STATE}"
 if ! DEBIAN_MOUNTPOINT_INACTIVE_STATUS=1 run_debian_builder \
@@ -701,21 +777,152 @@ test ! -e "${DEBIAN_STATUS_ONE_MOUNT_DIR}" ||
 grep -Fxq 'losetup-detach' "${DEBIAN_LOG}" ||
     fail 'Debian builder did not detach the loop after mountpoint returned 1'
 
+# Status 32 remains the unambiguous util-linux non-mountpoint result used by
+# newer versions.  Keep an explicit case alongside the status-1 compatibility
+# fixture; status 0 is covered below by the sticky mounted-root case.
+: >"${DEBIAN_LOG}"
+: >"${DEBIAN_MOUNT_STATE}"
+if ! DEBIAN_MOUNTPOINT_INACTIVE_STATUS=32 run_debian_builder \
+        >"${DEBIAN_FIXTURE}/mountpoint-thirty-two.stdout" \
+        2>"${DEBIAN_FIXTURE}/mountpoint-thirty-two.stderr"; then
+    fail "Debian builder rejected mountpoint status 32: $(<"${DEBIAN_FIXTURE}/mountpoint-thirty-two.stderr")"
+fi
+
+# Every queried mount path must be one of the builder's known directories and
+# must canonically retain that identity.  Never mount through a Guest symlink.
+: >"${DEBIAN_LOG}"
+: >"${DEBIAN_MOUNT_STATE}"
+set +e
+DEBIAN_SYMLINK_MOUNT_TARGET=/dev run_debian_builder \
+    >"${DEBIAN_FIXTURE}/symlink-mount-target.stdout" \
+    2>"${DEBIAN_FIXTURE}/symlink-mount-target.stderr"
+DEBIAN_SYMLINK_MOUNT_TARGET_STATUS=$?
+set -e
+DEBIAN_SYMLINK_MOUNT_DIR="$(cat "${DEBIAN_MOUNT_FILE}")"
+test "${DEBIAN_SYMLINK_MOUNT_TARGET_STATUS}" -ne 0 ||
+    fail 'Debian builder accepted a symlinked /dev mount target'
+test -d "${DEBIAN_SYMLINK_MOUNT_DIR}" ||
+    fail 'Debian builder removed a root with an unsafe mount target'
+test "$(grep -c '^losetup-detach$' "${DEBIAN_LOG}" || true)" -eq 0 ||
+    fail 'Debian builder detached its loop with an unsafe mount target'
+
+# Status 1 is ambiguous.  Missing-path, permission, system, and merely
+# substring-matching diagnostics must remain unknown and fail closed.
+for diagnostic_kind in missing permission system unexpected; do
+    : >"${DEBIAN_LOG}"
+    : >"${DEBIAN_MOUNT_STATE}"
+    set +e
+    DEBIAN_MOUNTPOINT_INACTIVE_STATUS=1 \
+    DEBIAN_MOUNTPOINT_DIAGNOSTIC_TARGET=root \
+    DEBIAN_MOUNTPOINT_DIAGNOSTIC_KIND="$diagnostic_kind" \
+        run_debian_builder \
+        >"${DEBIAN_FIXTURE}/mountpoint-${diagnostic_kind}.stdout" \
+        2>"${DEBIAN_FIXTURE}/mountpoint-${diagnostic_kind}.stderr"
+    DEBIAN_MOUNTPOINT_DIAGNOSTIC_STATUS=$?
+    set -e
+    DEBIAN_DIAGNOSTIC_MOUNT_DIR="$(cat "${DEBIAN_MOUNT_FILE}")"
+    test "${DEBIAN_MOUNTPOINT_DIAGNOSTIC_STATUS}" -ne 0 ||
+        fail "Debian builder accepted ambiguous mountpoint diagnostic: $diagnostic_kind"
+    test -d "${DEBIAN_DIAGNOSTIC_MOUNT_DIR}" ||
+        fail "Debian builder removed a root after $diagnostic_kind mountpoint diagnostic"
+    test "$(grep -c '^losetup-detach$' "${DEBIAN_LOG}" || true)" -eq 0 ||
+        fail "Debian builder detached its loop after $diagnostic_kind mountpoint diagnostic"
+done
+
+# Even the exact text is insufficient if the path's device/inode identity
+# changes between quiet and diagnostic probes.
+: >"${DEBIAN_LOG}"
+: >"${DEBIAN_MOUNT_STATE}"
+rm -f "${DEBIAN_SIGNAL_STATE}.identity-change"
+set +e
+DEBIAN_MOUNTPOINT_INACTIVE_STATUS=1 \
+DEBIAN_MOUNTPOINT_DIAGNOSTIC_TARGET=root \
+DEBIAN_MOUNTPOINT_DIAGNOSTIC_KIND=identity-change \
+    run_debian_builder >"${DEBIAN_FIXTURE}/mountpoint-identity-change.stdout" \
+    2>"${DEBIAN_FIXTURE}/mountpoint-identity-change.stderr"
+DEBIAN_MOUNTPOINT_IDENTITY_STATUS=$?
+set -e
+DEBIAN_IDENTITY_MOUNT_DIR="$(cat "${DEBIAN_MOUNT_FILE}")"
+test "${DEBIAN_MOUNTPOINT_IDENTITY_STATUS}" -ne 0 ||
+    fail 'Debian builder accepted a mountpoint path whose identity changed'
+test -d "${DEBIAN_IDENTITY_MOUNT_DIR}" ||
+    fail 'Debian builder removed a root whose identity changed during mountpoint probing'
+test "$(grep -c '^losetup-detach$' "${DEBIAN_LOG}" || true)" -eq 0 ||
+    fail 'Debian builder detached its loop after mountpoint path identity changed'
+
+# A one-shot identity change must poison the target for the remainder of the
+# run.  Later exact not-mountpoint responses cannot establish a new baseline.
+: >"${DEBIAN_LOG}"
+: >"${DEBIAN_MOUNT_STATE}"
+rm -f "${DEBIAN_SIGNAL_STATE}.identity-change-once"
+set +e
+DEBIAN_MOUNTPOINT_INACTIVE_STATUS=1 \
+DEBIAN_MOUNTPOINT_DIAGNOSTIC_TARGET=root \
+DEBIAN_MOUNTPOINT_DIAGNOSTIC_KIND=identity-change-once \
+    run_debian_builder >"${DEBIAN_FIXTURE}/mountpoint-identity-once.stdout" \
+    2>"${DEBIAN_FIXTURE}/mountpoint-identity-once.stderr"
+DEBIAN_MOUNTPOINT_IDENTITY_ONCE_STATUS=$?
+set -e
+DEBIAN_IDENTITY_ONCE_MOUNT_DIR="$(cat "${DEBIAN_MOUNT_FILE}")"
+test "${DEBIAN_MOUNTPOINT_IDENTITY_ONCE_STATUS}" -ne 0 ||
+    fail 'Debian builder forgot a one-shot mountpoint identity change'
+test -d "${DEBIAN_IDENTITY_ONCE_MOUNT_DIR}" ||
+    fail 'Debian builder removed a root after a one-shot identity change'
+test "$(grep -c '^losetup-detach$' "${DEBIAN_LOG}" || true)" -eq 0 ||
+    fail 'Debian builder detached its loop after a one-shot identity change'
+
+# A one-shot mountpoint query error is equally irreversible.  Cleanup must not
+# accept a later healthy query and proceed with detach/removal.
+: >"${DEBIAN_LOG}"
+: >"${DEBIAN_MOUNT_STATE}"
+rm -f "${DEBIAN_SIGNAL_STATE}.mountpoint-error-once"
+set +e
+DEBIAN_MOUNTPOINT_ERROR_ONCE_TARGET=root run_debian_builder \
+    >"${DEBIAN_FIXTURE}/mountpoint-error-once.stdout" \
+    2>"${DEBIAN_FIXTURE}/mountpoint-error-once.stderr"
+DEBIAN_MOUNTPOINT_ERROR_ONCE_STATUS=$?
+set -e
+DEBIAN_ERROR_ONCE_MOUNT_DIR="$(cat "${DEBIAN_MOUNT_FILE}")"
+test "${DEBIAN_MOUNTPOINT_ERROR_ONCE_STATUS}" -ne 0 ||
+    fail 'Debian builder forgot a one-shot mountpoint query error'
+test -d "${DEBIAN_ERROR_ONCE_MOUNT_DIR}" ||
+    fail 'Debian builder removed a root after a one-shot mountpoint query error'
+test "$(grep -c '^losetup-detach$' "${DEBIAN_LOG}" || true)" -eq 0 ||
+    fail 'Debian builder detached its loop after a one-shot mountpoint query error'
+
+# The host mountpoint may be removed only with rmdir after all mounts are known
+# safe.  A non-empty directory must be retained; recursive removal is forbidden.
+: >"${DEBIAN_LOG}"
+: >"${DEBIAN_MOUNT_STATE}"
+set +e
+DEBIAN_ROOT_UNMOUNT_SENTINEL=1 run_debian_builder \
+    >"${DEBIAN_FIXTURE}/nonempty-mount-dir.stdout" \
+    2>"${DEBIAN_FIXTURE}/nonempty-mount-dir.stderr"
+DEBIAN_NONEMPTY_MOUNT_STATUS=$?
+set -e
+DEBIAN_NONEMPTY_MOUNT_DIR="$(cat "${DEBIAN_MOUNT_FILE}")"
+test "${DEBIAN_NONEMPTY_MOUNT_STATUS}" -ne 0 ||
+    fail 'Debian builder ignored a non-empty host mount directory'
+test -f "${DEBIAN_NONEMPTY_MOUNT_DIR}/host-sentinel" ||
+    fail 'Debian builder recursively deleted a non-empty host mount directory'
+test "$(grep -c '^losetup-detach$' "${DEBIAN_LOG}" || true)" -eq 1 ||
+    fail 'Debian builder did not detach before refusing a non-empty mount directory'
+
 # A failure in the EXIT-only mount-directory removal turns an otherwise
 # successful build into a failure and leaves the directory for inspection.
 : >"${DEBIAN_LOG}"
 : >"${DEBIAN_MOUNT_STATE}"
 set +e
-DEBIAN_RM_FAIL_KIND=root run_debian_builder \
+DEBIAN_RMDIR_FAIL_KIND=root run_debian_builder \
     >"${DEBIAN_FIXTURE}/mount-dir-cleanup.stdout" \
     2>"${DEBIAN_FIXTURE}/mount-dir-cleanup.stderr"
 DEBIAN_MOUNT_DIR_CLEANUP_STATUS=$?
 set -e
 test "${DEBIAN_MOUNT_DIR_CLEANUP_STATUS}" -ne 0 ||
     fail 'Debian builder ignored mount-directory removal failure after success'
-DEBIAN_UNREMOVED_MOUNT_DIR="$(sed -n 's/^rm-root-failed://p' "${DEBIAN_LOG}" | tail -1)"
+DEBIAN_UNREMOVED_MOUNT_DIR="$(sed -n 's/^rmdir-root-failed://p' "${DEBIAN_LOG}" | tail -1)"
 test -n "${DEBIAN_UNREMOVED_MOUNT_DIR}" && test -d "${DEBIAN_UNREMOVED_MOUNT_DIR}" ||
-    fail 'Debian fixture did not retain the rootfs directory after rm failure'
+    fail 'Debian fixture did not retain the rootfs directory after rmdir failure'
 grep -Fq 'Could not remove rootfs work directory' \
     "${DEBIAN_FIXTURE}/mount-dir-cleanup.stderr" ||
     fail 'Debian cleanup did not report mount-directory removal failure'
@@ -830,6 +1037,28 @@ test -d "${DEBIAN_STICKY_ROOT_DIR}" ||
     fail 'Debian builder removed a root that remained mounted'
 test "$(grep -c '^losetup-detach$' "${DEBIAN_LOG}" || true)" -eq 0 ||
     fail 'Debian builder detached its loop device while the root remained mounted'
+
+# A transient contradiction is still unsafe.  If umount reports success while
+# the target remains mounted once, cleanup must not retry into an apparently
+# healthy state and then detach or remove the loop-backed root.
+: >"${DEBIAN_LOG}"
+: >"${DEBIAN_MOUNT_STATE}"
+rm -f "${DEBIAN_SIGNAL_STATE}.umount-sticky-once"
+set +e
+DEBIAN_UMOUNT_STICKY_ONCE_TARGET=root run_debian_builder \
+    >"${DEBIAN_FIXTURE}/sticky-root-once.stdout" \
+    2>"${DEBIAN_FIXTURE}/sticky-root-once.stderr"
+DEBIAN_STICKY_ROOT_ONCE_STATUS=$?
+set -e
+DEBIAN_STICKY_ROOT_ONCE_DIR="$(cat "${DEBIAN_MOUNT_FILE}")"
+test "${DEBIAN_STICKY_ROOT_ONCE_STATUS}" -ne 0 ||
+    fail 'Debian builder forgot a transient contradictory unmount result'
+test -d "${DEBIAN_STICKY_ROOT_ONCE_DIR}" ||
+    fail 'Debian builder removed a root after a contradictory unmount result'
+test "$(grep -c '^losetup-detach$' "${DEBIAN_LOG}" || true)" -eq 0 ||
+    fail 'Debian builder detached its loop after a contradictory unmount result'
+test "$(grep -c '^umount-root:' "${DEBIAN_LOG}" || true)" -eq 0 ||
+    fail 'Debian cleanup retried a target after a contradictory unmount result'
 
 # An uncertain mountpoint query must fail closed even after umount returned
 # success; otherwise cleanup cannot prove that recursive removal is safe.

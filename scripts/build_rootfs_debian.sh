@@ -17,12 +17,17 @@ DEBUG_TOOLS_DIR="${PROJECT_DIR}/build/guest_tools"
 DEBUG_BIN_DIR="${DEBUG_TOOLS_DIR}/dpu-debugutils"
 BUILD_USER=""
 MOUNT_DIR=""
+MOUNT_DIR_HOST_IDENTITY=""
 REPACK_DIR=""
 LOOP_DEV=""
 mounted_root=false
 mounted_proc=false
 mounted_sys=false
 mounted_dev=false
+unsafe_root=false
+unsafe_proc=false
+unsafe_sys=false
+unsafe_dev=false
 unmount_failed=false
 cleanup_failed=false
 mount_transition=false
@@ -32,18 +37,145 @@ info()  { echo -e "\033[0;36m[INFO]\033[0m $*"; }
 ok()    { echo -e "\033[0;32m[OK]\033[0m $*"; }
 fail()  { echo -e "\033[0;31m[FAIL]\033[0m $*"; exit 1; }
 
-mount_state() {
-    local mountpoint_status
+mount_flag_for_target() {
+    case "$1" in
+        "$MOUNT_DIR") printf '%s\n' mounted_root ;;
+        "$MOUNT_DIR/proc") printf '%s\n' mounted_proc ;;
+        "$MOUNT_DIR/sys") printf '%s\n' mounted_sys ;;
+        "$MOUNT_DIR/dev") printf '%s\n' mounted_dev ;;
+        *) return 1 ;;
+    esac
+}
 
-    if mountpoint -q -- "$1"; then
-        return 0
+unsafe_flag_for_target() {
+    case "$1" in
+        "$MOUNT_DIR") printf '%s\n' unsafe_root ;;
+        "$MOUNT_DIR/proc") printf '%s\n' unsafe_proc ;;
+        "$MOUNT_DIR/sys") printf '%s\n' unsafe_sys ;;
+        "$MOUNT_DIR/dev") printf '%s\n' unsafe_dev ;;
+        *) return 1 ;;
+    esac
+}
+
+mark_mount_unsafe() {
+    local mount_flag
+    local unsafe_flag
+
+    mount_flag=$(mount_flag_for_target "$1") || {
+        cleanup_failed=true
+        return 1
+    }
+    unsafe_flag=$(unsafe_flag_for_target "$1") || {
+        cleanup_failed=true
+        return 1
+    }
+    printf -v "$mount_flag" '%s' true
+    printf -v "$unsafe_flag" '%s' true
+    cleanup_failed=true
+}
+
+mount_target_is_unsafe() {
+    local unsafe_flag
+
+    unsafe_flag=$(unsafe_flag_for_target "$1") || return 0
+    [ "${!unsafe_flag}" = true ]
+}
+
+any_mount_target_unsafe() {
+    [ "$unsafe_root" = true ] || [ "$unsafe_proc" = true ] ||
+        [ "$unsafe_sys" = true ] || [ "$unsafe_dev" = true ]
+}
+
+mount_path_identity() {
+    local target=$1
+    local canonical_path
+    local filesystem_identity
+
+    [ -n "$MOUNT_DIR" ] || return 1
+    case "$target" in
+        "$MOUNT_DIR"|"$MOUNT_DIR/proc"|"$MOUNT_DIR/sys"|"$MOUNT_DIR/dev") ;;
+        *) return 1 ;;
+    esac
+    [ -d "$target" ] && [ ! -L "$target" ] || return 1
+    canonical_path=$(cd -- "$target" && pwd -P) || return 1
+    [ "$canonical_path" = "$target" ] || return 1
+    filesystem_identity=$(stat -Lc '%d:%i' -- "$target") || return 1
+    printf '%s|%s\n' "$canonical_path" "$filesystem_identity"
+}
+
+mount_dir_host_identity_is_trusted() {
+    local current_identity
+
+    if [ -z "$MOUNT_DIR_HOST_IDENTITY" ] ||
+            ! current_identity=$(mount_path_identity "$MOUNT_DIR") ||
+            [ "$current_identity" != "$MOUNT_DIR_HOST_IDENTITY" ]; then
+        mark_mount_unsafe "$MOUNT_DIR" || true
+        return 1
+    fi
+}
+
+mount_state() {
+    local target=$1
+    local identity_before
+    local identity_after
+    local mountpoint_output
+    local mountpoint_status
+    local diagnostic_status
+
+    mount_target_is_unsafe "$target" && return 2
+    if ! identity_before=$(mount_path_identity "$target"); then
+        mark_mount_unsafe "$target" || true
+        return 2
+    fi
+    if mountpoint -q -- "$target"; then
+        mountpoint_status=0
     else
         mountpoint_status=$?
     fi
+    if ! identity_after=$(mount_path_identity "$target"); then
+        mark_mount_unsafe "$target" || true
+        return 2
+    fi
+    if [ "$identity_after" != "$identity_before" ]; then
+        mark_mount_unsafe "$target" || true
+        return 2
+    fi
+
     case "$mountpoint_status" in
-        1|32) return 32 ;;
-        *) return 2 ;;
+        0) return 0 ;;
+        32) return 32 ;;
+        1) ;;
+        *)
+            mark_mount_unsafe "$target" || true
+            return 2
+            ;;
     esac
+
+    if mountpoint_output=$(LC_ALL=C mountpoint -- "$target" 2>&1); then
+        diagnostic_status=0
+    else
+        diagnostic_status=$?
+    fi
+    if ! identity_after=$(mount_path_identity "$target"); then
+        mark_mount_unsafe "$target" || true
+        return 2
+    fi
+    if [ "$identity_after" != "$identity_before" ]; then
+        mark_mount_unsafe "$target" || true
+        return 2
+    fi
+    case "$diagnostic_status" in
+        1|32) ;;
+        *)
+            mark_mount_unsafe "$target" || true
+            return 2
+            ;;
+    esac
+    if [ "$mountpoint_output" != "$target is not a mountpoint" ]; then
+        mark_mount_unsafe "$target" || true
+        return 2
+    fi
+    return 32
 }
 
 begin_mount_transition() {
@@ -72,6 +204,12 @@ tracked_mount() {
     shift 2
 
     begin_mount_transition
+    if ! mount_path_identity "$target" >/dev/null; then
+        mark_mount_unsafe "$target" || true
+        echo "[WARN] Refusing unsafe mount target: $target" >&2
+        finish_mount_transition 1
+        return 1
+    fi
     if "$@"; then
         mount_status=0
     else
@@ -84,6 +222,7 @@ tracked_mount() {
         if [ "$state" -eq 32 ]; then
             printf -v "$flag_name" '%s' false
             if [ "$mount_status" -eq 0 ]; then
+                mark_mount_unsafe "$target" || true
                 echo "[WARN] Mount command succeeded but $target is not mounted" >&2
                 mount_status=1
             fi
@@ -92,6 +231,10 @@ tracked_mount() {
             echo "[WARN] Could not determine mount state for $target" >&2
             [ "$mount_status" -ne 0 ] || mount_status=1
         fi
+    fi
+    if [ "$mount_status" -ne 0 ] && [ "${!flag_name}" = true ] &&
+            ! mount_target_is_unsafe "$target"; then
+        mark_mount_unsafe "$target" || true
     fi
     finish_mount_transition "$mount_status"
 }
@@ -107,23 +250,24 @@ unmount_if_mounted() {
     local umount_status=0
     local state
 
+    [ "${!flag_name}" = true ] || return 0
     begin_mount_transition
-    if [ "${!flag_name}" != true ]; then
-        if mount_state "$target"; then
-            printf -v "$flag_name" '%s' true
-        else
-            state=$?
-            if [ "$state" -eq 32 ]; then
-                printf -v "$flag_name" '%s' false
-                finish_mount_transition 0
-                return 0
-            fi
-            printf -v "$flag_name" '%s' true
-            echo "[WARN] Could not determine mount state for $target" >&2
+    if mount_state "$target"; then
+        printf -v "$flag_name" '%s' true
+    else
+        state=$?
+        if [ "$state" -eq 32 ]; then
+            mark_mount_unsafe "$target" || true
+            echo "[WARN] $target became unmounted outside a verified transition" >&2
             record_unmount_failure
             finish_mount_transition 0
             return 0
         fi
+        printf -v "$flag_name" '%s' true
+        echo "[WARN] Could not determine mount state for $target" >&2
+        record_unmount_failure
+        finish_mount_transition 0
+        return 0
     fi
 
     if umount "$target"; then
@@ -134,14 +278,19 @@ unmount_if_mounted() {
     if mount_state "$target"; then
         echo "[WARN] $target remains mounted; preserving work directory" >&2
         printf -v "$flag_name" '%s' true
+        if [ "$umount_status" -eq 0 ]; then
+            mark_mount_unsafe "$target" || true
+        fi
         record_unmount_failure
     else
         state=$?
         if [ "$state" -eq 32 ]; then
-            printf -v "$flag_name" '%s' false
             if [ "$umount_status" -ne 0 ]; then
                 echo "[WARN] umount failed for $target even though it is no longer mounted" >&2
+                mark_mount_unsafe "$target" || true
                 record_unmount_failure
+            else
+                printf -v "$flag_name" '%s' false
             fi
         else
             printf -v "$flag_name" '%s' true
@@ -153,6 +302,33 @@ unmount_if_mounted() {
 }
 
 unmount_all() {
+    local root_state
+
+    if [ "$mounted_root" != true ]; then
+        if mount_state "$MOUNT_DIR"; then
+            mark_mount_unsafe "$MOUNT_DIR" || true
+            echo "[WARN] Root mount appeared outside a verified transition" >&2
+            record_unmount_failure
+            return 0
+        else
+            root_state=$?
+            if [ "$root_state" -eq 32 ]; then
+                if [ "$mounted_dev" = true ] || [ "$mounted_sys" = true ] ||
+                        [ "$mounted_proc" = true ]; then
+                    echo "[WARN] Child mount flag remained after root unmount" >&2
+                    [ "$mounted_dev" != true ] || mark_mount_unsafe "$MOUNT_DIR/dev" || true
+                    [ "$mounted_sys" != true ] || mark_mount_unsafe "$MOUNT_DIR/sys" || true
+                    [ "$mounted_proc" != true ] || mark_mount_unsafe "$MOUNT_DIR/proc" || true
+                    record_unmount_failure
+                fi
+                return 0
+            fi
+            mounted_root=true
+            echo "[WARN] Could not determine mount state for $MOUNT_DIR" >&2
+            record_unmount_failure
+            return 0
+        fi
+    fi
     unmount_if_mounted mounted_dev "$MOUNT_DIR/dev"
     unmount_if_mounted mounted_sys "$MOUNT_DIR/sys"
     unmount_if_mounted mounted_proc "$MOUNT_DIR/proc"
@@ -160,33 +336,44 @@ unmount_all() {
 }
 
 mounts_remain() {
-    local flag_name
-    local target
     local state
-    local any_mounted=false
 
-    while read -r flag_name target; do
-        if mount_state "$target"; then
-            printf -v "$flag_name" '%s' true
-            any_mounted=true
-        else
-            state=$?
-            if [ "$state" -eq 32 ]; then
-                printf -v "$flag_name" '%s' false
-            else
-                printf -v "$flag_name" '%s' true
-                echo "[WARN] Could not verify mount state for $target" >&2
-                cleanup_failed=true
-                any_mounted=true
-            fi
+    if any_mount_target_unsafe; then
+        cleanup_failed=true
+        return 0
+    fi
+    if mount_state "$MOUNT_DIR"; then
+        if [ "$mounted_root" != true ]; then
+            mark_mount_unsafe "$MOUNT_DIR" || true
+            echo "[WARN] Root mount appeared outside a verified transition" >&2
         fi
-    done <<EOF
-mounted_dev $MOUNT_DIR/dev
-mounted_sys $MOUNT_DIR/sys
-mounted_proc $MOUNT_DIR/proc
-mounted_root $MOUNT_DIR
-EOF
-    [ "$any_mounted" = true ]
+        mounted_root=true
+        return 0
+    else
+        state=$?
+    fi
+    if [ "$state" -ne 32 ]; then
+        mounted_root=true
+        echo "[WARN] Could not verify mount state for $MOUNT_DIR" >&2
+        cleanup_failed=true
+        return 0
+    fi
+    mounted_root=false
+    if [ "$mounted_dev" = true ] || [ "$mounted_sys" = true ] ||
+            [ "$mounted_proc" = true ]; then
+        echo "[WARN] Child mount flag remained after root unmount" >&2
+        [ "$mounted_dev" != true ] || mark_mount_unsafe "$MOUNT_DIR/dev" || true
+        [ "$mounted_sys" != true ] || mark_mount_unsafe "$MOUNT_DIR/sys" || true
+        [ "$mounted_proc" != true ] || mark_mount_unsafe "$MOUNT_DIR/proc" || true
+        cleanup_failed=true
+        return 0
+    fi
+    if ! mount_dir_host_identity_is_trusted; then
+        echo "[WARN] Rootfs work directory identity changed: $MOUNT_DIR" >&2
+        cleanup_failed=true
+        return 0
+    fi
+    return 1
 }
 
 detach_loop_if_safe() {
@@ -234,8 +421,21 @@ remove_mount_dir() {
             return 1
             ;;
     esac
-    if rm -rf -- "$MOUNT_DIR"; then
+    if any_mount_target_unsafe || [ "$mounted_root" = true ] ||
+            [ "$mounted_proc" = true ] || [ "$mounted_sys" = true ] ||
+            [ "$mounted_dev" = true ]; then
+        echo "[WARN] Refusing to remove an unsafe rootfs work directory: $MOUNT_DIR" >&2
+        cleanup_failed=true
+        return 1
+    fi
+    if ! mount_dir_host_identity_is_trusted; then
+        echo "[WARN] Refusing changed rootfs work directory: $MOUNT_DIR" >&2
+        cleanup_failed=true
+        return 1
+    fi
+    if rmdir -- "$MOUNT_DIR"; then
         MOUNT_DIR=""
+        MOUNT_DIR_HOST_IDENTITY=""
         return 0
     fi
     echo "[WARN] Could not remove rootfs work directory: $MOUNT_DIR" >&2
@@ -340,9 +540,10 @@ fi
 if ! command -v debootstrap &>/dev/null; then
     fail "debootstrap not installed. Run: sudo apt install debootstrap"
 fi
-if ! command -v mountpoint &>/dev/null; then
-    fail "mountpoint not installed. Run: sudo apt install util-linux"
-fi
+for required_command in mountpoint stat; do
+    command -v "$required_command" >/dev/null 2>&1 ||
+        fail "$required_command not installed. Run: sudo apt install util-linux coreutils"
+done
 
 # zstd 用于解压 Debian initramfs（bookworm 默认 zstd 压缩）
 if ! command -v zstd &>/dev/null; then
@@ -361,6 +562,9 @@ for utility in pci_debug reg_display; do
 done
 
 MOUNT_DIR=$(mktemp -d "${BUILD_TMP}/debian-rootfs.XXXXXX")
+if ! MOUNT_DIR_HOST_IDENTITY=$(mount_path_identity "$MOUNT_DIR"); then
+    fail "Could not record rootfs work directory identity: $MOUNT_DIR"
+fi
 mkdir -p "$OUTPUT_DIR"
 
 # ---- Create ext4 image ----
