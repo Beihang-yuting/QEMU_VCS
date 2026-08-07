@@ -20,7 +20,7 @@ add_test(NAME test_precise_mode COMMAND test_precise_mode)
 
 add_test(NAME test_offline_qemu_archive
          COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/test_offline_qemu_archive.sh)
-set_tests_properties(test_offline_qemu_archive PROPERTIES TIMEOUT 10)
+set_tests_properties(test_offline_qemu_archive PROPERTIES TIMEOUT 30)
 
 add_test(NAME test_offline_ubuntu_server
          COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/test_offline_ubuntu_server.sh)

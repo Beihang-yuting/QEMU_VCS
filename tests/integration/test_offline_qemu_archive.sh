@@ -7,6 +7,7 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 SETUP="$REPO_ROOT/setup.sh"
 PREPARE="$REPO_ROOT/scripts/prepare-offline.sh"
 VALIDATOR="$REPO_ROOT/scripts/validate-qemu-source-closure.py"
+CMAKE_TESTS="$REPO_ROOT/tests/integration/CMakeLists.txt"
 TMP_ROOT="$REPO_ROOT/build/tmp"
 OFFICIAL_RELEASE_SIZE=135188800
 OFFICIAL_RELEASE_SHA256=f859f0bc65e1f533d040bbe8c92bcfecee5af2c921a6687c652fb44d089bd894
@@ -241,6 +242,32 @@ def hardlink_to_directory(archive):
 fixture("directory-hardlink-target.tar.xz", hardlink_to_directory)
 
 
+def compensated_hardlink_target(archive):
+    regular(archive, "qemu-9.2.0/target")
+    special(
+        archive,
+        "qemu-9.2.0/hard",
+        tarfile.LNKTYPE,
+        "qemu-9.2.0/missing/../target",
+    )
+
+
+fixture("compensated-hardlink-target.tar.xz", compensated_hardlink_target)
+fixture(
+    "overlong-member-component.tar.xz",
+    lambda archive: regular(archive, f"qemu-9.2.0/{'m' * 300}"),
+)
+fixture(
+    "overlong-symlink-target.tar.xz",
+    lambda archive: special(
+        archive,
+        "qemu-9.2.0/links/overlong-symlink",
+        tarfile.SYMTYPE,
+        "s" * 5000,
+    ),
+)
+
+
 def safe_symlink(archive):
     regular(archive, "qemu-9.2.0/targets/regular")
     special(
@@ -300,6 +327,9 @@ duplicate-logical-path.tar.xz|duplicate logical member path
 conflicting-logical-path.tar.xz|duplicate logical member path
 missing-hardlink-target.tar.xz|hardlink target is not a unique regular member
 directory-hardlink-target.tar.xz|hardlink target is not a unique regular member
+compensated-hardlink-target.tar.xz|non-canonical hardlink target
+overlong-member-component.tar.xz|member path component exceeds filesystem limit
+overlong-symlink-target.tar.xz|link target exceeds filesystem limit
 EOF
 [ "$i2_rejection_failures" -eq 0 ] || \
     fail "validator accepted $i2_rejection_failures unsafe member-graph fixtures"
@@ -308,6 +338,20 @@ assert_accepted "$work/safe-symlink.tar.xz" 'safe in-tree symlink leaf'
 assert_accepted "$work/valid-hardlink.tar.xz" 'hardlink to a unique regular member'
 assert_accepted "$work/official-absolute-leaf.tar.xz" \
     'official QEMU 9.2.0 absolute leaf exception'
+
+safe_symlink_extract="$work/safe-symlink-extract"
+valid_hardlink_extract="$work/valid-hardlink-extract"
+mkdir -p "$safe_symlink_extract" "$valid_hardlink_extract"
+tar -xJf "$work/safe-symlink.tar.xz" -C "$safe_symlink_extract"
+[ -L "$safe_symlink_extract/qemu-9.2.0/links/safe-symlink" ] || \
+    fail 'safe symlink fixture did not extract as a symlink'
+cmp "$safe_symlink_extract/qemu-9.2.0/targets/regular" \
+    "$safe_symlink_extract/qemu-9.2.0/links/safe-symlink" || \
+    fail 'safe symlink fixture did not resolve to the expected payload'
+tar -xJf "$work/valid-hardlink.tar.xz" -C "$valid_hardlink_extract"
+cmp "$valid_hardlink_extract/qemu-9.2.0/targets/hardlink-regular" \
+    "$valid_hardlink_extract/qemu-9.2.0/links/valid-hardlink" || \
+    fail 'valid hardlink fixture did not extract the expected payload'
 
 large_pax_archive="$work/large-pax.tar.xz"
 python3 - "$large_pax_archive" <<'PY'
@@ -417,6 +461,8 @@ grep -Fq -- '--expected-top qemu-9.2.0' "$SETUP" || \
     fail 'setup import does not explicitly require the QEMU 9.2.0 top-level'
 grep -Fq -- '--expected-top qemu-9.2.0' "$PREPARE" || \
     fail 'packager does not explicitly require the QEMU 9.2.0 top-level'
+grep -Fq 'set_tests_properties(test_offline_qemu_archive PROPERTIES TIMEOUT 30)' \
+    "$CMAKE_TESTS" || fail 'offline QEMU focused CTest timeout is below 30 seconds'
 grep -Fq 'https://download.qemu.org/qemu-9.2.0.tar.xz' "$PREPARE" || \
     fail 'packager does not use the official QEMU 9.2.0 release URL'
 grep -Fq 'f859f0bc65e1f533d040bbe8c92bcfecee5af2c921a6687c652fb44d089bd894' \

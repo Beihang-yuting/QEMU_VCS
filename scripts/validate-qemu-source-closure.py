@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import os
 import posixpath
 import resource
 import signal
@@ -26,7 +27,9 @@ MIB = 1024 * 1024
 MAX_ARCHIVE_BYTES = 256 * MIB
 MAX_MEMBERS = 200_000
 MAX_TOTAL_NAME_BYTES = 32 * MIB
-MAX_SINGLE_NAME_BYTES = 4 * 1024
+MAX_MEMBER_PATH_BYTES = 4095
+MAX_PATH_COMPONENT_BYTES = 255
+MAX_LINK_TARGET_BYTES = 4095
 MAX_TOTAL_REGULAR_BYTES = 2 * 1024 * MIB
 MAX_PAX_FIELD_BYTES = 1 * MIB
 MAX_TOTAL_PAX_BYTES = 8 * MIB
@@ -57,9 +60,7 @@ def validate(archive: Path, expected_top: str = EXPECTED_TOP) -> int:
                 member_count += 1
                 if member_count > MAX_MEMBERS:
                     return fail("member count exceeds resource limit")
-                name_bytes = len(name.encode("utf-8", errors="surrogatepass"))
-                if name_bytes > MAX_SINGLE_NAME_BYTES:
-                    return fail("member name exceeds resource limit")
+                name_bytes = len(os.fsencode(name))
                 total_name_bytes += name_bytes
                 if total_name_bytes > MAX_TOTAL_NAME_BYTES:
                     return fail("cumulative member names exceed resource limit")
@@ -94,6 +95,13 @@ def validate(archive: Path, expected_top: str = EXPECTED_TOP) -> int:
                     or any(component in ("", ".", "..") for component in components)
                 ):
                     return fail(f"unsafe member path: {name!r}")
+                if len(os.fsencode(logical_name)) > MAX_MEMBER_PATH_BYTES:
+                    return fail("member path exceeds filesystem limit")
+                if any(
+                    len(os.fsencode(component)) > MAX_PATH_COMPONENT_BYTES
+                    for component in components
+                ):
+                    return fail("member path component exceeds filesystem limit")
                 if components[0] != expected_top:
                     return fail(
                         f"member is outside expected top-level {expected_top}: {name}"
@@ -134,6 +142,10 @@ def validate(archive: Path, expected_top: str = EXPECTED_TOP) -> int:
 
     resolved_hardlinks: dict[str, str] = {}
     for logical_name, (kind, linkname) in entries.items():
+        if kind in ("symlink", "hardlink") and (
+            len(os.fsencode(linkname)) > MAX_LINK_TARGET_BYTES
+        ):
+            return fail("link target exceeds filesystem limit")
         if kind == "symlink":
             if (logical_name, linkname) == OFFICIAL_ABSOLUTE_SYMLINK:
                 continue
@@ -149,16 +161,32 @@ def validate(archive: Path, expected_top: str = EXPECTED_TOP) -> int:
                     f"unsafe symlink target: {logical_name} -> {linkname!r}"
                 )
         elif kind == "hardlink":
-            if not linkname or linkname.startswith("/"):
-                return fail(f"unsafe hardlink target: {logical_name} -> {linkname!r}")
-            resolved = posixpath.normpath(linkname)
-            if resolved != expected_top and not resolved.startswith(
+            target_components = linkname.split("/")
+            if (
+                not linkname
+                or linkname.startswith("/")
+                or any(
+                    component in ("", ".", "..")
+                    for component in target_components
+                )
+                or posixpath.normpath(linkname) != linkname
+            ):
+                return fail(
+                    f"non-canonical hardlink target: "
+                    f"{logical_name} -> {linkname!r}"
+                )
+            if any(
+                len(os.fsencode(component)) > MAX_PATH_COMPONENT_BYTES
+                for component in target_components
+            ):
+                return fail("hardlink target component exceeds filesystem limit")
+            if linkname != expected_top and not linkname.startswith(
                 f"{expected_top}/"
             ):
                 return fail(
                     f"unsafe hardlink target: {logical_name} -> {linkname!r}"
                 )
-            resolved_hardlinks[logical_name] = resolved
+            resolved_hardlinks[logical_name] = linkname
 
     for logical_name, target in resolved_hardlinks.items():
         visited = {logical_name}
