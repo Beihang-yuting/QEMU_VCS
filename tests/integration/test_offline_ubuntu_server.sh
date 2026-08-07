@@ -119,6 +119,7 @@ incomplete_qemu_expected="$work/incomplete-qemu/existing-qemu.tar.xz"
 cp "$test_project/third_party/qemu-9.2.0.tar.xz" "$incomplete_qemu_expected"
 incomplete_qemu_fakebin="$work/incomplete-qemu/fakebin"
 incomplete_qemu_copy_marker="$work/incomplete-qemu/transaction-copy-called"
+incomplete_qemu_transaction_marker="$work/incomplete-qemu/transaction-created"
 mkdir -p "$incomplete_qemu_fakebin"
 cat > "$incomplete_qemu_fakebin/cp" <<'EOF'
 #!/usr/bin/env bash
@@ -130,10 +131,20 @@ case "$destination" in
 esac
 exec /usr/bin/cp "$@"
 EOF
-chmod +x "$incomplete_qemu_fakebin/cp"
+cat > "$incomplete_qemu_fakebin/mktemp" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+case "$*" in
+    *offline-transaction.*)
+        : > "$OFFLINE_TEST_TRANSACTION_CREATED" ;;
+esac
+exec /usr/bin/mktemp "$@"
+EOF
+chmod +x "$incomplete_qemu_fakebin/cp" "$incomplete_qemu_fakebin/mktemp"
 incomplete_qemu_log="$work/incomplete-qemu/import.log"
 if PATH="$incomplete_qemu_fakebin:$PATH" \
         OFFLINE_TEST_TRANSACTION_COPY_CALLED="$incomplete_qemu_copy_marker" \
+        OFFLINE_TEST_TRANSACTION_CREATED="$incomplete_qemu_transaction_marker" \
         "$test_project/setup.sh" --import "$incomplete_qemu_archive" --import-only \
         >"$incomplete_qemu_log" 2>&1; then
     fail 'setup accepted an incomplete nested QEMU tar'
@@ -142,6 +153,8 @@ grep -Fq 'QEMU source closure' "$incomplete_qemu_log" || \
     fail 'nested QEMU rejection did not identify source closure'
 [ ! -e "$incomplete_qemu_copy_marker" ] || \
     fail 'nested QEMU rejection copied into an import transaction'
+[ ! -e "$incomplete_qemu_transaction_marker" ] || \
+    fail 'nested QEMU rejection created an import transaction'
 cmp -s "$incomplete_qemu_expected" \
     "$test_project/third_party/qemu-9.2.0.tar.xz" || \
     fail 'nested QEMU rejection changed the existing project tar'
@@ -150,6 +163,102 @@ if find "$test_project/build" -maxdepth 2 -type d \
         -print -quit | grep -q .; then
     fail 'nested QEMU rejection left import temporary state'
 fi
+
+assert_nested_qemu_name_rejected() {
+    local case_name="$1" variant_source="$2"
+    local variant_archive variant_log copy_marker transaction_marker
+    variant_archive="$work/qemu-name-$case_name/archive.zip"
+    variant_log="$work/qemu-name-$case_name/import.log"
+    copy_marker="$work/qemu-name-$case_name/transaction-copy-called"
+    transaction_marker="$work/qemu-name-$case_name/transaction-created"
+    mkdir -p "$(dirname "$variant_archive")"
+    (cd "$variant_source" && zip -qr "$variant_archive" .)
+    if PATH="$incomplete_qemu_fakebin:$PATH" \
+            OFFLINE_TEST_TRANSACTION_COPY_CALLED="$copy_marker" \
+            OFFLINE_TEST_TRANSACTION_CREATED="$transaction_marker" \
+            "$test_project/setup.sh" --import "$variant_archive" --import-only \
+            >"$variant_log" 2>&1; then
+        fail "setup accepted invalid nested QEMU archive names: $case_name"
+    fi
+    grep -Fq 'QEMU 源码包名称或数量' "$variant_log" || {
+        cat "$variant_log" >&2
+        fail "nested QEMU name rejection was unclear: $case_name"
+    }
+    [ ! -e "$copy_marker" ] || \
+        fail "nested QEMU name rejection copied into a transaction: $case_name"
+    [ ! -e "$transaction_marker" ] || \
+        fail "nested QEMU name rejection created a transaction: $case_name"
+    cmp -s "$incomplete_qemu_expected" \
+        "$test_project/third_party/qemu-9.2.0.tar.xz" || \
+        fail "nested QEMU name rejection changed the existing tar: $case_name"
+}
+
+wrong_qemu_name_source="$work/qemu-name-wrong/source"
+mkdir -p "$(dirname "$wrong_qemu_name_source")"
+cp -a "$fixture_source" "$wrong_qemu_name_source"
+mv "$wrong_qemu_name_source/qemu-src/qemu-9.2.0.tar.xz" \
+    "$wrong_qemu_name_source/qemu-src/qemu-9.2.0-source.tar.xz"
+
+dual_qemu_name_source="$work/qemu-name-dual/source"
+mkdir -p "$(dirname "$dual_qemu_name_source")"
+cp -a "$fixture_source" "$dual_qemu_name_source"
+cp "$dual_qemu_name_source/qemu-src/qemu-9.2.0.tar.xz" \
+    "$dual_qemu_name_source/qemu-src/qemu-9.2.0.tar.gz"
+
+extra_qemu_name_source="$work/qemu-name-extra/source"
+mkdir -p "$(dirname "$extra_qemu_name_source")"
+cp -a "$fixture_source" "$extra_qemu_name_source"
+cp "$extra_qemu_name_source/qemu-src/qemu-9.2.0.tar.xz" \
+    "$extra_qemu_name_source/qemu-src/qemu-unexpected.tar.xz"
+
+missing_v3_qemu_source="$work/qemu-name-missing-v3/source"
+mkdir -p "$(dirname "$missing_v3_qemu_source")"
+cp -a "$fixture_source" "$missing_v3_qemu_source"
+rm -f "$missing_v3_qemu_source/qemu-src/qemu-9.2.0.tar.xz"
+assert_nested_qemu_name_rejected dual "$dual_qemu_name_source"
+assert_nested_qemu_name_rejected wrong "$wrong_qemu_name_source"
+assert_nested_qemu_name_rejected extra "$extra_qemu_name_source"
+assert_nested_qemu_name_rejected missing-v3 "$missing_v3_qemu_source"
+
+missing_python_bin="$work/missing-python/bin"
+missing_python_log="$work/missing-python/import.log"
+missing_python_transaction_marker="$work/missing-python/transaction-created"
+mkdir -p "$missing_python_bin"
+for required_command in awk basename bash cat chmod cmp cp cut dirname du find \
+        grep head id md5sum mkdir readlink realpath rm sha256sum sort stat tar \
+        uniq unzip wc zipinfo; do
+    ln -s "$(command -v "$required_command")" \
+        "$missing_python_bin/$required_command"
+done
+cat > "$missing_python_bin/mktemp" <<'EOF'
+#!/bin/bash
+set -euo pipefail
+case "$*" in
+    *offline-transaction.*)
+        : > "$OFFLINE_TEST_TRANSACTION_CREATED" ;;
+esac
+exec /usr/bin/mktemp "$@"
+EOF
+chmod +x "$missing_python_bin/mktemp"
+set +e
+PATH="$missing_python_bin" \
+    OFFLINE_TEST_TRANSACTION_CREATED="$missing_python_transaction_marker" \
+    /bin/bash "$test_project/setup.sh" --import "$archive" --import-only \
+    >"$missing_python_log" 2>&1
+missing_python_status=$?
+set -e
+[ "$missing_python_status" -ne 0 ] || \
+    fail 'setup accepted a nested QEMU tar without python3 available'
+grep -Fq '缺少 QEMU source closure 校验依赖: python3' \
+    "$missing_python_log" || {
+    cat "$missing_python_log" >&2
+    fail 'missing python3 rejection did not identify the validator dependency'
+}
+[ ! -e "$missing_python_transaction_marker" ] || \
+    fail 'missing python3 rejection created an import transaction'
+cmp -s "$incomplete_qemu_expected" \
+    "$test_project/third_party/qemu-9.2.0.tar.xz" || \
+    fail 'missing python3 rejection changed the existing QEMU tar'
 
 artifact_preflight_expected="$work/artifact-preflight-expected"
 mkdir -p "$artifact_preflight_expected"

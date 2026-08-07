@@ -50,6 +50,15 @@ assert_rejected() {
     }
 }
 
+assert_accepted() {
+    local archive="$1" description="$2" log
+    log="$work/accepted-$(basename "$archive").log"
+    "$VALIDATOR" "$archive" >"$log" 2>&1 || {
+        cat "$log" >&2
+        fail "validator rejected valid archive: $description"
+    }
+}
+
 bash -n "$SETUP"
 bash -n "$PREPARE"
 [ -x "$VALIDATOR" ] || fail 'QEMU source-closure validator is missing or not executable'
@@ -89,6 +98,12 @@ for compression in xz gz; do
     }
 done
 
+wrong_top_source="$work/wrong-top-source"
+mkdir -p "$wrong_top_source"
+cp -a "$complete_source/qemu-9.2.0" "$wrong_top_source/foo"
+tar -cJf "$work/wrong-top.tar.xz" -C "$wrong_top_source" foo
+assert_rejected "$work/wrong-top.tar.xz" 'expected top-level qemu-9.2.0'
+
 for missing in keycodemapdb berkeley-softfloat-3 berkeley-testfloat-3; do
     missing_source="$work/missing-$missing-source"
     cp -a "$complete_source" "$missing_source"
@@ -105,6 +120,244 @@ ln -s ../berkeley-softfloat-3/meson.build \
     "$nonregular_source/qemu-9.2.0/subprojects/keycodemapdb/meson.build"
 make_tar xz "$nonregular_source" "$work/nonregular.tar.xz"
 assert_rejected "$work/nonregular.tar.xz" 'regular member'
+
+python3 - "$work" <<'PY'
+import io
+import pathlib
+import sys
+import tarfile
+
+root = pathlib.Path(sys.argv[1])
+required = (
+    "subprojects/keycodemapdb/meson.build",
+    "subprojects/berkeley-softfloat-3/meson.build",
+    "subprojects/berkeley-testfloat-3/meson.build",
+)
+
+
+def regular(archive, name, payload=b"fixture\n"):
+    member = tarfile.TarInfo(name)
+    member.type = tarfile.REGTYPE
+    member.size = len(payload)
+    archive.addfile(member, io.BytesIO(payload))
+
+
+def special(archive, name, kind, linkname=""):
+    member = tarfile.TarInfo(name)
+    member.type = kind
+    member.linkname = linkname
+    if kind == tarfile.CHRTYPE:
+        member.devmajor = 1
+        member.devminor = 3
+    archive.addfile(member)
+
+
+def fixture(name, extras):
+    with tarfile.open(root / name, mode="w:xz") as archive:
+        extras(archive)
+        for suffix in required:
+            regular(archive, f"qemu-9.2.0/{suffix}")
+
+
+fixture(
+    "top-symlink.tar.xz",
+    lambda archive: special(
+        archive, "qemu-9.2.0", tarfile.SYMTYPE, "qemu-real"
+    ),
+)
+fixture(
+    "required-ancestor-symlink.tar.xz",
+    lambda archive: special(
+        archive,
+        "qemu-9.2.0/subprojects/keycodemapdb",
+        tarfile.SYMTYPE,
+        "../berkeley-softfloat-3",
+    ),
+)
+fixture(
+    "required-ancestor-regular.tar.xz",
+    lambda archive: regular(
+        archive, "qemu-9.2.0/subprojects/keycodemapdb"
+    ),
+)
+fixture(
+    "fifo.tar.xz",
+    lambda archive: special(
+        archive, "qemu-9.2.0/unsafe-fifo", tarfile.FIFOTYPE
+    ),
+)
+fixture(
+    "device.tar.xz",
+    lambda archive: special(
+        archive, "qemu-9.2.0/unsafe-device", tarfile.CHRTYPE
+    ),
+)
+fixture(
+    "escape-symlink.tar.xz",
+    lambda archive: special(
+        archive,
+        "qemu-9.2.0/links/escape",
+        tarfile.SYMTYPE,
+        "../../../outside",
+    ),
+)
+
+
+def duplicate(archive):
+    regular(archive, "qemu-9.2.0/duplicate")
+    regular(archive, "qemu-9.2.0/duplicate")
+
+
+fixture("duplicate-logical-path.tar.xz", duplicate)
+
+
+def conflicting(archive):
+    special(archive, "qemu-9.2.0/conflict/", tarfile.DIRTYPE)
+    regular(archive, "qemu-9.2.0/conflict")
+
+
+fixture("conflicting-logical-path.tar.xz", conflicting)
+fixture(
+    "missing-hardlink-target.tar.xz",
+    lambda archive: special(
+        archive,
+        "qemu-9.2.0/links/missing-hardlink",
+        tarfile.LNKTYPE,
+        "qemu-9.2.0/missing-target",
+    ),
+)
+
+
+def hardlink_to_directory(archive):
+    special(archive, "qemu-9.2.0/directory-target/", tarfile.DIRTYPE)
+    special(
+        archive,
+        "qemu-9.2.0/links/directory-hardlink",
+        tarfile.LNKTYPE,
+        "qemu-9.2.0/directory-target",
+    )
+
+
+fixture("directory-hardlink-target.tar.xz", hardlink_to_directory)
+
+
+def safe_symlink(archive):
+    regular(archive, "qemu-9.2.0/targets/regular")
+    special(
+        archive,
+        "qemu-9.2.0/links/safe-symlink",
+        tarfile.SYMTYPE,
+        "../targets/regular",
+    )
+
+
+fixture("safe-symlink.tar.xz", safe_symlink)
+
+
+def valid_hardlink(archive):
+    regular(archive, "qemu-9.2.0/targets/hardlink-regular")
+    special(
+        archive,
+        "qemu-9.2.0/links/valid-hardlink",
+        tarfile.LNKTYPE,
+        "qemu-9.2.0/targets/hardlink-regular",
+    )
+
+
+fixture("valid-hardlink.tar.xz", valid_hardlink)
+
+
+def official_absolute_leaf(archive):
+    special(
+        archive,
+        "qemu-9.2.0/roms/edk2/EmulatorPkg/Unix/Host/X11IncludeHack",
+        tarfile.SYMTYPE,
+        "/opt/X11/include",
+    )
+
+
+fixture("official-absolute-leaf.tar.xz", official_absolute_leaf)
+PY
+
+i2_rejection_failures=0
+while IFS='|' read -r archive_name expected; do
+    rejection_log="$work/i2-rejected-$archive_name.log"
+    if "$VALIDATOR" "$work/$archive_name" >"$rejection_log" 2>&1; then
+        printf 'I2_RED_ACCEPTED=%s\n' "$archive_name" >&2
+        i2_rejection_failures=$((i2_rejection_failures + 1))
+    elif ! grep -Fq "$expected" "$rejection_log"; then
+        cat "$rejection_log" >&2
+        fail "I2 rejection did not identify $expected: $archive_name"
+    fi
+done <<'EOF'
+top-symlink.tar.xz|non-directory ancestor
+required-ancestor-symlink.tar.xz|non-directory ancestor
+required-ancestor-regular.tar.xz|non-directory ancestor
+fifo.tar.xz|unsupported member type
+device.tar.xz|unsupported member type
+escape-symlink.tar.xz|unsafe symlink target
+duplicate-logical-path.tar.xz|duplicate logical member path
+conflicting-logical-path.tar.xz|duplicate logical member path
+missing-hardlink-target.tar.xz|hardlink target is not a unique regular member
+directory-hardlink-target.tar.xz|hardlink target is not a unique regular member
+EOF
+[ "$i2_rejection_failures" -eq 0 ] || \
+    fail "validator accepted $i2_rejection_failures unsafe member-graph fixtures"
+
+assert_accepted "$work/safe-symlink.tar.xz" 'safe in-tree symlink leaf'
+assert_accepted "$work/valid-hardlink.tar.xz" 'hardlink to a unique regular member'
+assert_accepted "$work/official-absolute-leaf.tar.xz" \
+    'official QEMU 9.2.0 absolute leaf exception'
+
+large_pax_archive="$work/large-pax.tar.xz"
+python3 - "$large_pax_archive" <<'PY'
+import io
+import sys
+import tarfile
+
+required = (
+    "subprojects/keycodemapdb/meson.build",
+    "subprojects/berkeley-softfloat-3/meson.build",
+    "subprojects/berkeley-testfloat-3/meson.build",
+)
+with tarfile.open(sys.argv[1], mode="w:xz", format=tarfile.PAX_FORMAT) as archive:
+    probe = tarfile.TarInfo("qemu-9.2.0/pax-resource-probe")
+    probe.pax_headers = {"comment": "P" * (64 * 1024 * 1024)}
+    payload = b"resource probe\n"
+    probe.size = len(payload)
+    archive.addfile(probe, io.BytesIO(payload))
+    for suffix in required:
+        member = tarfile.TarInfo(f"qemu-9.2.0/{suffix}")
+        payload = b"project('resource-limit')\n"
+        member.size = len(payload)
+        archive.addfile(member, io.BytesIO(payload))
+PY
+
+oversized_archive="$work/oversized-physical.tar.xz"
+truncate -s $((256 * 1024 * 1024 + 1)) "$oversized_archive"
+i3_rejection_failures=0
+large_pax_log="$work/large-pax-rejected.log"
+if "$VALIDATOR" "$large_pax_archive" >"$large_pax_log" 2>&1; then
+    echo 'I3_RED_ACCEPTED=large-pax.tar.xz' >&2
+    i3_rejection_failures=$((i3_rejection_failures + 1))
+elif ! grep -Eq '(PAX field|memory) resource limit' "$large_pax_log"; then
+    cat "$large_pax_log" >&2
+    echo 'I3_RED_MISSING_BOUND=large-pax.tar.xz' >&2
+    i3_rejection_failures=$((i3_rejection_failures + 1))
+fi
+oversized_log="$work/oversized-physical-rejected.log"
+if "$VALIDATOR" "$oversized_archive" >"$oversized_log" 2>&1; then
+    echo 'I3_RED_ACCEPTED=oversized-physical.tar.xz' >&2
+    i3_rejection_failures=$((i3_rejection_failures + 1))
+elif ! grep -Fq 'archive exceeds physical size limit' "$oversized_log"; then
+    cat "$oversized_log" >&2
+    echo 'I3_RED_MISSING_BOUND=oversized-physical.tar.xz' >&2
+    i3_rejection_failures=$((i3_rejection_failures + 1))
+fi
+[ "$i3_rejection_failures" -eq 0 ] || \
+    fail "validator missed $i3_rejection_failures resource boundaries"
+assert_accepted "$work/complete.tar.xz" \
+    'normal archive after resource-limit rejection'
 
 # A regular tar header whose raw name ends in '/' is not the required source
 # file. Tar consumers may materialize such an entry as a directory or reject
@@ -147,7 +400,7 @@ printf 'keycodes\n' > "$mixed_source/top-a/subprojects/keycodemapdb/meson.build"
 printf 'softfloat\n' > "$mixed_source/top-b/subprojects/berkeley-softfloat-3/meson.build"
 printf 'testfloat\n' > "$mixed_source/top-a/subprojects/berkeley-testfloat-3/meson.build"
 tar -cJf "$work/mixed-top.tar.xz" -C "$mixed_source" top-a top-b
-assert_rejected "$work/mixed-top.tar.xz" 'common top-level'
+assert_rejected "$work/mixed-top.tar.xz" 'expected top-level qemu-9.2.0'
 
 tar -cJf "$work/unsafe-path.tar.xz" \
     --transform='s,^,../,' -C "$complete_source" qemu-9.2.0
@@ -160,6 +413,10 @@ grep -Fq 'qemu-9.2.0.tar.xz' "$SETUP" || \
     fail 'xz offline QEMU archive input is unsupported'
 grep -Fq 'qemu-9.2.0.tar.gz' "$SETUP" || \
     fail 'gzip offline QEMU archive input is unsupported'
+grep -Fq -- '--expected-top qemu-9.2.0' "$SETUP" || \
+    fail 'setup import does not explicitly require the QEMU 9.2.0 top-level'
+grep -Fq -- '--expected-top qemu-9.2.0' "$PREPARE" || \
+    fail 'packager does not explicitly require the QEMU 9.2.0 top-level'
 grep -Fq 'https://download.qemu.org/qemu-9.2.0.tar.xz' "$PREPARE" || \
     fail 'packager does not use the official QEMU 9.2.0 release URL'
 grep -Fq 'f859f0bc65e1f533d040bbe8c92bcfecee5af2c921a6687c652fb44d089bd894' \

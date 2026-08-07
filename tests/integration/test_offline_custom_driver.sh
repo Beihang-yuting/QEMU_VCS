@@ -2,7 +2,9 @@
 set -euo pipefail
 
 project_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
-work=$(mktemp -d "${TMPDIR:-/tmp}/offline-custom-driver-test.XXXXXX")
+tmp_root="$project_dir/build/tmp"
+mkdir -p "$tmp_root"
+work=$(mktemp -d "$tmp_root/offline-custom-driver-test.XXXXXX")
 cleanup() { rm -rf "$work"; }
 trap cleanup EXIT
 

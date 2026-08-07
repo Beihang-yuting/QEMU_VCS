@@ -791,20 +791,52 @@ import_offline() {
 
     local imported=0 index relative_dest preserve_existing
     local source_file final_file final_dest backup_dest staged_dest
-    local qemu_tar qemu_copy_status custom_dest artifact_count=0
+    local qemu_tar qemu_tar_candidate qemu_copy_status custom_dest artifact_count=0
+    local -a qemu_tar_candidates=()
     local -a source_dirs=() relative_dirs=() preserve_flags=() messages=()
     local -a transaction_dirs=()
 
-    qemu_tar=$(find "$tmpdir/qemu-src" -maxdepth 1 -type f \
-        -name 'qemu-*.tar.*' -print -quit 2>/dev/null || true)
+    for qemu_tar_candidate in "$tmpdir"/qemu-src/qemu-*.tar.*; do
+        if [ -f "$qemu_tar_candidate" ] && [ ! -L "$qemu_tar_candidate" ]; then
+            qemu_tar_candidates+=("$qemu_tar_candidate")
+        fi
+    done
+    qemu_tar=""
+    if [ "${#qemu_tar_candidates[@]}" -eq 0 ]; then
+        if [ "$OFFLINE_VERSION" = 3 ]; then
+            fail 'QEMU 源码包名称或数量无效：必须恰好包含 qemu-9.2.0.tar.xz 或 qemu-9.2.0.tar.gz'
+            cleanup_offline_import_temporaries
+            return 1
+        fi
+    elif [ "${#qemu_tar_candidates[@]}" -ne 1 ]; then
+        fail 'QEMU 源码包名称或数量无效：必须恰好包含 qemu-9.2.0.tar.xz 或 qemu-9.2.0.tar.gz'
+        cleanup_offline_import_temporaries
+        return 1
+    else
+        qemu_tar="${qemu_tar_candidates[0]}"
+    fi
     if [ -n "$qemu_tar" ]; then
+        case "$(basename "$qemu_tar")" in
+            qemu-9.2.0.tar.xz|qemu-9.2.0.tar.gz) ;;
+            *)
+                fail 'QEMU 源码包名称或数量无效：必须恰好包含 qemu-9.2.0.tar.xz 或 qemu-9.2.0.tar.gz'
+                cleanup_offline_import_temporaries
+                return 1
+                ;;
+        esac
         local qemu_source_closure_validator="${PROJECT_DIR}/scripts/validate-qemu-source-closure.py"
+        if ! command -v python3 >/dev/null 2>&1; then
+            fail '缺少 QEMU source closure 校验依赖: python3'
+            cleanup_offline_import_temporaries
+            return 1
+        fi
         if [ ! -x "$qemu_source_closure_validator" ]; then
             fail "缺少 QEMU source closure 校验器: $qemu_source_closure_validator"
             cleanup_offline_import_temporaries
             return 1
         fi
-        if ! "$qemu_source_closure_validator" "$qemu_tar"; then
+        if ! "$qemu_source_closure_validator" \
+                --expected-top qemu-9.2.0 "$qemu_tar"; then
             fail 'QEMU source closure 不完整，拒绝导入'
             cleanup_offline_import_temporaries
             return 1

@@ -836,7 +836,8 @@ if [ "$FAIL_COUNT" -gt 0 ]; then
     exit 1
 fi
 
-if ! "$QEMU_SOURCE_CLOSURE_VALIDATOR" "$TARBALL"; then
+if ! "$QEMU_SOURCE_CLOSURE_VALIDATOR" \
+        --expected-top qemu-9.2.0 "$TARBALL"; then
     fail "QEMU source closure 不完整，拒绝发布离线包"
     exit 1
 fi
