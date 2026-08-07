@@ -17,9 +17,10 @@
 - Modify: `tests/integration/test_offline_ubuntu_server.sh`
 
 - [ ] Create real gzip/xz fixtures with the three required regular members.
-- [ ] Assert each missing member, duplicate/non-regular member, inconsistent top level, unsafe path, and corrupt listing is rejected.
+- [ ] Assert each missing member, duplicate/non-regular member, regular trailing-slash filename, inconsistent top level, unsafe path, and corrupt listing is rejected.
 - [ ] Assert incomplete local packaging input and wrong-hash official-download content are rejected.
 - [ ] Assert incomplete nested imports fail before transaction copy and leave target sentinels unchanged.
+- [ ] Run `QEMU_OFFICIAL_RELEASE_TAR="$PWD/build/tmp/qemu-9.2.0.tar.xz" bash tests/integration/test_offline_qemu_archive.sh`; retain the exact size, SHA-256, and helper-PASS output as authentic-release evidence.
 - [ ] Run both focused tests on exact `7179e66`; record the expected missing-validator and accepted-incomplete-archive RED failures.
 
 ### Task 2: Implement and connect the shared validator

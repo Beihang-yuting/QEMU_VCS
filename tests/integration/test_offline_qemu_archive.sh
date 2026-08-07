@@ -8,6 +8,8 @@ SETUP="$REPO_ROOT/setup.sh"
 PREPARE="$REPO_ROOT/scripts/prepare-offline.sh"
 VALIDATOR="$REPO_ROOT/scripts/validate-qemu-source-closure.py"
 TMP_ROOT="$REPO_ROOT/build/tmp"
+OFFICIAL_RELEASE_SIZE=135188800
+OFFICIAL_RELEASE_SHA256=f859f0bc65e1f533d040bbe8c92bcfecee5af2c921a6687c652fb44d089bd894
 mkdir -p "$TMP_ROOT"
 work=$(mktemp -d "$TMP_ROOT/offline-qemu-archive-test.XXXXXX")
 cleanup() { rm -rf "$work"; }
@@ -52,6 +54,30 @@ bash -n "$SETUP"
 bash -n "$PREPARE"
 [ -x "$VALIDATOR" ] || fail 'QEMU source-closure validator is missing or not executable'
 
+if [ -n "${QEMU_OFFICIAL_RELEASE_TAR:-}" ]; then
+    case "$QEMU_OFFICIAL_RELEASE_TAR" in
+        /*) ;;
+        *) fail 'QEMU_OFFICIAL_RELEASE_TAR must be an absolute path' ;;
+    esac
+    [ -f "$QEMU_OFFICIAL_RELEASE_TAR" ] && \
+        [ ! -L "$QEMU_OFFICIAL_RELEASE_TAR" ] || \
+        fail 'QEMU_OFFICIAL_RELEASE_TAR is not a regular file'
+    official_size=$(stat -c '%s' -- "$QEMU_OFFICIAL_RELEASE_TAR")
+    [ "$official_size" -eq "$OFFICIAL_RELEASE_SIZE" ] || \
+        fail "official QEMU release size mismatch: $official_size"
+    official_sha256=$(sha256sum -- "$QEMU_OFFICIAL_RELEASE_TAR" | awk '{print $1}')
+    [ "$official_sha256" = "$OFFICIAL_RELEASE_SHA256" ] || \
+        fail "official QEMU release SHA-256 mismatch: $official_sha256"
+    "$VALIDATOR" "$QEMU_OFFICIAL_RELEASE_TAR" \
+        >"$work/official-release-validator.log" 2>&1 || {
+        cat "$work/official-release-validator.log" >&2
+        fail 'validator rejected the authentic official QEMU release tar'
+    }
+    printf 'official_release_size=%s\n' "$official_size"
+    printf 'official_release_sha256=%s\n' "$official_sha256"
+    cat "$work/official-release-validator.log"
+fi
+
 complete_source="$work/complete-source"
 make_complete_tree "$complete_source"
 for compression in xz gz; do
@@ -79,6 +105,31 @@ ln -s ../berkeley-softfloat-3/meson.build \
     "$nonregular_source/qemu-9.2.0/subprojects/keycodemapdb/meson.build"
 make_tar xz "$nonregular_source" "$work/nonregular.tar.xz"
 assert_rejected "$work/nonregular.tar.xz" 'regular member'
+
+# A regular tar header whose raw name ends in '/' is not the required source
+# file. Tar consumers may materialize such an entry as a directory or reject
+# the contradictory header, so matching a stripped name would incorrectly
+# declare source closure.
+trailing_slash_archive="$work/trailing-slash-regular.tar.xz"
+python3 - "$trailing_slash_archive" <<'PY'
+import io
+import sys
+import tarfile
+
+required = (
+    "subprojects/keycodemapdb/meson.build",
+    "subprojects/berkeley-softfloat-3/meson.build",
+    "subprojects/berkeley-testfloat-3/meson.build",
+)
+with tarfile.open(sys.argv[1], mode="w:xz") as archive:
+    for suffix in required:
+        payload = b"project('invalid-trailing-slash')\n"
+        member = tarfile.TarInfo(f"qemu-9.2.0/{suffix}/")
+        member.type = tarfile.REGTYPE
+        member.size = len(payload)
+        archive.addfile(member, io.BytesIO(payload))
+PY
+assert_rejected "$trailing_slash_archive" 'unsafe member path'
 
 duplicate_archive="$work/duplicate.tar.xz"
 tar -cJf "$duplicate_archive" -C "$complete_source" \

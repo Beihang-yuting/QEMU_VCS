@@ -28,25 +28,26 @@ def validate(archive: Path) -> int:
     try:
         with tarfile.open(archive, mode="r:*") as source_tar:
             for member in source_tar:
-                name = member.name.rstrip("/")
-                components = name.split("/")
+                name = member.name
+                safety_name = name[:-1] if member.isdir() and name.endswith("/") else name
+                components = safety_name.split("/")
                 if (
-                    not name
-                    or member.name.startswith("/")
+                    not safety_name
+                    or name.startswith("/")
                     or any(component in ("", ".", "..") for component in components)
                 ):
-                    return fail(f"unsafe member path: {member.name!r}")
+                    return fail(f"unsafe member path: {name!r}")
 
                 for required in REQUIRED_MEMBERS:
-                    required_components = required.split("/")
-                    if components[-len(required_components) :] != required_components:
+                    required_suffix = f"/{required}"
+                    if not name.endswith(required_suffix):
                         continue
-                    top_components = components[: -len(required_components)]
-                    if len(top_components) != 1:
+                    top_level = name[: -len(required_suffix)]
+                    if not top_level or "/" in top_level:
                         return fail(
-                            f"required member lacks one QEMU top-level: {member.name}"
+                            f"required member lacks one QEMU top-level: {name}"
                         )
-                    matches[required].append((top_components[0], member.isreg()))
+                    matches[required].append((top_level, member.isreg()))
     except Exception as error:  # Listing errors must always fail closed.
         return fail(f"cannot read tar listing for {archive}: {error}")
 

@@ -36,7 +36,22 @@ instructions point to the official `.tar.xz` release.
 
 Direct helper tests cover complete gzip/xz archives, each missing required
 member, non-regular members, inconsistent top levels, duplicates, unsafe paths,
-and unreadable listings. Integration tests prove incomplete local packaging
-input fails, a valid local tar succeeds, a non-official download fails the
-pinned hash after requesting the official URL, and an incomplete nested import
-is rejected before transaction copying or target mutation.
+regular headers with trailing-slash names, and unreadable listings. Integration
+tests prove incomplete local packaging input fails, a valid local tar succeeds,
+a non-official download fails the pinned hash after requesting the official URL,
+and an incomplete nested import is rejected before transaction copying or
+target mutation.
+
+Authentic release coverage is explicitly opt-in and never downloads during the
+ordinary focused test. Place the official file under project `build/tmp`, then
+run:
+
+```bash
+QEMU_OFFICIAL_RELEASE_TAR="$PWD/build/tmp/qemu-9.2.0.tar.xz" \
+  bash tests/integration/test_offline_qemu_archive.sh
+```
+
+This mode requires an absolute regular-file path, exact size `135188800`, exact
+SHA-256 `f859f0bc65e1f533d040bbe8c92bcfecee5af2c921a6687c652fb44d089bd894`,
+and a successful invocation of the same source-closure helper. Its output is
+the retained size/hash/helper evidence for a real official tar.
