@@ -13,15 +13,32 @@ fail() {
     exit 1
 }
 
+make_complete_qemu_tar() {
+    local output="$1" source_root
+    local subproject
+    source_root=$(mktemp -d "$work/qemu-source.XXXXXX")
+    for subproject in keycodemapdb berkeley-softfloat-3 berkeley-testfloat-3; do
+        mkdir -p "$source_root/qemu-9.2.0/subprojects/$subproject"
+        printf 'project(%s)\n' "$subproject" > \
+            "$source_root/qemu-9.2.0/subprojects/$subproject/meson.build"
+    done
+    tar -cJf "$output" -C "$source_root" qemu-9.2.0
+    rm -rf "$source_root"
+}
+
 fixture_source="$work/original/source-tree"
 fixture_archive_dir="$work/original/archive-dir"
 relocated_dir="$work/relocated/archive-dir"
 test_project="$work/import-target/project"
-mkdir -p "$fixture_source/guest/ubuntu" \
+mkdir -p "$fixture_source/guest/ubuntu" "$fixture_source/qemu-src" \
     "$fixture_source/guest/ubuntu-server" "$fixture_archive_dir" \
-    "$relocated_dir" "$test_project"
+    "$relocated_dir" "$test_project/scripts"
 cp "$repo/setup.sh" "$test_project/setup.sh"
+ln -s "$repo/scripts/validate-qemu-source-closure.py" \
+    "$test_project/scripts/validate-qemu-source-closure.py"
 chmod +x "$test_project/setup.sh"
+
+make_complete_qemu_tar "$fixture_source/qemu-src/qemu-9.2.0.tar.xz"
 
 printf 'compact-kernel\n' > "$fixture_source/guest/ubuntu/vmlinuz"
 printf 'compact-rootfs\n' > "$fixture_source/guest/ubuntu/rootfs.ext4"
@@ -87,6 +104,51 @@ if find "$test_project" -path '*/custom-driver*' -print -quit | grep -q .; then
 fi
 if grep -R -I -E -q 'autoload|modules-load' "$test_project/guest/images"; then
     fail 'default offline import enabled driver autoloading'
+fi
+
+# An incomplete nested QEMU tar must be rejected before any import transaction
+# copy or existing project artifact mutation.
+incomplete_qemu_source="$work/incomplete-qemu/source"
+mkdir -p "$incomplete_qemu_source"
+cp -a "$fixture_source/." "$incomplete_qemu_source/"
+printf 'not-a-qemu-tar\n' > \
+    "$incomplete_qemu_source/qemu-src/qemu-9.2.0.tar.xz"
+incomplete_qemu_archive="$work/incomplete-qemu/archive.zip"
+(cd "$incomplete_qemu_source" && zip -qr "$incomplete_qemu_archive" .)
+incomplete_qemu_expected="$work/incomplete-qemu/existing-qemu.tar.xz"
+cp "$test_project/third_party/qemu-9.2.0.tar.xz" "$incomplete_qemu_expected"
+incomplete_qemu_fakebin="$work/incomplete-qemu/fakebin"
+incomplete_qemu_copy_marker="$work/incomplete-qemu/transaction-copy-called"
+mkdir -p "$incomplete_qemu_fakebin"
+cat > "$incomplete_qemu_fakebin/cp" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+destination="${@: -1}"
+case "$destination" in
+    */offline-transaction.*/*)
+        : > "$OFFLINE_TEST_TRANSACTION_COPY_CALLED" ;;
+esac
+exec /usr/bin/cp "$@"
+EOF
+chmod +x "$incomplete_qemu_fakebin/cp"
+incomplete_qemu_log="$work/incomplete-qemu/import.log"
+if PATH="$incomplete_qemu_fakebin:$PATH" \
+        OFFLINE_TEST_TRANSACTION_COPY_CALLED="$incomplete_qemu_copy_marker" \
+        "$test_project/setup.sh" --import "$incomplete_qemu_archive" --import-only \
+        >"$incomplete_qemu_log" 2>&1; then
+    fail 'setup accepted an incomplete nested QEMU tar'
+fi
+grep -Fq 'QEMU source closure' "$incomplete_qemu_log" || \
+    fail 'nested QEMU rejection did not identify source closure'
+[ ! -e "$incomplete_qemu_copy_marker" ] || \
+    fail 'nested QEMU rejection copied into an import transaction'
+cmp -s "$incomplete_qemu_expected" \
+    "$test_project/third_party/qemu-9.2.0.tar.xz" || \
+    fail 'nested QEMU rejection changed the existing project tar'
+if find "$test_project/build" -maxdepth 2 -type d \
+        \( -name 'offline-import*' -o -name 'offline-transaction*' \) \
+        -print -quit | grep -q .; then
+    fail 'nested QEMU rejection left import temporary state'
 fi
 
 artifact_preflight_expected="$work/artifact-preflight-expected"
@@ -189,7 +251,7 @@ fi
 rollback_source="$work/rollback/source"
 mkdir -p "$rollback_source/guest/ubuntu" \
     "$rollback_source/guest/ubuntu-server" "$rollback_source/qemu-src"
-printf 'rollback-qemu-source\n' > \
+cp "$fixture_source/qemu-src/qemu-9.2.0.tar.xz" \
     "$rollback_source/qemu-src/qemu-9.2.0.tar.xz"
 printf 'new-compact-kernel\n' > "$rollback_source/guest/ubuntu/vmlinuz"
 printf 'new-compact-rootfs\n' > "$rollback_source/guest/ubuntu/rootfs.ext4"
@@ -758,8 +820,10 @@ mkdir -p "$package_project/scripts" "$package_project/third_party" \
     "$package_project/guest/images/ubuntu-server" \
     "$package_project/guest/driver/prebuilt" "$package_project/build/tmp"
 cp "$repo/scripts/prepare-offline.sh" "$package_project/scripts/prepare-offline.sh"
+ln -s "$repo/scripts/validate-qemu-source-closure.py" \
+    "$package_project/scripts/validate-qemu-source-closure.py"
 chmod +x "$package_project/scripts/prepare-offline.sh"
-printf 'qemu-source-fixture\n' > "$package_project/third_party/qemu-9.2.0.tar.xz"
+make_complete_qemu_tar "$package_project/third_party/qemu-9.2.0.tar.xz"
 printf 'debian-kernel\n' > "$package_project/guest/images/debian/bzImage"
 printf 'debian-rootfs\n' > "$package_project/guest/images/debian/rootfs.ext4"
 printf 'compact-kernel\n' > "$package_project/guest/images/ubuntu/vmlinuz"
@@ -883,6 +947,72 @@ EOF
 chmod +x "$fakebin/sudo" "$fakebin/apt" "$fakebin/mount" "$fakebin/umount" \
     "$fakebin/mountpoint"
 
+# A user-supplied local tar is not required to match the official digest, but
+# it must satisfy the same source-closure contract before a ZIP is published.
+incomplete_package_project="$work/incomplete-package-project"
+/usr/bin/cp -a "$package_project" "$incomplete_package_project"
+printf 'plaintext-incomplete-qemu\n' > \
+    "$incomplete_package_project/third_party/qemu-9.2.0.tar.xz"
+incomplete_package_archive="$work/output/incomplete-qemu.zip"
+if PATH="$fakebin:$PATH" \
+        OFFLINE_TEST_MOUNT_LOG="$mount_log" \
+        OFFLINE_TEST_UMOUNT_LOG="$umount_log" \
+        OFFLINE_TEST_COMPACT_ROOT="$compact_root" \
+        OFFLINE_TEST_SERVER_ROOT="$server_root" \
+        "$incomplete_package_project/scripts/prepare-offline.sh" \
+            --guest ubuntu-server --output "$incomplete_package_archive" \
+            >"$work/incomplete-package.log" 2>&1; then
+    fail 'packager accepted an incomplete local QEMU tar'
+fi
+grep -Fq 'QEMU source closure' "$work/incomplete-package.log" || \
+    fail 'incomplete local QEMU rejection did not identify source closure'
+[ ! -e "$incomplete_package_archive" ] || \
+    fail 'incomplete local QEMU input published a ZIP'
+
+# The default download must use the official URL and reject even a structurally
+# complete tar when it does not match the pinned official release digest.
+download_package_project="$work/download-package-project"
+/usr/bin/cp -a "$package_project" "$download_package_project"
+rm -f "$download_package_project/third_party/qemu-9.2.0.tar.xz"
+download_fakebin="$work/download-fakebin"
+download_url_log="$work/download-url.log"
+mkdir -p "$download_fakebin"
+cat > "$download_fakebin/curl" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+output=""
+url=""
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        -o) output="$2"; shift 2 ;;
+        -*) shift ;;
+        *) url="$1"; shift ;;
+    esac
+done
+printf '%s\n' "$url" >> "$OFFLINE_TEST_DOWNLOAD_URL_LOG"
+cp "$OFFLINE_TEST_DOWNLOAD_FIXTURE" "$output"
+EOF
+chmod +x "$download_fakebin/curl"
+wrong_hash_archive="$work/output/wrong-official-hash.zip"
+if PATH="$download_fakebin:$fakebin:$PATH" \
+        OFFLINE_TEST_DOWNLOAD_URL_LOG="$download_url_log" \
+        OFFLINE_TEST_DOWNLOAD_FIXTURE="$package_project/third_party/qemu-9.2.0.tar.xz" \
+        OFFLINE_TEST_MOUNT_LOG="$mount_log" \
+        OFFLINE_TEST_UMOUNT_LOG="$umount_log" \
+        OFFLINE_TEST_COMPACT_ROOT="$compact_root" \
+        OFFLINE_TEST_SERVER_ROOT="$server_root" \
+        "$download_package_project/scripts/prepare-offline.sh" \
+            --guest ubuntu-server --output "$wrong_hash_archive" \
+            >"$work/wrong-official-hash.log" 2>&1; then
+    fail 'packager accepted a wrong-hash official QEMU download'
+fi
+grep -Fxq 'https://download.qemu.org/qemu-9.2.0.tar.xz' "$download_url_log" || \
+    fail 'packager did not request the official QEMU release URL'
+grep -Fq 'SHA-256' "$work/wrong-official-hash.log" || \
+    fail 'wrong official QEMU digest did not report SHA-256 failure'
+[ ! -e "$wrong_hash_archive" ] || \
+    fail 'wrong-hash official QEMU download published a ZIP'
+
 # Neither offline entry point may create temporary state through a symlink in
 # the project-local build/tmp path.  Cover both possible linked components and
 # collect all failures so both scripts are exercised in the initial RED run.
@@ -996,8 +1126,10 @@ if zipinfo -1 "$package_archive" | grep -Eq '(^/|(^|/)\.\.(/|$))'; then
 fi
 
 package_import_project="$work/package-import-project"
-mkdir -p "$package_import_project"
+mkdir -p "$package_import_project/scripts"
 cp "$repo/setup.sh" "$package_import_project/setup.sh"
+ln -s "$repo/scripts/validate-qemu-source-closure.py" \
+    "$package_import_project/scripts/validate-qemu-source-closure.py"
 chmod +x "$package_import_project/setup.sh"
 if ! "$package_import_project/setup.sh" --import "$package_archive" --import-only \
         >"$work/package-import.log" 2>&1; then

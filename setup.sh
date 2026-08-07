@@ -795,6 +795,23 @@ import_offline() {
     local -a source_dirs=() relative_dirs=() preserve_flags=() messages=()
     local -a transaction_dirs=()
 
+    qemu_tar=$(find "$tmpdir/qemu-src" -maxdepth 1 -type f \
+        -name 'qemu-*.tar.*' -print -quit 2>/dev/null || true)
+    if [ -n "$qemu_tar" ]; then
+        local qemu_source_closure_validator="${PROJECT_DIR}/scripts/validate-qemu-source-closure.py"
+        if [ ! -x "$qemu_source_closure_validator" ]; then
+            fail "缺少 QEMU source closure 校验器: $qemu_source_closure_validator"
+            cleanup_offline_import_temporaries
+            return 1
+        fi
+        if ! "$qemu_source_closure_validator" "$qemu_tar"; then
+            fail 'QEMU source closure 不完整，拒绝导入'
+            cleanup_offline_import_temporaries
+            return 1
+        fi
+        ok "QEMU source closure 校验通过: $(basename "$qemu_tar")"
+    fi
+
     OFFLINE_TRANSACTION_ROOT=$(mktemp -d "$import_tmp_root/offline-transaction.XXXXXX")
     mkdir -p "$OFFLINE_TRANSACTION_ROOT/new" "$OFFLINE_TRANSACTION_ROOT/backup"
     OFFLINE_TRANSACTION_RELATIVES=()
@@ -809,8 +826,6 @@ import_offline() {
     trap 'queue_offline_import_signal TERM' TERM
     trap 'queue_offline_import_signal HUP' HUP
 
-    qemu_tar=$(find "$tmpdir/qemu-src" -maxdepth 1 -type f \
-        -name 'qemu-*.tar.*' -print -quit 2>/dev/null || true)
     if [ -n "$qemu_tar" ]; then
         mkdir -p "$OFFLINE_TRANSACTION_ROOT/sources/qemu"
         qemu_copy_status=0
@@ -1949,8 +1964,8 @@ if [ "$NEED_QEMU" = true ]; then
                 QEMU_FETCHED=false
                 TARBALL="${PROJECT_DIR}/third_party/qemu-9.2.0.tar.xz"
 
-                # prepare-offline.sh may obtain GitHub's gzip release archive.
-                # Prefer xz when both are present, but accept either offline input.
+                # Prefer the official xz release, but retain gzip compatibility
+                # for previously produced offline archives.
                 for qemu_tarball_candidate in \
                     "$TARBALL" \
                     "${PROJECT_DIR}/third_party/qemu-9.2.0.tar.gz"; do
@@ -1985,7 +2000,7 @@ if [ "$NEED_QEMU" = true ]; then
                     echo ""
                     fail "  请在有网络的机器上执行以下命令，然后将文件拷贝到本机："
                     fail "  ────────────────────────────────────────"
-                    fail "  wget https://github.com/qemu/qemu/archive/refs/tags/${QEMU_VERSION}.tar.gz -O qemu-9.2.0.tar.xz"
+                    fail "  wget https://download.qemu.org/qemu-9.2.0.tar.xz -O qemu-9.2.0.tar.xz"
                     fail "  scp qemu-9.2.0.tar.xz <用户>@<本机IP>:${TARBALL}"
                     fail "  ────────────────────────────────────────"
                     fail "  或直接将 QEMU 源码目录拷贝到: ${QEMU_DIR}"

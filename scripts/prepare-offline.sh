@@ -107,6 +107,9 @@ KVER="6.8.0-107-generic"
 CUSTOM_DRIVER_ARCHIVE=""
 COMPAT_RUNTIME_DEB=""
 QEMU_VERSION="v9.2.0"
+QEMU_RELEASE_URL="https://download.qemu.org/qemu-9.2.0.tar.xz"
+QEMU_RELEASE_SHA256="f859f0bc65e1f533d040bbe8c92bcfecee5af2c921a6687c652fb44d089bd894"
+QEMU_SOURCE_CLOSURE_VALIDATOR="${PROJECT_DIR}/scripts/validate-qemu-source-closure.py"
 
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -306,12 +309,16 @@ if [ -n "$COMPAT_RUNTIME_DEB" ]; then
 fi
 
 # ---- 检查依赖 ----
-for cmd in curl zip mountpoint; do
+for cmd in curl zip mountpoint python3 sha256sum; do
     if ! command -v "$cmd" &>/dev/null; then
         fail "缺少依赖: $cmd"
         exit 1
     fi
 done
+[ -x "$QEMU_SOURCE_CLOSURE_VALIDATOR" ] || {
+    fail "缺少 QEMU source closure 校验器: $QEMU_SOURCE_CLOSURE_VALIDATOR"
+    exit 1
+}
 
 # ---- 准备 staging 目录 ----
 mkdir -p "$STAGING"/{qemu-src,guest/debian,guest/ubuntu,guest/ubuntu-server,kheaders}
@@ -515,12 +522,20 @@ elif [ -d "${PROJECT_DIR}/third_party/qemu" ]; then
     ok "QEMU tarball 创建完成"
     PASS=$((PASS + 1))
 else
-    info "从 GitHub 下载 QEMU ${QEMU_VERSION}..."
-    TARBALL_GZ="${TARBALL%.tar.xz}.tar.gz"
-    if curl -fSL -o "$TARBALL_GZ" \
-        "https://github.com/qemu/qemu/archive/refs/tags/${QEMU_VERSION}.tar.gz"; then
-        ok "QEMU 源码下载完成: $(du -h "$TARBALL_GZ" | cut -f1)"
-        PASS=$((PASS + 1))
+    info "从 QEMU 官方 release 下载 ${QEMU_VERSION}..."
+    if curl -fSL -o "$TARBALL" "$QEMU_RELEASE_URL"; then
+        actual_qemu_sha256=$(sha256sum -- "$TARBALL" | awk '{ print $1 }')
+        if [ "$actual_qemu_sha256" != "$QEMU_RELEASE_SHA256" ]; then
+            fail "QEMU 官方 release SHA-256 校验失败"
+            fail "  expected: $QEMU_RELEASE_SHA256"
+            fail "  actual:   $actual_qemu_sha256"
+            rm -f -- "$TARBALL"
+            FAIL_COUNT=$((FAIL_COUNT + 1))
+        else
+            ok "QEMU 官方 release SHA-256 校验通过"
+            ok "QEMU 源码下载完成: $(du -h "$TARBALL" | cut -f1)"
+            PASS=$((PASS + 1))
+        fi
     else
         fail "QEMU 源码下载失败"
         FAIL_COUNT=$((FAIL_COUNT + 1))
@@ -820,6 +835,12 @@ if [ "$FAIL_COUNT" -gt 0 ]; then
     fail "有 ${FAIL_COUNT} 个组件准备失败，拒绝发布不完整离线包"
     exit 1
 fi
+
+if ! "$QEMU_SOURCE_CLOSURE_VALIDATOR" "$TARBALL"; then
+    fail "QEMU source closure 不完整，拒绝发布离线包"
+    exit 1
+fi
+ok "QEMU source closure 校验通过"
 
 cd "$STAGING"
 info "正在压缩（大文件可能需要几分钟）..."
