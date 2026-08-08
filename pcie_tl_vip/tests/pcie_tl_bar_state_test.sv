@@ -8,6 +8,11 @@ class pcie_tl_bar_state_proxy extends pcie_tl_config_proxy;
 
     int vf_enable_notifications;
     int vf_disable_notifications;
+    int vf_lifecycle_notifications;
+    bit last_lifecycle_enable;
+    int last_lifecycle_pf_index;
+    int last_lifecycle_num_vfs;
+    pcie_tl_sriov_cap last_lifecycle_sc;
 
     function new(string name = "pcie_tl_bar_state_proxy",
                  uvm_component parent = null);
@@ -20,6 +25,11 @@ class pcie_tl_bar_state_proxy extends pcie_tl_config_proxy;
         int num_vfs,
         pcie_tl_sriov_cap sc
     );
+        vf_lifecycle_notifications++;
+        last_lifecycle_enable  = enable;
+        last_lifecycle_pf_index = pf_index;
+        last_lifecycle_num_vfs = num_vfs;
+        last_lifecycle_sc      = sc;
         if (enable)
             vf_enable_notifications++;
         else
@@ -117,16 +127,25 @@ class pcie_tl_bar_state_test extends uvm_test;
         bit [31:0] cfg_dw;
         bit [31:0] old_cfg_dw;
         bit [15:0] old_pf_bdf;
+        bit [15:0] stale_disabled_vf_bdf;
         bit [15:0] old_vf_bdf[];
         int enable_notifications;
         int disable_notifications;
+        int lifecycle_notifications;
         pcie_tl_func_manager overlap_mgr;
+        pcie_tl_func_manager stale_mgr;
+        pcie_tl_func_manager direct_mgr;
 
         phase.raise_objection(this);
 
         mgr = pcie_tl_func_manager::type_id::create("mgr");
         mgr.cfg_profile = PCIE_CFG_PROFILE_DPU_20F9_501X;
         mgr.build_topology(0, 1, 16, 16'h20f9, 16'h5011, 16'h8689);
+        expect_generation("initial topology generation", mgr.config_generation, 1);
+        g0 = mgr.config_generation;
+        mgr.build_topology(0, 1, 16, 16'h20f9, 16'h5011, 16'h8689);
+        expect_generation("cached initial topology invalidated by rebuild",
+                          mgr.config_generation, g0 + 1);
         proxy.func_mgr = mgr;
         proxy.multi_function_mode = 1;
         proxy.bypass_enable = 1;
@@ -223,15 +242,30 @@ class pcie_tl_bar_state_test extends uvm_test;
         g0 = mgr.config_generation;
         enable_notifications = proxy.vf_enable_notifications;
         disable_notifications = proxy.vf_disable_notifications;
-        void'(proxy.handle_cfg_write_bdf(pf_bdf, sriov_dw + 4, 32'd16, 0, 2));
+        lifecycle_notifications = proxy.vf_lifecycle_notifications;
+        void'(proxy.handle_cfg_write_bdf(pf_bdf, sriov_dw + 4, 32'd32, 0, 2));
+        cfg_dw = mgr.cfg_read(pf_bdf, (sriov_dw + 4) << 2);
+        if (mgr.sriov_caps[0].num_vfs != 16 || cfg_dw[15:0] != 16)
+            `uvm_error("BAR_STATE",
+                       "oversized NumVFs was not clamped into state/raw image")
+        expect_generation("accepted oversized NumVFs",
+                          mgr.config_generation, g0 + 1);
         void'(proxy.handle_cfg_write_bdf(pf_bdf, sriov_dw + 2, 32'h0000_0011, 0, 2));
+        cfg_dw = mgr.cfg_read(pf_bdf, (sriov_dw + 4) << 2);
         if (!mgr.sriov_caps[0].vf_enable || !mgr.sriov_caps[0].vf_mse ||
             mgr.sriov_caps[0].num_vfs != 16 ||
+            cfg_dw[15:0] != 16 ||
             mgr.config_generation != g0 + 3)
             `uvm_error("BAR_STATE", "SR-IOV state was not mirrored")
         if (proxy.vf_enable_notifications != enable_notifications + 1 ||
             proxy.vf_disable_notifications != disable_notifications)
             `uvm_error("BAR_STATE", "normal VFE set did not notify exactly once")
+        if (proxy.vf_lifecycle_notifications != lifecycle_notifications + 1 ||
+            !proxy.last_lifecycle_enable ||
+            proxy.last_lifecycle_pf_index != 0 ||
+            proxy.last_lifecycle_num_vfs != 16 ||
+            proxy.last_lifecycle_sc != mgr.sriov_caps[0])
+            `uvm_error("BAR_STATE", "normal VFE enable lifecycle payload mismatch")
         expect_vf_lut("SR-IOV enabled", 16);
 
         enable_notifications = proxy.vf_enable_notifications;
@@ -267,6 +301,7 @@ class pcie_tl_bar_state_test extends uvm_test;
         g0 = mgr.config_generation;
         enable_notifications = proxy.vf_enable_notifications;
         disable_notifications = proxy.vf_disable_notifications;
+        lifecycle_notifications = proxy.vf_lifecycle_notifications;
         void'(proxy.handle_cfg_write_bdf(pf_bdf, sriov_dw + 2, 32'h0000_0000, 0, 2));
         if (mgr.sriov_caps[0].vf_enable || mgr.sriov_caps[0].vf_mse ||
             mgr.sriov_caps[0].num_vfs != 16 ||
@@ -275,6 +310,12 @@ class pcie_tl_bar_state_test extends uvm_test;
         if (proxy.vf_enable_notifications != enable_notifications ||
             proxy.vf_disable_notifications != disable_notifications + 1)
             `uvm_error("BAR_STATE", "normal VFE clear did not notify exactly once")
+        if (proxy.vf_lifecycle_notifications != lifecycle_notifications + 1 ||
+            proxy.last_lifecycle_enable ||
+            proxy.last_lifecycle_pf_index != 0 ||
+            proxy.last_lifecycle_num_vfs != 16 ||
+            proxy.last_lifecycle_sc != mgr.sriov_caps[0])
+            `uvm_error("BAR_STATE", "normal VFE disable lifecycle payload mismatch")
         expect_vf_lut("VFE clear", 0);
         enable_notifications = proxy.vf_enable_notifications;
         disable_notifications = proxy.vf_disable_notifications;
@@ -305,13 +346,15 @@ class pcie_tl_bar_state_test extends uvm_test;
         g0 = mgr.config_generation;
         enable_notifications = proxy.vf_enable_notifications;
         disable_notifications = proxy.vf_disable_notifications;
+        lifecycle_notifications = proxy.vf_lifecycle_notifications;
         void'(proxy.handle_cfg_write_bdf(pf_bdf, sriov_dw + 4, 32'd0, 0, 2));
         void'(proxy.handle_cfg_write_bdf(pf_bdf, sriov_dw + 2, 32'h0000_0001, 0, 2));
         if (!mgr.sriov_caps[0].vf_enable || mgr.sriov_caps[0].num_vfs != 0 ||
             mgr.config_generation != g0 + 2)
             `uvm_error("BAR_STATE", "zero-NumVFs VFE set edge mismatch")
         if (proxy.vf_enable_notifications != enable_notifications ||
-            proxy.vf_disable_notifications != disable_notifications)
+            proxy.vf_disable_notifications != disable_notifications ||
+            proxy.vf_lifecycle_notifications != lifecycle_notifications)
             `uvm_error("BAR_STATE", "zero-NumVFs VFE set emitted a notification")
         expect_vf_lut("zero-NumVFs VFE set", 0);
         void'(proxy.handle_cfg_write_bdf(pf_bdf, sriov_dw + 2, 32'h0000_0001, 0, 2));
@@ -325,13 +368,14 @@ class pcie_tl_bar_state_test extends uvm_test;
             cfg_dw[15:0] != 16'h0000)
             `uvm_error("BAR_STATE", "zero-NumVFs VFE clear left Control state set")
         if (proxy.vf_enable_notifications != enable_notifications ||
-            proxy.vf_disable_notifications != disable_notifications)
+            proxy.vf_disable_notifications != disable_notifications ||
+            proxy.vf_lifecycle_notifications != lifecycle_notifications)
             `uvm_error("BAR_STATE", "zero-NumVFs VFE clear emitted a notification")
         expect_vf_lut("zero-NumVFs VFE clear", 0);
 
-        // Leave VFs enabled across runtime rekey and then reuse this manager;
-        // build() must discard every old VF LUT entry while resetting the
-        // routing generation.
+        // Leave VFs enabled across runtime rekey and then reuse this manager.
+        // Rebuild must discard old LUT entries while advancing the existing
+        // generation and reopening runtime BDF discovery.
         g0 = mgr.config_generation;
         void'(proxy.handle_cfg_write_bdf(pf_bdf, sriov_dw + 4, 32'd16, 0, 2));
         void'(proxy.handle_cfg_write_bdf(pf_bdf, sriov_dw + 2, 32'h0000_0001, 0, 2));
@@ -371,11 +415,30 @@ class pcie_tl_bar_state_test extends uvm_test;
             `uvm_error("BAR_STATE", "repeated runtime BDF bind was rejected")
         expect_generation("repeated runtime BDF bind", mgr.config_generation, g0);
 
-        // Reusing a manager for a fresh topology must not inherit a stale
-        // decoder generation from the prior build.
+        g0 = mgr.config_generation;
         mgr.build_topology(0, 1, 16, 16'h20f9, 16'h5011, 16'h8689);
-        expect_generation("fresh topology generation", mgr.config_generation, 1);
+        expect_generation("rebuilt topology generation",
+                          mgr.config_generation, g0 + 1);
+        if (mgr.runtime_bdf_bound || mgr.runtime_pf_base_bdf != 16'h0000)
+            `uvm_error("BAR_STATE", "topology rebuild retained runtime BDF binding")
+        if (mgr.pf_ctx[0].bdf != 16'h0200 ||
+            mgr.lookup_by_bdf(16'h0200) != mgr.pf_ctx[0])
+            `uvm_error("BAR_STATE", "topology rebuild lost the current PF base")
         expect_vf_lut("fresh topology has no stale VF LUT", 0);
+        g0 = mgr.config_generation;
+        if (!mgr.bind_runtime_pf_base(16'h0300) ||
+            mgr.pf_ctx[0].bdf != 16'h0300 ||
+            mgr.sriov_caps[0].pf_bdf != 16'h0300 ||
+            mgr.lookup_by_bdf(16'h0300) != mgr.pf_ctx[0] ||
+            mgr.lookup_by_bdf(16'h0200) != null ||
+            mgr.config_generation != g0 + 1)
+            `uvm_error("BAR_STATE", "post-rebuild runtime BDF rebind state mismatch")
+        expect_vf_lut("post-rebuild runtime BDF rebind", 0);
+        g0 = mgr.config_generation;
+        if (!mgr.bind_runtime_pf_base(16'h0300))
+            `uvm_error("BAR_STATE", "repeated post-rebuild BDF bind was rejected")
+        expect_generation("repeated post-rebuild runtime BDF bind",
+                          mgr.config_generation, g0);
 
         // Legacy SR-IOV leaves Function Dependency Link writable. A rejected
         // active NumVFs full-DWORD write must therefore return before the
@@ -397,6 +460,21 @@ class pcie_tl_bar_state_test extends uvm_test;
             `uvm_error("BAR_STATE", "active NumVFs full-DWORD write was not atomic")
         expect_vf_lut("active NumVFs full-DWORD write rejected", 16);
         expect_generation("active NumVFs full-DWORD write rejected",
+                          mgr.config_generation, g0);
+
+        // Active atomic rejection is based on the raw request, not its
+        // inactive-path accepted value. Requested 32 would clamp to the active
+        // 16, but must still reject the whole DWORD so writable FDL is stable.
+        g0 = mgr.config_generation;
+        void'(proxy.handle_cfg_write_bdf(
+            pf_bdf, sriov_dw + 4,
+            {old_cfg_dw[31:16] ^ 16'h3c3c, 16'd32}, 0, 4));
+        cfg_dw = mgr.cfg_read(pf_bdf, (sriov_dw + 4) << 2);
+        if (cfg_dw != old_cfg_dw || mgr.sriov_caps[0].num_vfs != 16)
+            `uvm_error("BAR_STATE",
+                       "active oversized NumVFs full-DWORD write was not atomic")
+        expect_vf_lut("active oversized NumVFs full-DWORD write rejected", 16);
+        expect_generation("active oversized NumVFs full-DWORD write rejected",
                           mgr.config_generation, g0);
 
         // Rekey across a numerically overlapping range: old VF7 becomes the
@@ -441,6 +519,85 @@ class pcie_tl_bar_state_test extends uvm_test;
             `uvm_error("BAR_STATE", "repeated overlapping runtime bind was rejected")
         expect_generation("repeated overlapping runtime BDF bind",
                           overlap_mgr.config_generation, g0);
+
+        // Runtime rekey must also purge candidate keys for disabled VFs. A
+        // stale wrong-object entry must not survive merely because VF15 is off.
+        stale_mgr = pcie_tl_func_manager::type_id::create("stale_mgr");
+        stale_mgr.cfg_profile = PCIE_CFG_PROFILE_DPU_20F9_501X;
+        stale_mgr.build_topology(0, 1, 16, 16'h20f9, 16'h5011, 16'h8689);
+        stale_mgr.enable_vfs(0, 1);
+        stale_disabled_vf_bdf = stale_mgr.vf_ctx[0][15].bdf;
+        stale_mgr.bdf_lut[stale_disabled_vf_bdf] = stale_mgr.pf_ctx[0];
+        g0 = stale_mgr.config_generation;
+        if (!stale_mgr.bind_runtime_pf_base(16'h0200) ||
+            stale_mgr.config_generation != g0 + 1 ||
+            stale_mgr.lookup_by_bdf(16'h0200) != stale_mgr.pf_ctx[0] ||
+            stale_mgr.lookup_by_bdf(stale_mgr.vf_ctx[0][0].bdf) !=
+                stale_mgr.vf_ctx[0][0])
+            `uvm_error("BAR_STATE", "disabled-VF stale-key rebind state mismatch")
+        if (stale_mgr.lookup_by_bdf(stale_disabled_vf_bdf) != null)
+            `uvm_error("BAR_STATE",
+                       "runtime BDF bind retained a disabled-VF stale LUT key")
+        for (int vf = 0; vf < stale_mgr.max_vfs_per_pf; vf++) begin
+            pcie_tl_func_context lut_ctx =
+                stale_mgr.lookup_by_bdf(stale_mgr.vf_ctx[0][vf].bdf);
+            if (stale_mgr.vf_ctx[0][vf].bdf !=
+                stale_mgr.sriov_caps[0].get_vf_rid(vf) ||
+                (vf == 0 && lut_ctx != stale_mgr.vf_ctx[0][vf]) ||
+                (vf != 0 && lut_ctx != null))
+                `uvm_error("BAR_STATE", $sformatf(
+                    "disabled-VF stale-key rebind mapped VF%0d incorrectly", vf))
+        end
+
+        // Direct lifecycle APIs must use the accepted count and synchronize
+        // only NumVFs and Control in the registered PF configuration image.
+        direct_mgr = pcie_tl_func_manager::type_id::create("direct_mgr");
+        direct_mgr.cfg_profile = PCIE_CFG_PROFILE_DPU_20F9_501X;
+        direct_mgr.build_topology(0, 1, 16, 16'h20f9, 16'h5011, 16'h8689);
+        sriov_dw = int'(direct_mgr.sriov_caps[0].offset >> 2);
+        direct_mgr.pf_ctx[0].cfg_mgr.cfg_space[
+            direct_mgr.sriov_caps[0].offset + 10] = 8'h01;
+        direct_mgr.pf_ctx[0].cfg_mgr.cfg_space[
+            direct_mgr.sriov_caps[0].offset + 18] = 8'ha5;
+        direct_mgr.pf_ctx[0].cfg_mgr.cfg_space[
+            direct_mgr.sriov_caps[0].offset + 19] = 8'h5a;
+        g0 = direct_mgr.config_generation;
+        direct_mgr.enable_vfs(0, 32);
+        cfg_dw = direct_mgr.cfg_read(
+            direct_mgr.pf_ctx[0].bdf, (sriov_dw + 4) << 2);
+        old_cfg_dw = direct_mgr.cfg_read(
+            direct_mgr.pf_ctx[0].bdf, (sriov_dw + 2) << 2);
+        if (direct_mgr.sriov_caps[0].num_vfs != 16 ||
+            !direct_mgr.sriov_caps[0].vf_enable ||
+            cfg_dw[15:0] != 16 || cfg_dw[31:16] != 16'h5aa5 ||
+            !old_cfg_dw[0] || old_cfg_dw[23:16] != 8'h01)
+            `uvm_error("BAR_STATE", "direct VF enable raw config image mismatch")
+        for (int vf = 0; vf < direct_mgr.max_vfs_per_pf; vf++)
+            if (!direct_mgr.vf_ctx[0][vf].enabled ||
+                direct_mgr.lookup_by_bdf(direct_mgr.vf_ctx[0][vf].bdf) !=
+                    direct_mgr.vf_ctx[0][vf])
+                `uvm_error("BAR_STATE", $sformatf(
+                    "direct VF enable mapped VF%0d incorrectly", vf))
+        expect_generation("direct oversized VF enable",
+                          direct_mgr.config_generation, g0 + 1);
+        g0 = direct_mgr.config_generation;
+        direct_mgr.disable_vfs(0);
+        cfg_dw = direct_mgr.cfg_read(
+            direct_mgr.pf_ctx[0].bdf, (sriov_dw + 4) << 2);
+        old_cfg_dw = direct_mgr.cfg_read(
+            direct_mgr.pf_ctx[0].bdf, (sriov_dw + 2) << 2);
+        if (direct_mgr.sriov_caps[0].num_vfs != 16 ||
+            direct_mgr.sriov_caps[0].vf_enable ||
+            cfg_dw[15:0] != 16 || cfg_dw[31:16] != 16'h5aa5 ||
+            old_cfg_dw[0] || old_cfg_dw[23:16] != 8'h01)
+            `uvm_error("BAR_STATE", "direct VF disable raw config image mismatch")
+        for (int vf = 0; vf < direct_mgr.max_vfs_per_pf; vf++)
+            if (direct_mgr.vf_ctx[0][vf].enabled ||
+                direct_mgr.lookup_by_bdf(direct_mgr.vf_ctx[0][vf].bdf) != null)
+                `uvm_error("BAR_STATE", $sformatf(
+                    "direct VF disable retained VF%0d routing", vf))
+        expect_generation("direct VF disable",
+                          direct_mgr.config_generation, g0 + 1);
 
         // Reconciliation must treat removal of a wrong object at a disabled
         // VF key as a routing change, even though the VF itself stays disabled.

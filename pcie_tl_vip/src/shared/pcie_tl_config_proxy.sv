@@ -540,19 +540,23 @@ class pcie_tl_config_proxy extends uvm_component;
             pcie_tl_sriov_cap sc = func_mgr.sriov_caps[ctx.pf_index];
             bit [15:0] old_num_vfs = sc.num_vfs;
             bit [15:0] requested_num_vfs = merged_dw[15:0];
+            int accepted_num_vfs = func_mgr.accepted_vf_count(
+                ctx.pf_index, int'(requested_num_vfs));
 
+            merged_dw[15:0] = accepted_num_vfs;
             if (sc.vf_enable && old_num_vfs != requested_num_vfs) begin
                 // NumVFs is programmed before VFE. Keep the capability image,
                 // enabled contexts, and LUT atomic if software attempts to
                 // change the count while VFs are active.
                 merged_dw[15:0] = old_num_vfs;
                 `uvm_info("CFG_PROXY", $sformatf(
-                    "ignored active SR-IOV NumVFs write BDF=0x%04h requested=%0d active=%0d",
-                    target_bdf, requested_num_vfs, old_num_vfs), UVM_LOW)
+                    "ignored active SR-IOV NumVFs write BDF=0x%04h requested=%0d accepted=%0d active=%0d",
+                    target_bdf, requested_num_vfs, accepted_num_vfs,
+                    old_num_vfs), UVM_LOW)
                 return 1;
             end else begin
-                sc.num_vfs = requested_num_vfs;
-                sc.build_data();
+                sc.num_vfs = accepted_num_vfs;
+                func_mgr.sync_sriov_cfg_image(ctx.pf_index);
                 if (old_num_vfs != sc.num_vfs)
                     func_mgr.mark_routing_dirty($sformatf(
                         "BDF %04h SR-IOV NumVFs", target_bdf));
@@ -570,11 +574,12 @@ class pcie_tl_config_proxy extends uvm_component;
             bit old_vf_mse = sc.vf_mse;
             bit vf_en = merged_dw[0];
             bit vf_mse = merged_dw[4];
-            int n = int'(sc.num_vfs);
+            int n;
 
             sc.vf_mse = vf_mse;
             if (vf_en && !old_vf_en) begin
-                func_mgr.enable_vfs(ctx.pf_index, n);
+                func_mgr.enable_vfs(ctx.pf_index, int'(sc.num_vfs));
+                n = int'(sc.num_vfs);
                 `uvm_info("CFG_PROXY", $sformatf("SR-IOV VF Enable BDF=0x%04h num_vfs=%0d",
                     target_bdf, n), UVM_MEDIUM)
                 if (n > 0)
@@ -585,6 +590,7 @@ class pcie_tl_config_proxy extends uvm_component;
                 // enumeration (ARIHierarchy/MSE setup); firing VF_EVENT/VF_CONFIG
                 // on those spurious writes desyncs the ctrl_fd stream.
                 func_mgr.disable_vfs(ctx.pf_index);
+                n = int'(sc.num_vfs);
                 // An n=0 VFE edge is maintained internally but never emitted
                 // an enable event, so it must not emit an unmatched disable.
                 if (n > 0)
@@ -593,7 +599,7 @@ class pcie_tl_config_proxy extends uvm_component;
             if (old_vf_mse != vf_mse)
                 func_mgr.mark_routing_dirty($sformatf(
                     "BDF %04h SR-IOV VF MSE", target_bdf));
-            sc.build_data();
+            func_mgr.sync_sriov_cfg_image(ctx.pf_index);
         end
 
         // SR-IOV VF BAR descriptors have the same paired BAR semantics as

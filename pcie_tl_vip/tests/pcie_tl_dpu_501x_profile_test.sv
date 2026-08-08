@@ -472,33 +472,44 @@ class pcie_tl_dpu_501x_profile_test extends uvm_test;
         expect_dw("DPU proxy Status byte preserves Control", mgr.cfg_read(16'h0100, 12'h148),
                   32'h0000_0000);
 
-        // Update only the high NumVFs byte. The packed 0x02 must land in byte
-        // one, producing 0x0201 rather than replacing the low byte with 0x02.
+        // Update only the high NumVFs byte. Packed 0x02 lands in byte one, so
+        // the requested value is 0x0201; the DPU accepts and exposes its
+        // TotalVFs/max-context limit of 16 in both model and raw config state.
         void'(dpu_sriov_proxy.handle_cfg_write_bdf(16'h0100, dpu_sriov_dw_base + 4,
                                                    32'h0000_0002, 1, 1));
-        if (mgr.sriov_caps[0].num_vfs != 16'h0201)
+        if (mgr.sriov_caps[0].num_vfs != 16'h0010)
             `uvm_error("DPU_501X_CFG", $sformatf(
-                "DPU proxy partial NumVFs is %04h, expected 0201",
+                "DPU proxy partial NumVFs is %04h, expected accepted 0010",
                 mgr.sriov_caps[0].num_vfs))
         expect_dw("DPU proxy partial NumVFs raw config", mgr.cfg_read(16'h0100, 12'h150),
-                  32'h0000_0201);
+                  32'h0000_0010);
+        // Clearing only the high byte merges with the accepted low byte 0x10;
+        // the effective value and raw image therefore remain 16.
         void'(dpu_sriov_proxy.handle_cfg_write_bdf(16'h0100, dpu_sriov_dw_base + 4,
                                                    32'h0000_0000, 1, 1));
-        if (mgr.sriov_caps[0].num_vfs != 16'h0001)
-            `uvm_error("DPU_501X_CFG", "DPU proxy partial NumVFs restore failed")
+        if (mgr.sriov_caps[0].num_vfs != 16'h0010)
+            `uvm_error("DPU_501X_CFG",
+                       "DPU proxy accepted partial NumVFs was not stable")
+        expect_dw("DPU proxy stable accepted NumVFs raw config",
+                  mgr.cfg_read(16'h0100, 12'h150), 32'h0000_0010);
 
-        // A low-byte VFE write enables exactly once. A subsequent control-byte
-        // update that retains VFE changes only other control state and must
-        // preserve the active-function count and VF lifecycle. The standalone
-        // filelist has DPI disabled, so this observes model state rather than
-        // bridge event count.
+        // A low-byte VFE write enables the final accepted count exactly once.
+        // A subsequent control-byte update that retains VFE changes only other
+        // control state and must preserve the active-function count and VF
+        // lifecycle. The standalone filelist has DPI disabled, so this observes
+        // model state rather than bridge event count.
         void'(dpu_sriov_proxy.handle_cfg_write_bdf(16'h0100, dpu_sriov_dw_base + 2,
                                                    32'h0000_0001, 0, 1));
         active_count_before = mgr.get_active_count();
         if (!mgr.sriov_caps[0].vf_enable || !mgr.vf_ctx[0][0].enabled ||
-            active_count_before != 5)
+            mgr.sriov_caps[0].num_vfs != 16 || active_count_before != 20)
             `uvm_error("DPU_501X_CFG",
-                "DPU proxy low-byte VFE write did not enable exactly one VF")
+                "DPU proxy low-byte VFE write did not enable accepted 16 VFs")
+        for (int vf = 0; vf < 16; vf++)
+            if (!mgr.vf_ctx[0][vf].enabled ||
+                mgr.lookup_by_bdf(mgr.vf_ctx[0][vf].bdf) != mgr.vf_ctx[0][vf])
+                `uvm_error("DPU_501X_CFG", $sformatf(
+                    "DPU proxy accepted enable mapped VF%0d incorrectly", vf))
         void'(dpu_sriov_proxy.handle_cfg_write_bdf(16'h0100, dpu_sriov_dw_base + 2,
                                                    32'h0000_0009, 0, 1));
         if (!mgr.sriov_caps[0].vf_enable || !mgr.vf_ctx[0][0].enabled ||

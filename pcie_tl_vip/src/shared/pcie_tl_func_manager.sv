@@ -176,6 +176,7 @@ class pcie_tl_func_manager extends uvm_object;
     bit [4:0]  pf_base_dev    = 5'h00;
     bit        runtime_bdf_bound = 0;
     bit [15:0] runtime_pf_base_bdf = 16'h0000;
+    bit        topology_built = 0;
 
     // Consumers cache BAR routing derived from the configuration state and
     // rebuild only when this generation changes.
@@ -244,7 +245,11 @@ class pcie_tl_func_manager extends uvm_object;
         bit [15:0] d_id      = 16'h1234,
         bit [15:0] vf_dev_id = 16'h1235
     );
-        config_generation = 1;
+        longint unsigned next_generation;
+
+        next_generation = topology_built ? config_generation + 1 : 1;
+        runtime_bdf_bound   = 0;
+        runtime_pf_base_bdf = 16'h0000;
         bdf_lut.delete();
         num_pfs        = n_pfs;
         max_vfs_per_pf = max_vfs;
@@ -557,6 +562,8 @@ class pcie_tl_func_manager extends uvm_object;
                 // VFs start disabled — not yet added to bdf_lut
             end
         end
+        config_generation = next_generation;
+        topology_built = 1;
     endfunction
 
     //=========================================================================
@@ -611,13 +618,13 @@ class pcie_tl_func_manager extends uvm_object;
         if (runtime_bdf_bound)
             return runtime_pf_base_bdf == new_base;
 
-        // Remove all old keys before changing any context. Enabled VFs are
-        // uncommon during boot, but handling them keeps a rekey atomic.
+        // Remove every old candidate key before changing any context. Disabled
+        // VF keys should be absent, but purging them also heals stale or
+        // wrong-object entries without compromising an overlapping rekey.
         for (int pf = 0; pf < num_pfs; pf++) begin
             bdf_lut.delete(pf_ctx[pf].bdf);
             for (int vf = 0; vf < max_vfs_per_pf; vf++)
-                if (vf_ctx[pf][vf].enabled)
-                    bdf_lut.delete(vf_ctx[pf][vf].bdf);
+                bdf_lut.delete(vf_ctx[pf][vf].bdf);
         end
 
         pf_base_bus = new_base[15:8];
@@ -651,6 +658,53 @@ class pcie_tl_func_manager extends uvm_object;
         return 1;
     endfunction
 
+    function int accepted_vf_count(int pf_idx, int requested_num_vfs);
+        int limit;
+        int accepted;
+
+        limit = max_vfs_per_pf;
+        if (pf_idx >= 0 && pf_idx < sriov_caps.size() &&
+            sriov_caps[pf_idx] != null &&
+            int'(sriov_caps[pf_idx].total_vfs) < limit)
+            limit = int'(sriov_caps[pf_idx].total_vfs);
+        if (limit < 0)
+            limit = 0;
+        accepted = requested_num_vfs;
+        if (accepted < 0)
+            accepted = 0;
+        if (accepted > limit)
+            accepted = limit;
+        if (accepted != requested_num_vfs)
+            `uvm_warning("FUNC_MGR", $sformatf(
+                "VF count %0d exceeds supported range 0..%0d, clamping to %0d",
+                requested_num_vfs, limit, accepted))
+        return accepted;
+    endfunction
+
+    // Keep the mutable SR-IOV object and the already-registered PF config
+    // image coherent. Narrow writes preserve Status and Function Dependency
+    // Link, which share these DWORDs with Control and NumVFs respectively.
+    function void sync_sriov_cfg_image(int pf_idx);
+        bit [15:0] control;
+        pcie_tl_sriov_cap sc;
+
+        if (pf_idx < 0 || pf_idx >= num_pfs ||
+            pf_idx >= pf_ctx.size() || pf_idx >= sriov_caps.size() ||
+            pf_ctx[pf_idx] == null || sriov_caps[pf_idx] == null)
+            return;
+        sc = sriov_caps[pf_idx];
+        sc.build_data();
+        control = 16'h0000;
+        control[0] = sc.vf_enable;
+        control[1] = sc.vf_migration_enable;
+        control[3] = sc.ari_capable;
+        control[4] = sc.vf_mse;
+        pf_ctx[pf_idx].cfg_mgr.write(
+            sc.offset + 12'h008, {16'h0000, control}, 4'b0011);
+        pf_ctx[pf_idx].cfg_mgr.write(
+            sc.offset + 12'h010, {16'h0000, sc.num_vfs}, 4'b0011);
+    endfunction
+
     //=========================================================================
     // Enable a set of VFs for a given PF; add them to the BDF lookup table
     //=========================================================================
@@ -661,15 +715,7 @@ class pcie_tl_func_manager extends uvm_object;
             `uvm_error("FUNC_MGR", $sformatf("enable_vfs: pf_idx %0d out of range", pf_idx))
             return;
         end
-        if (num_vfs > max_vfs_per_pf) begin
-            `uvm_warning("FUNC_MGR", $sformatf(
-                "enable_vfs: num_vfs %0d exceeds max_vfs_per_pf %0d, clamping",
-                num_vfs, max_vfs_per_pf))
-            num_vfs = max_vfs_per_pf;
-        end
-
-        if (num_vfs < 0)
-            num_vfs = 0;
+        num_vfs = accepted_vf_count(pf_idx, num_vfs);
 
         routing_changed = !sriov_caps[pf_idx].vf_enable;
         sriov_caps[pf_idx].num_vfs   = num_vfs;
@@ -693,7 +739,7 @@ class pcie_tl_func_manager extends uvm_object;
             else
                 bdf_lut.delete(vf_ctx[pf_idx][vf].bdf);
         end
-        sriov_caps[pf_idx].build_data();
+        sync_sriov_cfg_image(pf_idx);
         if (routing_changed)
             mark_routing_dirty($sformatf("PF%0d VF enable/LUT", pf_idx));
     endfunction
@@ -719,7 +765,7 @@ class pcie_tl_func_manager extends uvm_object;
         end
 
         sriov_caps[pf_idx].vf_enable = 0;
-        sriov_caps[pf_idx].build_data();
+        sync_sriov_cfg_image(pf_idx);
         if (routing_changed)
             mark_routing_dirty($sformatf("PF%0d VF disable/LUT", pf_idx));
     endfunction
