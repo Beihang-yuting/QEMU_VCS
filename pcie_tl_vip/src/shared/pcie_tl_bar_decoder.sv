@@ -109,9 +109,10 @@ class pcie_tl_bar_decoder extends uvm_object;
                 return PCIE_BAR_DECODE_INVALID_CONFIG;
             end
             for (int bar = 0; bar < 6; bar++) begin
-                // Paired high DWORDs resolve to their low owner and must never
-                // be emitted as independent BAR IDs. Legacy owners remain valid.
-                if (ctx.bar_owner[bar] != bar || ctx.bar_size[bar] == 0)
+                // PF routing publishes only the 64-bit owner positions. Paired
+                // high DWORDs and odd self-owned legacy metadata are ignored.
+                if (!(bar inside {0, 2, 4}) ||
+                    ctx.bar_owner[bar] != bar || ctx.bar_size[bar] == 0)
                     continue;
                 aperture_log2 = log2_size(ctx.bar_size[bar]);
                 if (!size_is_valid(ctx.bar_size[bar]) ||

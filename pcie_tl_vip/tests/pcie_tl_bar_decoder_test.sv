@@ -161,6 +161,7 @@ class pcie_tl_bar_decoder_test extends uvm_test;
         pcie_tl_func_manager swap_valid_mgr;
         pcie_tl_func_manager rid_overflow_mgr;
         pcie_tl_func_manager pf_only_mgr;
+        pcie_tl_func_manager odd_pf_bar_mgr;
         pcie_tl_bar_decoder partial_overlap_decoder;
         pcie_tl_bar_decoder overlap_decoder;
         pcie_tl_bar_decoder invalid_decoder;
@@ -171,6 +172,7 @@ class pcie_tl_bar_decoder_test extends uvm_test;
         pcie_tl_bar_decoder failure_swap_decoder;
         pcie_tl_bar_decoder rid_overflow_decoder;
         pcie_tl_bar_decoder pf_only_decoder;
+        pcie_tl_bar_decoder odd_pf_bar_decoder;
         pcie_tl_bar_decoder null_decoder;
         pcie_tl_func_context spoof_vf_context;
         pcie_tl_bar_decode_entry saved_entry;
@@ -727,6 +729,56 @@ class pcie_tl_bar_decoder_test extends uvm_test;
             pf_only_mgr.pf_ctx[0].bdf, PCIE_BAR_DECODE_OK);
         expect_route("PF-only cache ignores unused VF RID metadata", route,
                      pf_only_mgr.pf_ctx[0].bdf, 0, 13, 0, 0, 0, -1);
+
+        // PF decode publishes only the 64-bit owner positions BAR0/2/4,
+        // even when legacy metadata makes an odd BAR self-owned and valid.
+        odd_pf_bar_mgr = pcie_tl_func_manager::type_id::create(
+            "odd_pf_bar_mgr");
+        odd_pf_bar_mgr.cfg_profile = PCIE_CFG_PROFILE_LEGACY;
+        odd_pf_bar_mgr.build_topology(0, 1, 16,
+                                      16'h1234, 16'h5678, 16'h9abc);
+        legacy_proxy.func_mgr = odd_pf_bar_mgr;
+        legacy_proxy.multi_function_mode = 1;
+        program_pf_bar(legacy_proxy, odd_pf_bar_mgr, 0, 0,
+                       64'h0000_0000_6000_0000);
+        odd_pf_bar_mgr.pf_ctx[0].bar_size[1] = 64'h1000;
+        odd_pf_bar_mgr.pf_ctx[0].bar_base[1] = 64'h0000_0000_7000_0000;
+        odd_pf_bar_mgr.pf_ctx[0].bar_size[2] = 64'h2000;
+        odd_pf_bar_mgr.pf_ctx[0].bar_base[2] = 64'h0000_0000_7100_0000;
+        odd_pf_bar_mgr.pf_ctx[0].bar_size[4] = 64'h4000;
+        odd_pf_bar_mgr.pf_ctx[0].bar_base[4] = 64'h0000_0000_7200_0000;
+        odd_pf_bar_mgr.mark_routing_dirty(
+            "test-only odd self-owned PF BAR metadata");
+        set_command(legacy_proxy, odd_pf_bar_mgr, 0, 1, 0);
+        odd_pf_bar_decoder = pcie_tl_bar_decoder::type_id::create(
+            "odd_pf_bar_decoder");
+        odd_pf_bar_decoder.func_mgr = odd_pf_bar_mgr;
+        route = expect_decode("legacy PF BAR0 owner", odd_pf_bar_decoder,
+            make_read(64'h0000_0000_6000_0000),
+            odd_pf_bar_mgr.pf_ctx[0].bdf, PCIE_BAR_DECODE_OK);
+        expect_route("legacy PF BAR0 owner", route,
+                     odd_pf_bar_mgr.pf_ctx[0].bdf,
+                     0, 4, 0, 0, 0, -1);
+        route = expect_decode("legacy PF BAR2 owner", odd_pf_bar_decoder,
+            make_read(64'h0000_0000_7100_0000),
+            odd_pf_bar_mgr.pf_ctx[0].bdf, PCIE_BAR_DECODE_OK);
+        expect_route("legacy PF BAR2 owner", route,
+                     odd_pf_bar_mgr.pf_ctx[0].bdf,
+                     2, 1, 0, 0, 0, -1);
+        route = expect_decode("legacy PF BAR4 owner", odd_pf_bar_decoder,
+            make_read(64'h0000_0000_7200_0000),
+            odd_pf_bar_mgr.pf_ctx[0].bdf, PCIE_BAR_DECODE_OK);
+        expect_route("legacy PF BAR4 owner", route,
+                     odd_pf_bar_mgr.pf_ctx[0].bdf,
+                     4, 2, 0, 0, 0, -1);
+        void'(expect_decode("legacy odd self-owned PF BAR ignored",
+            odd_pf_bar_decoder, make_read(64'h0000_0000_7000_0000),
+            odd_pf_bar_mgr.pf_ctx[0].bdf, PCIE_BAR_DECODE_NO_MATCH));
+        foreach (odd_pf_bar_decoder.entries[i])
+            if (odd_pf_bar_decoder.entries[i].bar_id inside {1, 3, 5})
+                `uvm_error("BAR_DECODE", $sformatf(
+                    "odd PF BAR%0d appeared in decoder cache",
+                    odd_pf_bar_decoder.entries[i].bar_id))
 
         // Legacy no-truncation unit regression: only PF8 is routable.
         legacy_mgr = pcie_tl_func_manager::type_id::create("legacy_mgr");
