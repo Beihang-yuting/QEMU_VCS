@@ -1209,21 +1209,22 @@ class cosim_xrc_driver extends pcie_tl_rc_driver;
                 pcie_tl_cq_route_t route;
                 pcie_bar_decode_result_e decode_result;
                 string decode_reason;
-                bit [15:0] target_bdf;
 
                 route = pcie_tl_cq_route_default();
 
                 // Decode address and live config before creating any staged
-                // tag-map entry. target_bdf is only the decoder's final
-                // cross-check; it never selects a function or fallback BAR.
+                // tag-map entry. The target-BDF hint is consumed only as the
+                // decoder's final cross-check; it never preselects a function
+                // or provides a fallback BAR.
                 if ((dpi_type == BV_TLP_MRD || dpi_type == BV_TLP_MWR) &&
                     config_bar_decode_enable) begin
-                    target_bdf = bridge_vcs_get_tlp_target_bdf_rc(rc_index);
                     if (!$cast(mem_tlp, vip_tlp))
                         `uvm_fatal(get_name(),
                             "build_mmio_tlp returned a non-memory TLP")
                     decode_result = bar_decoder.decode(
-                        mem_tlp, target_bdf, route, decode_reason);
+                        mem_tlp,
+                        bridge_vcs_get_tlp_target_bdf_rc(rc_index),
+                        route, decode_reason);
                     if (decode_result == PCIE_BAR_DECODE_OK) begin
                         vip_tlp.cq_route = route;
                     end else begin
@@ -1235,8 +1236,8 @@ class cosim_xrc_driver extends pcie_tl_rc_driver;
                         if (decode_error_count <= 8 ||
                             decode_error_count % 1024 == 0)
                             `uvm_error(get_name(), $sformatf(
-                                "RC%0d BAR decode rejected type=0x%02h addr=0x%016h target_bdf=0x%04h result=%0d count=%0d: %s",
-                                rc_index, dpi_type, dpi_addr, target_bdf,
+                                "RC%0d BAR decode rejected type=0x%02h addr=0x%016h result=%0d count=%0d: %s",
+                                rc_index, dpi_type, dpi_addr,
                                 int'(decode_result), decode_error_count,
                                 decode_reason))
                         if (decode_result == PCIE_BAR_DECODE_OVERLAP ||
@@ -1268,6 +1269,27 @@ class cosim_xrc_driver extends pcie_tl_rc_driver;
                     total_tlp_count++;
                     #1;
                     continue;
+                end
+
+                // LEGACY stand-in compatibility: without config-driven BAR
+                // decode, preserve the historical target-BDF VF doorbell.
+                // Enabled decode failures continue above and can never fall
+                // through to this lookup path.
+                if (!config_bar_decode_enable && !real_dut &&
+                    dpi_type == BV_TLP_MWR) begin
+                    bit [15:0] legacy_target_bdf;
+                    pcie_tl_func_context legacy_ctx;
+                    legacy_target_bdf =
+                        bridge_vcs_get_tlp_target_bdf_rc(rc_index);
+                    legacy_ctx = func_mgr.lookup_by_bdf(legacy_target_bdf);
+                    if (legacy_ctx != null && legacy_ctx.is_vf) begin
+                        ep_vf_mmio_write(
+                            rc_index, legacy_target_bdf,
+                            dpi_addr, dpi_data[0]);
+                        total_tlp_count++;
+                        #1;
+                        continue;
+                    end
                 end
 
                 begin : send_decoded_mmio
