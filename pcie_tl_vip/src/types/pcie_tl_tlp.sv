@@ -101,6 +101,9 @@ class pcie_tl_tlp extends uvm_sequence_item;
     cpl_status_e  rb_status;     // final completion status (SC on success)
     bit           rb_done;       // set when all bytes received (or error)
 
+    //--- CQ routing metadata (non-rand, runtime only) ---
+    pcie_tl_cq_route_t cq_route;
+
     //--- Default constraints: no error injection (only in LEGAL mode) ---
     constraint c_no_inject {
         (constraint_mode_sel == CONSTRAINT_LEGAL) -> inject_ecrc_err  == 0;
@@ -140,6 +143,7 @@ class pcie_tl_tlp extends uvm_sequence_item;
 
     function new(string name = "pcie_tl_tlp");
         super.new(name);
+        cq_route = pcie_tl_cq_route_default();
     endfunction
 
     function void post_randomize();
@@ -243,6 +247,7 @@ class pcie_tl_tlp extends uvm_sequence_item;
         // 拷贝 TLP Prefix 队列
         this.prefixes            = rhs_.prefixes;
         this.has_prefix          = rhs_.has_prefix;
+        this.cq_route            = rhs_.cq_route;
     endfunction : do_copy
 
     virtual function bit do_compare(uvm_object rhs, uvm_comparer comparer);
@@ -274,6 +279,13 @@ class pcie_tl_tlp extends uvm_sequence_item;
         printer.print_field("tag",           tag, 10, UVM_HEX);
         printer.print_field("attr",          attr, 3, UVM_BIN);
         printer.print_field("payload_size",  payload.size(), 32, UVM_DEC);
+        if (cq_route.valid) begin
+            printer.print_field("cq_target_bdf",   cq_route.target_bdf, 16, UVM_HEX);
+            printer.print_field("cq_target_func",  cq_route.target_func, 8, UVM_HEX);
+            printer.print_field("cq_bar_id",       cq_route.bar_id, 3, UVM_DEC);
+            printer.print_field("cq_bar_aperture", cq_route.bar_aperture, 6, UVM_DEC);
+            printer.print_field("cq_bar_offset",   cq_route.bar_offset, 64, UVM_HEX);
+        end
     endfunction
 endclass
 

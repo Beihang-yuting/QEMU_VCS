@@ -119,6 +119,36 @@ typedef enum bit [2:0] {
     CPL_STATUS_CA  = 3'b100
 } cpl_status_e;
 
+typedef enum int {
+    PCIE_BAR_DECODE_OK,
+    PCIE_BAR_DECODE_DISABLED,
+    PCIE_BAR_DECODE_NO_MATCH,
+    PCIE_BAR_DECODE_CROSS_BOUNDARY,
+    PCIE_BAR_DECODE_BDF_MISMATCH,
+    PCIE_BAR_DECODE_OVERLAP,
+    PCIE_BAR_DECODE_MALFORMED,
+    PCIE_BAR_DECODE_INVALID_CONFIG
+} pcie_bar_decode_result_e;
+
+typedef struct packed {
+    bit        valid;
+    bit [15:0] target_bdf;
+    bit [7:0]  target_func;
+    bit [2:0]  bar_id;
+    bit [5:0]  bar_aperture;
+    bit [63:0] bar_offset;
+    bit        is_vf;
+    int        pf_index;
+    int        vf_index;
+} pcie_tl_cq_route_t;
+
+function automatic pcie_tl_cq_route_t pcie_tl_cq_route_default();
+    pcie_tl_cq_route_t route;
+    route = '{default:0};
+    route.vf_index = -1;
+    return route;
+endfunction
+
 // Message code
 typedef enum bit [7:0] {
     MSG_ASSERT_INTA     = 8'h20,

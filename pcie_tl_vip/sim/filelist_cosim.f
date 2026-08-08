@@ -65,6 +65,7 @@ vcs-tb/cosim_xrc_pkg.sv
 pcie_tl_vip/tests/pcie_tl_base_test.sv
 pcie_tl_vip/tests/pcie_tl_cosim_test.sv
 pcie_tl_vip/tests/pcie_tl_dpu_501x_profile_test.sv
+pcie_tl_vip/tests/pcie_tl_route_metadata_test.sv
 
 // ---- testbench top ----
 pcie_tl_vip/tests/pcie_tl_tb_top.sv
