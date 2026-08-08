@@ -32,6 +32,9 @@ BAR assignment and decides which PF or VF BAR owns the address.
 
 - Generate correct Xilinx CQ `bar_id`, `bar_aperture`, and `target_func` for
   host-to-DUT MRd/MWr requests.
+- Keep PCIe request identity semantics explicit on every QEMU-originated
+  host-to-device request: `requester_id=16'h0000` for the RC and
+  `target_bdf` equal to the PF/VF that the guest actually enumerated.
 - Use current VIP configuration-space state, including firmware BAR
   assignments, Command.MSE, SR-IOV state, and runtime BDF binding.
 - Support the current DPU profile with one to four PFs and up to sixteen VFs
@@ -59,6 +62,8 @@ The routing path is:
 
 ```text
 QEMU MRd/MWr
+  -> sample the owning QEMU PCIDevice's current BDF at access time
+  -> requester_id=0000, target_bdf=sampled PF/VF BDF
   -> cosim_xrc_driver
   -> pcie_tl_bar_decoder
        reads a generation-keyed snapshot from pcie_tl_func_manager
@@ -88,6 +93,36 @@ The chosen design avoids two rejected alternatives:
    configuration model and become stale after firmware reprograms a BAR or
    enables VFs.
 
+### 4.1 Requester ID, target BDF, and runtime BDF ownership
+
+`requester_id` and `target_bdf` describe different PCIe roles and must never
+be copied from one another. For every request initiated by QEMU on behalf of
+the host (CfgRd, CfgWr, MRd, MWr, and ATS invalidation), the requester is the
+RC and is encoded as `16'h0000`. The target is the selected PF or VF. In the
+opposite direction, a DUT-initiated DMA/ATS/MSI request keeps the originating
+PF/VF BDF in `requester_id`; that device-requester path is not rewritten.
+
+The current launch command already fixes a q35 Root Port and places PF0 at
+raw devfn zero behind it. The QEMU configuration callbacks calculate the full
+16-bit BDF from `pci_bus_num()` and the device's complete eight-bit `devfn` on
+each access. The first PF0 Vendor-ID read carries that observed BDF to the VIP,
+where `bind_runtime_pf_base()` atomically rekeys the prebuilt PF/VF model before
+lookup. Thus `01:00.x` remains the common result, but it is no longer assumed
+by the configuration model.
+
+PF BAR callbacks must use the same access-time calculation. A BDF cached while
+the QEMU device is realized is invalid because firmware has not necessarily
+programmed the Root Port secondary bus number yet. VF aperture callbacks use
+the runtime-bound `first_vf_bdf` supplied by the VIP and the VF stride; the VF
+config stubs are created at those same BDFs. A focused source contract and a
+QEMU-independent C unit test enforce the host-request fields and dynamic PF
+BDF sampling.
+
+The address decoder remains authoritative. `target_bdf` is only an independent
+hint and consistency check after the address, live BAR state, and enable bits
+have selected a function. A mismatch returns UR or drops the posted write; it
+never changes the decoded function to satisfy the hint.
+
 ## 5. Route metadata
 
 A common route record is added to the VIP types and carried as non-random
@@ -113,6 +148,13 @@ The adapter uses route metadata only on `XILINX_CH_CQ`. Other channels retain
 their current encoding. In config-driven mode, a CQ request without valid
 route metadata is an error and is not encoded with zero-valued defaults.
 
+`target_func` retains all eight low BDF bits. It is not formed from
+`pf_index[2:0]`; in an ARI layout PF8 therefore has target function `8'h08` and
+cannot alias PF0. The current real-DUT acceptance matrix remains one to four
+PFs with sixteen VFs per PF on one bus, but the shared BDF arithmetic retains
+the existing no-alias regression through PF15. Cross-bus support remains out
+of scope.
+
 ## 6. Configuration state and invalidation
 
 `pcie_tl_func_manager` owns a monotonically increasing
@@ -135,6 +177,11 @@ function manager. A Command write updates both fields, but advances the route
 generation only when MSE changes because BME does not gate inbound BAR
 requests. The existing `bar_enable[]`, `bus_master_en`, `vf_enable`, and
 `vf_mse` state becomes maintained state rather than unused declarations.
+
+Runtime BDF binding is also a routing-state change. A successful rebind
+advances `config_generation` exactly once after all PF/VF contexts and LUT keys
+have been updated, so the next memory request cannot use a cache built for the
+bootstrap BDFs.
 
 The decoder records the generation used to build its cache. Before each
 memory request, it rebuilds only when the manager generation has changed. A
@@ -196,6 +243,12 @@ The address selects the route. QEMU `target_bdf` is checked only after the
 independent address decode; it never chooses the BAR or function. A mismatch
 means QEMU and the VIP configuration model disagree and the request is not
 sent to the DUT.
+
+The VCS ingress path additionally requires QEMU-originated memory traffic to
+carry `requester_id=16'h0000`, copies that value explicitly into the VIP TLP,
+and rejects an inconsistent requester before tag-map allocation. This check is
+directional: it does not apply to DUT-originated DMA, whose requester is a
+PF/VF BDF.
 
 Decode runs before the RC driver creates a QEMU-to-VIP tag-map entry. A failed
 MRd is completed directly with the original QEMU tag; therefore it cannot
@@ -284,6 +337,8 @@ Compatibility rules are:
 - Config-driven mode never falls back to PF0/BAR0 after a decode failure.
 - `+BYPASS_CONFIG=1` continues to answer CfgRd/CfgWr entirely in the VIP. Its
   writes update the same state consumed by the BAR decoder.
+- Configuration bypass does not alter PCIe header roles: QEMU CfgRd/CfgWr use
+  requester `0000` and the runtime PF/VF BDF as the target.
 - `TAG_BIT`, DMA, ATS, MSI-X, MPS/RCB, and first/last-BE behavior are not
   reinterpreted by the decoder.
 
@@ -295,6 +350,10 @@ Focused tests exercise:
 
 - PF0 BAR0/BAR2/BAR4 routing and exact DPU aperture encodings;
 - PF1 through PF3 function separation;
+- QEMU host-request field separation for PF and VF targets, access-time PF BDF
+  sampling, and rejection of a nonzero host requester;
+- PF8 maps to full devfn/ARI function `8'h08` and never aliases PF0, while the
+  real-DUT topology exercised here remains limited to PF0-PF3;
 - first and last valid bytes of every BAR;
 - an access ending exactly at the range end;
 - an access crossing the end by one enabled byte;
@@ -321,9 +380,12 @@ matrix is:
    `bar_id=2`, `bar_aperture=4`, `target_func=0`, and `bar_offset=0x2c`.
 6. Repeat the mailbox access through PF1, PF2, and PF3 and prove no request is
    mislabeled as PF0.
-7. Exercise runtime BAR reassignment and MSE/VF state changes without
+7. Trace a PF and a VF request across QEMU, the bridge, the decoder, and CQ;
+   require requester `0000`, matching runtime target BDF, and independently
+   decoded function/BAR metadata at every boundary.
+8. Exercise runtime BAR reassignment and MSE/VF state changes without
    restarting simulation.
-8. Re-run 8-bit and 10-bit tag tests, QEMU-to-VCS and VCS-to-QEMU random DMA,
+9. Re-run 8-bit and 10-bit tag tests, QEMU-to-VCS and VCS-to-QEMU random DMA,
    odd lengths, the complete first/last-BE matrix, long packets at MPS
    boundaries, and RCB split coverage.
 
@@ -350,6 +412,9 @@ decoder are included. The design limits changes to these responsibilities:
   from validated metadata.
 - `bridge/vcs/bridge_vcs.sv`, `bridge/vcs/bridge_vcs.c`, and bridge headers:
   status-aware scalar Completion with compatibility wrapper.
-- `qemu-plugin/cosim_pcie_rc.c`: honor non-success Completion status.
+- `qemu-plugin/cosim_pcie_request.h`: pure host-request BDF/field helpers used
+  by all QEMU-originated request constructors.
+- `qemu-plugin/cosim_pcie_rc.c`: sample live PF BDFs, route host requests with
+  distinct requester/target fields, and honor non-success Completion status.
 - Focused VIP tests and existing VCS regression scripts: assertions and
   integration coverage described above.

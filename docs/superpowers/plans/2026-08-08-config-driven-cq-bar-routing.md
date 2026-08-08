@@ -2,7 +2,10 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (- [ ]) syntax for tracking.
 
-**Goal:** Decode every QEMU host-memory request against the live VIP configuration model and deliver correct PF/VF, BAR ID, BAR aperture, and target-function sideband to the real DUT.
+**Goal:** Preserve RC requester versus runtime PF/VF target identity, decode
+every QEMU host-memory request against the live VIP configuration model, and
+deliver correct PF/VF, BAR ID, BAR aperture, and target-function sideband to
+the real DUT.
 
 **Architecture:** Each cosim_xrc_driver owns a pcie_tl_bar_decoder backed by its own pcie_tl_func_manager. Configuration writes advance a per-RC generation; the decoder rebuilds a compact PF/VF range cache on generation changes, attaches validated CQ routing metadata to the TLP, and the Xilinx adapter encodes that metadata. Decode failures are stopped before VIP tag allocation, with UR propagated through the bridge for reads and posted writes dropped with rate-limited diagnostics.
 
@@ -19,6 +22,12 @@ New files:
 - pcie_tl_vip/tests/pcie_tl_bar_state_test.sv: configuration generation and MSE/VF-state regression.
 - pcie_tl_vip/tests/pcie_tl_bar_decoder_test.sv: PF/VF, boundary, overlap, and BDF decode matrix.
 - tests/integration/test_bridge_completion_status.c: SC/UR Completion transport round trip.
+- qemu-plugin/cosim_pcie_request.h: pure full-BDF construction and
+  QEMU-host-request field initialization.
+- tests/unit/test_cosim_pcie_request.c: requester/target separation and PF8
+  no-alias unit regression.
+- tests/integration/test_qemu_request_routing_source.sh: dynamic PF BDF and
+  directional requester-ID source contract.
 - tests/integration/test_cq_bar_routing_source.sh: integration ordering and compatibility contract.
 
 Modified files:
@@ -34,9 +43,12 @@ Modified files:
 - third_party/xilinx_pcie/sim/filelist_adapter_local.f: include codec test.
 - bridge/common/cosim_types.h: named PCIe Completion status values and helpers.
 - bridge/vcs/bridge_vcs.c and bridge/vcs/bridge_vcs.sv: status-aware scalar Completion API.
-- qemu-plugin/cosim_pcie_rc.c and cosim_pcie_rc.h: reject non-SC reads and rate-limit logs.
+- qemu-plugin/cosim_pcie_rc.c and cosim_pcie_rc.h: sample the current PF BDF,
+  keep host requester and target identities separate, reject non-SC reads, and
+  rate-limit logs.
 - vcs-tb/cosim_xrc_driver.sv: decode-before-tag-map integration and error policy.
-- tests/integration/CMakeLists.txt: register new bridge/source tests.
+- tests/unit/CMakeLists.txt and tests/integration/CMakeLists.txt: register new
+  request-routing, bridge, and source tests.
 
 ## Remote VCS convention
 
@@ -256,6 +268,12 @@ void'(proxy.handle_cfg_write_bdf(pf_bdf, sriov_dw + 2, 32'h0000_0011, 0, 2));
 if (!mgr.sriov_caps[0].vf_enable || !mgr.sriov_caps[0].vf_mse ||
     mgr.sriov_caps[0].num_vfs != 16 || mgr.config_generation <= g0)
     `uvm_error("BAR_STATE", "SR-IOV state was not mirrored")
+
+g0 = mgr.config_generation;
+if (!mgr.bind_runtime_pf_base(16'h0200) ||
+    mgr.pf_ctx[0].bdf != 16'h0200 ||
+    mgr.config_generation != g0 + 1)
+    `uvm_error("BAR_STATE", "runtime BDF bind did not invalidate routing once")
 ~~~
 
 Add the test to both filelists.
@@ -302,7 +320,8 @@ endfunction
 ~~~
 
 Reset generation to one at build start. Mark exactly once after an effective
-runtime BDF bind, VF enable/disable transition, or BAR-base change.
+runtime BDF bind (after the PF/VF LUT rekey completes), VF enable/disable
+transition, or BAR-base change.
 
 - [ ] **Step 4: Update the configuration proxy**
 
@@ -386,7 +405,11 @@ if (result != PCIE_BAR_DECODE_OK ||
 The same test asserts PF1-PF3 target functions 1-3; PF apertures 13/4/4; first
 and last valid bytes; one-byte boundary crossing; MSE disabled; wrong target
 BDF; overlapping enabled BARs; every VF0-VF15 on all four PFs for VF apertures
-2/2/3; cross-VF requests; and two independent decoder caches.
+2/2/3; cross-VF requests; and two independent decoder caches. In a separate
+synthetic manager instance, build nine PF contexts, enable and assign only PF8
+BAR0 through the configuration proxy, and require PF8 BDF/base+8,
+`target_func=8'h08`, and a result distinct from PF0. This is a no-truncation
+unit regression, not an expansion of the one-to-four-PF real-DUT matrix.
 
 - [ ] **Step 2: Run red**
 
@@ -700,7 +723,7 @@ must also exercise length=1 and length>1 BE range calculations.
 Recompile and run pcie_tl_bar_decoder_test on 53.
 
 Expected: mailbox PASS, 192 VF BAR routes plus PF/boundary/error cases pass,
-and zero UVM errors/fatals.
+PF8 target-function no-alias passes, and zero UVM errors/fatals.
 
 - [ ] **Step 5: Commit**
 
@@ -780,18 +803,174 @@ git add third_party/xilinx_pcie/src/adapter/xilinx_pcie_if_adapter.sv \
 git commit -m "fix(xilinx): encode decoded BAR route on CQ"
 ~~~
 
-### Task 5: Carry UR Completion status through VCS and QEMU
+### Task 5: Fix QEMU host-request identity and carry UR status
 
 **Files:**
+- Create: qemu-plugin/cosim_pcie_request.h
 - Modify: bridge/common/cosim_types.h
 - Modify: bridge/vcs/bridge_vcs.c
 - Modify: bridge/vcs/bridge_vcs.sv
 - Modify: qemu-plugin/cosim_pcie_rc.c
 - Modify: qemu-plugin/cosim_pcie_rc.h
+- Create: tests/unit/test_cosim_pcie_request.c
+- Modify: tests/unit/CMakeLists.txt
+- Create: tests/integration/test_qemu_request_routing_source.sh
 - Create: tests/integration/test_bridge_completion_status.c
 - Modify: tests/integration/CMakeLists.txt
 
-- [ ] **Step 1: Write the failing bridge round-trip test**
+- [ ] **Step 1: Write failing request-identity tests**
+
+Create tests/unit/test_cosim_pcie_request.c:
+
+~~~c
+#include <assert.h>
+#include <stdint.h>
+#include <string.h>
+#include "cosim_pcie_request.h"
+
+int main(void)
+{
+    tlp_entry_t req;
+    memset(&req, 0xff, sizeof(req));
+
+    assert(cosim_pcie_bdf(1, 0) == 0x0100);
+    assert(cosim_pcie_bdf(1, 8) == 0x0108);
+    assert(cosim_pcie_bdf(1, 8) != cosim_pcie_bdf(1, 0));
+
+    cosim_route_host_to_device(&req, cosim_pcie_bdf(1, 8));
+    assert(req.requester_id == 0x0000);
+    assert(req.target_bdf == 0x0108);
+    return 0;
+}
+~~~
+
+Register the executable in tests/unit/CMakeLists.txt with include directories
+qemu-plugin and bridge/common.
+
+Create tests/integration/test_qemu_request_routing_source.sh:
+
+~~~bash
+#!/usr/bin/env bash
+set -euo pipefail
+repo=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
+python3 - "$repo/qemu-plugin/cosim_pcie_rc.c" <<'PY'
+import re
+import sys
+from pathlib import Path
+
+source = Path(sys.argv[1]).read_text(encoding="utf-8")
+
+def fail(message):
+    print(f"[qemu-request-routing] FAIL: {message}", file=sys.stderr)
+    raise SystemExit(1)
+
+def function_body(name):
+    match = re.search(rf"\b{re.escape(name)}\s*\([^;]*?\)\s*\{{", source,
+                      re.S)
+    if not match:
+        fail(f"function not found: {name}")
+    start = match.end() - 1
+    depth = 0
+    for index in range(start, len(source)):
+        if source[index] == "{":
+            depth += 1
+        elif source[index] == "}":
+            depth -= 1
+            if depth == 0:
+                return source[start:index + 1]
+    fail(f"unterminated function: {name}")
+
+for name in ("cosim_mmio_do_read", "cosim_mmio_do_write",
+             "cosim_config_read", "cosim_config_write",
+             "cosim_cfgrd", "cosim_cfgwr",
+             "cosim_rc_vf_config_read", "cosim_rc_vf_config_write",
+             "cosim_vf_invalidate_atc"):
+    if "cosim_route_host_to_device" not in function_body(name):
+        fail(f"{name} does not use the host-request routing helper")
+
+live_bdf = re.compile(
+    r"cosim_current_bdf\s*\(\s*PCI_DEVICE\s*\(\s*bc->dev\s*\)\s*\)")
+for name in ("cosim_mmio_read", "cosim_mmio_write"):
+    if not live_bdf.search(function_body(name)):
+        fail(f"{name} does not sample the PF BDF at access time")
+
+for pattern in (r"requester_id\s*=\s*[^;]*target_bdf",
+                r"requester_id\s*=\s*[^;]*vf_bdf",
+                r"requester_id\s*=\s*[^;]*pf_bdf"):
+    if re.search(pattern, source):
+        fail(f"direct requester/target alias remains: {pattern}")
+
+if "req->requester_id" not in function_body("cosim_dma_cb"):
+    fail("device-to-host DMA no longer consumes the PF/VF requester ID")
+
+print("[qemu-request-routing] PASS")
+PY
+~~~
+
+Register the shell test in tests/integration/CMakeLists.txt.
+
+- [ ] **Step 2: Run request-identity red**
+
+~~~bash
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug
+cmake --build build -j"$(nproc)"
+ctest --test-dir build \
+  -R "test_cosim_pcie_request|test_qemu_request_routing_source" \
+  --output-on-failure
+~~~
+
+Expected: the C test cannot include cosim_pcie_request.h and the source
+contract reports the current requester/target copies and realize-time PF BDF.
+
+- [ ] **Step 3: Add the host-request helper and use the live PF BDF**
+
+Create qemu-plugin/cosim_pcie_request.h:
+
+~~~c
+#ifndef COSIM_PCIE_REQUEST_H
+#define COSIM_PCIE_REQUEST_H
+
+#include <stdint.h>
+#include "cosim_types.h"
+
+static inline uint16_t cosim_pcie_bdf(uint8_t bus, uint8_t devfn)
+{
+    return (uint16_t)(((uint16_t)bus << 8) | devfn);
+}
+
+static inline void cosim_route_host_to_device(tlp_entry_t *req,
+                                               uint16_t target_bdf)
+{
+    req->requester_id = 0x0000;
+    req->target_bdf = target_bdf;
+}
+
+#endif
+~~~
+
+In cosim_pcie_rc.c add:
+
+~~~c
+static uint16_t cosim_current_bdf(PCIDevice *dev)
+{
+    return cosim_pcie_bdf((uint8_t)pci_bus_num(pci_get_bus(dev)), dev->devfn);
+}
+~~~
+
+Use cosim_route_host_to_device for QEMU-originated CfgRd/CfgWr, MRd/MWr, VF
+config, legacy discovery, and ATS invalidation. PF MMIO callbacks calculate
+their target with cosim_current_bdf(PCI_DEVICE(bc->dev)) on every access; they
+must not use the target cached by cosim_register_pf_bars during realize. VF
+aperture callbacks retain the runtime-bound first_vf_bdf plus stride. Do not
+change any dma_req_t/MSI device-requester handling.
+
+- [ ] **Step 4: Run request-identity green**
+
+Run the two Step 2 tests and tests/sv/run_test_runtime_bdf_utils.sh. Require
+PF8=0x0108, requester=0, dynamic target checks, and the existing 16-PF
+no-alias matrix to pass.
+
+- [ ] **Step 5: Write the failing bridge round-trip test**
 
 Create the complete test:
 
@@ -876,7 +1055,7 @@ add_test(NAME test_bridge_completion_status
 set_tests_properties(test_bridge_completion_status PROPERTIES TIMEOUT 10)
 ~~~
 
-- [ ] **Step 2: Run red**
+- [ ] **Step 6: Run Completion-status red**
 
 ~~~bash
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug
@@ -886,7 +1065,7 @@ ctest --test-dir build -R test_bridge_completion_status --output-on-failure
 
 Expected: compile/link fails because the status constants/helper/API are absent.
 
-- [ ] **Step 3: Define statuses without changing the wire ABI**
+- [ ] **Step 7: Define statuses without changing the wire ABI**
 
 Insert before cpl_entry_t:
 
@@ -914,7 +1093,7 @@ static inline int cosim_cpl_status_is_success(uint8_t status)
 
 cpl_entry_t and its 84-byte static assertion remain unchanged.
 
-- [ ] **Step 4: Add status-aware scalar bridge APIs**
+- [ ] **Step 8: Add status-aware scalar bridge APIs**
 
 Change the internal Completion builder to accept status and preserve the
 existing TCP/SHM send body:
@@ -986,7 +1165,7 @@ int bridge_vcs_send_cpl_scalar_status(int tag, int len, int status)
 The existing scalar APIs call these with COSIM_CPL_STATUS_SC. Import both new
 functions in bridge_vcs.sv with argument order rc, tag, len, status.
 
-- [ ] **Step 5: Make QEMU honor non-SC status**
+- [ ] **Step 9: Make QEMU honor non-SC status**
 
 Add uint64_t mmio_cpl_error_count to CosimPCIeRC. After a successful bridge
 wait and before payload copy:
@@ -1006,26 +1185,31 @@ if (!cosim_cpl_status_is_success(cpl.status)) {
 }
 ~~~
 
-- [ ] **Step 6: Run green and C regressions**
+- [ ] **Step 10: Run green and C regressions**
 
 ~~~bash
 cmake --build build -j"$(nproc)"
-ctest --test-dir build -R test_bridge_completion_status --output-on-failure
+ctest --test-dir build \
+  -R "test_cosim_pcie_request|test_qemu_request_routing_source|test_bridge_completion_status|test_runtime_bdf_utils" \
+  --output-on-failure
 make test-unit
 make test-integration
 ~~~
 
-Expected: the new UR round trip and all existing bridge tests pass.
+Expected: host request identity, dynamic BDF sampling, PF8 no-alias, the new
+UR round trip, and all existing bridge tests pass.
 
-- [ ] **Step 7: Commit**
+- [ ] **Step 11: Commit**
 
 ~~~bash
 git add bridge/common/cosim_types.h bridge/vcs/bridge_vcs.c \
         bridge/vcs/bridge_vcs.sv qemu-plugin/cosim_pcie_rc.c \
-        qemu-plugin/cosim_pcie_rc.h \
+        qemu-plugin/cosim_pcie_rc.h qemu-plugin/cosim_pcie_request.h \
+        tests/unit/test_cosim_pcie_request.c tests/unit/CMakeLists.txt \
+        tests/integration/test_qemu_request_routing_source.sh \
         tests/integration/test_bridge_completion_status.c \
         tests/integration/CMakeLists.txt
-git commit -m "feat(cosim): propagate PCIe Completion status"
+git commit -m "fix(cosim): preserve host request routing identity"
 ~~~
 
 ### Task 6: Integrate decode before QEMU/VIP tag mapping
@@ -1064,6 +1248,10 @@ if decode_pos >= map_pos:
     fail("BAR decode must run before QEMU/VIP tag-map allocation")
 if "bridge_vcs_send_cpl_scalar_status_rc(" not in source:
     fail("MRd decode failures do not return status-aware Completion")
+if "bridge_vcs_get_tlp_requester_id_rc(" not in source:
+    fail("VCS ingress does not validate the QEMU requester ID")
+if "m.requester_id = requester_id;" not in source:
+    fail("MMIO TLP does not explicitly preserve the validated RC requester")
 if "PCIE_BAR_DECODE_OVERLAP" not in source or "uvm_fatal" not in source:
     fail("overlap is not fatal")
 if ".bar_id(3'h0), .bar_aperture(6'h0), .target_func(8'h0)" in adapter:
@@ -1097,6 +1285,8 @@ Add:
 pcie_tl_bar_decoder bar_decoder;
 bit config_bar_decode_enable;
 longint unsigned bar_decode_error_count[int];
+longint unsigned host_requester_error_count;
+int dpi_requester_id;
 ~~~
 
 After build_topology:
@@ -1109,7 +1299,48 @@ config_bar_decode_enable =
     cfg_profile != pcie_tl_device_profile_pkg::PCIE_CFG_PROFILE_LEGACY;
 ~~~
 
-- [ ] **Step 4: Decode pass-through MRd/MWr**
+- [ ] **Step 4: Validate the directional requester role**
+
+Immediately after the existing DPI field getters and before ATS/config bypass,
+add:
+
+~~~systemverilog
+dpi_requester_id = bridge_vcs_get_tlp_requester_id_rc(rc_index);
+if ((dpi_type inside {BV_TLP_CFGRD0, BV_TLP_CFGWR0,
+                      BV_TLP_MRD, BV_TLP_MWR, BV_TLP_ATS_INVAL}) &&
+    dpi_requester_id != 0) begin
+    host_requester_error_count++;
+    `uvm_error(get_name(), $sformatf(
+        "RC%0d QEMU host request has requester=0x%04h type=0x%02h",
+        rc_index, dpi_requester_id[15:0], dpi_type))
+    if (dpi_type inside {BV_TLP_CFGRD0, BV_TLP_MRD, BV_TLP_ATS_INVAL})
+        void'(bridge_vcs_send_cpl_scalar_status_rc(
+            rc_index, dpi_tag, 0, int'(CPL_STATUS_UR)));
+    total_tlp_count++;
+    #1;
+    continue;
+end
+~~~
+
+This check is deliberately absent from rx_loop and every DMA callback, where
+a PF/VF requester ID is correct.
+
+Extend build_mmio_tlp with a `bit [15:0] requester_id` argument and assign it
+explicitly in both MRd and MWr construction:
+
+~~~systemverilog
+m.requester_id = requester_id;
+~~~
+
+Change the call and signature together:
+
+~~~systemverilog
+vip_tlp = build_mmio_tlp(
+    dpi_type, dpi_addr, dpi_data, dpi_len, dpi_tag,
+    dpi_requester_id[15:0], dpi_first_be[3:0], dpi_last_be[3:0]);
+~~~
+
+- [ ] **Step 5: Decode pass-through MRd/MWr**
 
 Immediately after build_mmio_tlp succeeds and before request_inst_id creation:
 
@@ -1151,7 +1382,7 @@ end
 MWr failure is posted and receives no Completion. Add report_phase output for
 each counter.
 
-- [ ] **Step 5: Preserve DUT Completion status**
+- [ ] **Step 6: Preserve DUT Completion status**
 
 In forward_completion_to_qemu():
 
@@ -1165,11 +1396,11 @@ if (bridge_vcs_send_cpl_scalar_status_rc(
 
 Config-bypass and ATS synthesized successes keep the old SC wrapper.
 
-- [ ] **Step 6: Run contracts and VCS compile**
+- [ ] **Step 7: Run contracts and VCS compile**
 
 ~~~bash
 ctest --test-dir build \
-  -R "test_cq_bar_routing_source|test_cosim_tag_map_order|test_cosim_completion_ownership" \
+  -R "test_qemu_request_routing_source|test_cq_bar_routing_source|test_cosim_tag_map_order|test_cosim_completion_ownership" \
   --output-on-failure
 ~~~
 
@@ -1182,7 +1413,7 @@ ssh ubuntu@10.11.10.53 \
 
 Expected: no undefined DPI symbol and no VCS compile errors.
 
-- [ ] **Step 7: Commit**
+- [ ] **Step 8: Commit**
 
 ~~~bash
 git add vcs-tb/cosim_xrc_driver.sv \
@@ -1317,14 +1548,17 @@ Expected: PF IDs 5011-5014 and 64 VFs with ID 8689.
 Use the driver or pci-debug to write one to PF0 BAR2+0x2c and poll it. Require:
 
 ~~~text
+requester_id=0x0000
+target_bdf=0x0100
 bar_id=2
 bar_aperture=4
 target_func=0
 bar_offset=0x2c
 ~~~
 
-Repeat on PF1-PF3; target_func must be 1-3. No no-qemu-tag warning or overlap
-fatal is allowed.
+Repeat on PF1-PF3; target_bdf/target_func must be 0x0101/1 through 0x0103/3,
+while requester_id remains zero. The target must match the guest `lspci` BDF
+observed in the same run. No no-qemu-tag warning or overlap fatal is allowed.
 
 - [ ] **Step 5: Re-run data-plane coverage**
 
