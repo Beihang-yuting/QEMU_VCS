@@ -31,7 +31,7 @@ class pcie_tl_route_metadata_test extends uvm_test;
 
         if (!$cast(dst, src.clone()))
             `uvm_fatal("CQ_ROUTE", "clone did not preserve pcie_tl_mem_tlp type")
-        if (dst.cq_route != src.cq_route)
+        if (dst.cq_route !== src.cq_route)
             `uvm_error("CQ_ROUTE", "clone lost CQ route metadata")
         phase.drop_objection(this);
     endtask
