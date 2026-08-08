@@ -676,13 +676,16 @@ class pcie_tl_func_manager extends uvm_object;
         sriov_caps[pf_idx].vf_enable = 1;
         for (int vf = 0; vf < max_vfs_per_pf; vf++) begin
             bit should_enable;
+            bit lut_exists;
             bit lut_matches;
 
             should_enable = vf < num_vfs;
-            lut_matches = bdf_lut.exists(vf_ctx[pf_idx][vf].bdf) &&
+            lut_exists = bdf_lut.exists(vf_ctx[pf_idx][vf].bdf);
+            lut_matches = lut_exists &&
                 bdf_lut[vf_ctx[pf_idx][vf].bdf] == vf_ctx[pf_idx][vf];
             if (vf_ctx[pf_idx][vf].enabled != should_enable ||
-                lut_matches != should_enable)
+                (should_enable && !lut_matches) ||
+                (!should_enable && lut_exists))
                 routing_changed = 1;
             vf_ctx[pf_idx][vf].enabled = should_enable;
             if (should_enable)

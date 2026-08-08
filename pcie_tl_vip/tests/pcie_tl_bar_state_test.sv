@@ -3,11 +3,35 @@ import pcie_tl_pkg::*;
 import pcie_tl_device_profile_pkg::*;
 `include "uvm_macros.svh"
 
+class pcie_tl_bar_state_proxy extends pcie_tl_config_proxy;
+    `uvm_component_utils(pcie_tl_bar_state_proxy)
+
+    int vf_enable_notifications;
+    int vf_disable_notifications;
+
+    function new(string name = "pcie_tl_bar_state_proxy",
+                 uvm_component parent = null);
+        super.new(name, parent);
+    endfunction
+
+    virtual function void notify_vf_lifecycle(
+        bit enable,
+        int pf_index,
+        int num_vfs,
+        pcie_tl_sriov_cap sc
+    );
+        if (enable)
+            vf_enable_notifications++;
+        else
+            vf_disable_notifications++;
+    endfunction
+endclass
+
 class pcie_tl_bar_state_test extends uvm_test;
     `uvm_component_utils(pcie_tl_bar_state_test)
 
     pcie_tl_func_manager mgr;
-    pcie_tl_config_proxy proxy;
+    pcie_tl_bar_state_proxy proxy;
 
     function new(string name = "pcie_tl_bar_state_test",
                  uvm_component parent = null);
@@ -16,7 +40,7 @@ class pcie_tl_bar_state_test extends uvm_test;
 
     function void build_phase(uvm_phase phase);
         super.build_phase(phase);
-        proxy = pcie_tl_config_proxy::type_id::create("proxy", this);
+        proxy = pcie_tl_bar_state_proxy::type_id::create("proxy", this);
     endfunction
 
     function void expect_generation(
@@ -64,11 +88,25 @@ class pcie_tl_bar_state_test extends uvm_test;
         end
     endfunction
 
+    function bit is_current_lut_key(bit [15:0] bdf, int enabled_vfs);
+        if (bdf == mgr.pf_ctx[0].bdf)
+            return 1;
+        for (int vf = 0; vf < enabled_vfs; vf++)
+            if (bdf == mgr.vf_ctx[0][vf].bdf)
+                return 1;
+        return 0;
+    endfunction
+
     task run_phase(uvm_phase phase);
         bit [15:0] pf_bdf;
         int sriov_dw;
         longint unsigned g0;
         bit [31:0] cfg_dw;
+        bit [31:0] old_cfg_dw;
+        bit [15:0] old_pf_bdf;
+        bit [15:0] old_vf_bdf[];
+        int enable_notifications;
+        int disable_notifications;
 
         phase.raise_objection(this);
 
@@ -169,12 +207,17 @@ class pcie_tl_bar_state_test extends uvm_test;
 
         // NumVFs, VFE, and VF MSE are three independent route-state edges.
         g0 = mgr.config_generation;
+        enable_notifications = proxy.vf_enable_notifications;
+        disable_notifications = proxy.vf_disable_notifications;
         void'(proxy.handle_cfg_write_bdf(pf_bdf, sriov_dw + 4, 32'd16, 0, 2));
         void'(proxy.handle_cfg_write_bdf(pf_bdf, sriov_dw + 2, 32'h0000_0011, 0, 2));
         if (!mgr.sriov_caps[0].vf_enable || !mgr.sriov_caps[0].vf_mse ||
             mgr.sriov_caps[0].num_vfs != 16 ||
             mgr.config_generation != g0 + 3)
             `uvm_error("BAR_STATE", "SR-IOV state was not mirrored")
+        if (proxy.vf_enable_notifications != enable_notifications + 1 ||
+            proxy.vf_disable_notifications != disable_notifications)
+            `uvm_error("BAR_STATE", "normal VFE set did not notify exactly once")
         expect_vf_lut("SR-IOV enabled", 16);
 
         g0 = mgr.config_generation;
@@ -203,11 +246,16 @@ class pcie_tl_bar_state_test extends uvm_test;
         expect_generation("repeated VF MSE clear", mgr.config_generation, g0 + 1);
 
         g0 = mgr.config_generation;
+        enable_notifications = proxy.vf_enable_notifications;
+        disable_notifications = proxy.vf_disable_notifications;
         void'(proxy.handle_cfg_write_bdf(pf_bdf, sriov_dw + 2, 32'h0000_0000, 0, 2));
         if (mgr.sriov_caps[0].vf_enable || mgr.sriov_caps[0].vf_mse ||
             mgr.sriov_caps[0].num_vfs != 16 ||
             mgr.config_generation != g0 + 1)
             `uvm_error("BAR_STATE", "VFE clear edge/state mismatch")
+        if (proxy.vf_enable_notifications != enable_notifications ||
+            proxy.vf_disable_notifications != disable_notifications + 1)
+            `uvm_error("BAR_STATE", "normal VFE clear did not notify exactly once")
         expect_vf_lut("VFE clear", 0);
         void'(proxy.handle_cfg_write_bdf(pf_bdf, sriov_dw + 2, 32'h0000_0000, 0, 2));
         expect_generation("repeated VFE clear", mgr.config_generation, g0 + 1);
@@ -231,11 +279,16 @@ class pcie_tl_bar_state_test extends uvm_test;
         // A zero-count VFE edge is still maintained state, but it enables no
         // function and leaves no LUT entry. Repeated writes remain no-ops.
         g0 = mgr.config_generation;
+        enable_notifications = proxy.vf_enable_notifications;
+        disable_notifications = proxy.vf_disable_notifications;
         void'(proxy.handle_cfg_write_bdf(pf_bdf, sriov_dw + 4, 32'd0, 0, 2));
         void'(proxy.handle_cfg_write_bdf(pf_bdf, sriov_dw + 2, 32'h0000_0001, 0, 2));
         if (!mgr.sriov_caps[0].vf_enable || mgr.sriov_caps[0].num_vfs != 0 ||
             mgr.config_generation != g0 + 2)
             `uvm_error("BAR_STATE", "zero-NumVFs VFE set edge mismatch")
+        if (proxy.vf_enable_notifications != enable_notifications ||
+            proxy.vf_disable_notifications != disable_notifications)
+            `uvm_error("BAR_STATE", "zero-NumVFs VFE set emitted a notification")
         expect_vf_lut("zero-NumVFs VFE set", 0);
         void'(proxy.handle_cfg_write_bdf(pf_bdf, sriov_dw + 2, 32'h0000_0001, 0, 2));
         expect_generation("repeated zero-NumVFs VFE set",
@@ -243,6 +296,13 @@ class pcie_tl_bar_state_test extends uvm_test;
         void'(proxy.handle_cfg_write_bdf(pf_bdf, sriov_dw + 2, 32'h0000_0000, 0, 2));
         expect_generation("zero-NumVFs VFE clear",
                           mgr.config_generation, g0 + 3);
+        cfg_dw = mgr.cfg_read(pf_bdf, (sriov_dw + 2) << 2);
+        if (mgr.sriov_caps[0].vf_enable || mgr.sriov_caps[0].vf_mse ||
+            cfg_dw[15:0] != 16'h0000)
+            `uvm_error("BAR_STATE", "zero-NumVFs VFE clear left Control state set")
+        if (proxy.vf_enable_notifications != enable_notifications ||
+            proxy.vf_disable_notifications != disable_notifications)
+            `uvm_error("BAR_STATE", "zero-NumVFs VFE clear emitted a notification")
         expect_vf_lut("zero-NumVFs VFE clear", 0);
 
         // Leave VFs enabled across runtime rekey and then reuse this manager;
@@ -255,11 +315,31 @@ class pcie_tl_bar_state_test extends uvm_test;
             `uvm_error("BAR_STATE", "VF setup before rebuild edge mismatch")
         expect_vf_lut("VFs enabled before rebuild", 16);
 
+        old_pf_bdf = mgr.pf_ctx[0].bdf;
+        old_vf_bdf = new[mgr.max_vfs_per_pf];
+        for (int vf = 0; vf < mgr.max_vfs_per_pf; vf++)
+            old_vf_bdf[vf] = mgr.vf_ctx[0][vf].bdf;
         g0 = mgr.config_generation;
         if (!mgr.bind_runtime_pf_base(16'h0200) ||
             mgr.pf_ctx[0].bdf != 16'h0200 ||
+            mgr.sriov_caps[0].pf_bdf != 16'h0200 ||
             mgr.config_generation != g0 + 1)
             `uvm_error("BAR_STATE", "runtime BDF bind did not invalidate routing once")
+        if (!is_current_lut_key(old_pf_bdf, 16) &&
+            mgr.lookup_by_bdf(old_pf_bdf) != null)
+            `uvm_error("BAR_STATE", "runtime BDF bind retained the old PF LUT key")
+        for (int vf = 0; vf < mgr.max_vfs_per_pf; vf++) begin
+            if (mgr.vf_ctx[0][vf].bdf != mgr.sriov_caps[0].get_vf_rid(vf))
+                `uvm_error("BAR_STATE", $sformatf(
+                    "runtime BDF bind left VF%0d context BDF stale", vf))
+            if (mgr.lookup_by_bdf(mgr.vf_ctx[0][vf].bdf) != mgr.vf_ctx[0][vf])
+                `uvm_error("BAR_STATE", $sformatf(
+                    "runtime BDF bind mapped VF%0d to the wrong object", vf))
+            if (!is_current_lut_key(old_vf_bdf[vf], 16) &&
+                mgr.lookup_by_bdf(old_vf_bdf[vf]) != null)
+                `uvm_error("BAR_STATE", $sformatf(
+                    "runtime BDF bind retained old VF%0d LUT key", vf))
+        end
         g0 = mgr.config_generation;
         if (!mgr.bind_runtime_pf_base(16'h0200))
             `uvm_error("BAR_STATE", "repeated runtime BDF bind was rejected")
@@ -270,6 +350,40 @@ class pcie_tl_bar_state_test extends uvm_test;
         mgr.build_topology(0, 1, 16, 16'h20f9, 16'h5011, 16'h8689);
         expect_generation("fresh topology generation", mgr.config_generation, 1);
         expect_vf_lut("fresh topology has no stale VF LUT", 0);
+
+        // Legacy SR-IOV leaves Function Dependency Link writable. A rejected
+        // active NumVFs full-DWORD write must therefore return before the
+        // generic config path can change either half of the raw DWORD.
+        mgr.cfg_profile = PCIE_CFG_PROFILE_LEGACY;
+        mgr.build_topology(0, 1, 16, 16'h1234, 16'h5678, 16'h9abc);
+        proxy.func_mgr = mgr;
+        pf_bdf = mgr.pf_ctx[0].bdf;
+        sriov_dw = int'(mgr.sriov_caps[0].offset >> 2);
+        void'(proxy.handle_cfg_write_bdf(pf_bdf, sriov_dw + 4, 32'd16, 0, 2));
+        void'(proxy.handle_cfg_write_bdf(pf_bdf, sriov_dw + 2, 32'h0000_0001, 0, 2));
+        old_cfg_dw = mgr.cfg_read(pf_bdf, (sriov_dw + 4) << 2);
+        g0 = mgr.config_generation;
+        void'(proxy.handle_cfg_write_bdf(
+            pf_bdf, sriov_dw + 4,
+            {old_cfg_dw[31:16] ^ 16'h5a5a, 16'd8}, 0, 4));
+        cfg_dw = mgr.cfg_read(pf_bdf, (sriov_dw + 4) << 2);
+        if (cfg_dw != old_cfg_dw || mgr.sriov_caps[0].num_vfs != 16)
+            `uvm_error("BAR_STATE", "active NumVFs full-DWORD write was not atomic")
+        expect_vf_lut("active NumVFs full-DWORD write rejected", 16);
+        expect_generation("active NumVFs full-DWORD write rejected",
+                          mgr.config_generation, g0);
+
+        // Reconciliation must treat removal of a wrong object at a disabled
+        // VF key as a routing change, even though the VF itself stays disabled.
+        mgr.build_topology(0, 1, 16, 16'h1234, 16'h5678, 16'h9abc);
+        mgr.enable_vfs(0, 1);
+        mgr.bdf_lut[mgr.vf_ctx[0][15].bdf] = mgr.pf_ctx[0];
+        g0 = mgr.config_generation;
+        mgr.enable_vfs(0, 1);
+        if (mgr.lookup_by_bdf(mgr.vf_ctx[0][15].bdf) != null)
+            `uvm_error("BAR_STATE", "disabled VF wrong-object LUT key was not removed")
+        expect_generation("disabled VF wrong-object LUT reconciliation",
+                          mgr.config_generation, g0 + 1);
 
         phase.drop_objection(this);
     endtask
