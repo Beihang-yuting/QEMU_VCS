@@ -30,10 +30,12 @@ third_party/xilinx_pcie/src/xilinx_pcie_params.svh
 third_party/xilinx_pcie/src/adapter/xilinx_pcie_adapter_pkg.sv
 third_party/xilinx_pcie/src/interface/xilinx_pcie_if.sv
 third_party/xilinx_pcie/src/interface/xilinx_pcie_cfg_if.sv
+third_party/xilinx_pcie/src/interface/xilinx_pcie_cfg_sva.sv
 
 // ---- adapter tests ----
 third_party/xilinx_pcie/tests/xilinx_pcie_adapter_base_test.sv
 third_party/xilinx_pcie/tests/xilinx_pcie_adapter_smoke_test.sv
+third_party/xilinx_pcie/tests/xilinx_pcie_adapter_codec_test.sv
 third_party/xilinx_pcie/tests/xilinx_pcie_adapter_cfg_test.sv
 third_party/xilinx_pcie/tests/xilinx_pcie_adapter_enum_dma_test.sv
 third_party/xilinx_pcie/tests/xilinx_pcie_adapter_rdwr_test.sv

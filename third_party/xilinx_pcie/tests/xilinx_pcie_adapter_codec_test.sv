@@ -16,18 +16,53 @@ import xilinx_pcie_adapter_pkg::*;
 //
 // Run: +UVM_TESTNAME=xilinx_pcie_adapter_codec_test (filelist_adapter.f).
 //=============================================================================
+class xilinx_cq_route_probe extends xilinx_pcie_if_adapter;
+  `uvm_component_utils(xilinx_cq_route_probe)
+
+  function new(string name = "xilinx_cq_route_probe",
+               uvm_component parent = null);
+    super.new(name, parent);
+  endfunction
+
+  // This probe only exercises the descriptor helper; it needs no AXIS agents.
+  function void build_phase(uvm_phase phase);
+  endfunction
+
+  function void connect_phase(uvm_phase phase);
+  endfunction
+
+  function bit [127:0] probe(pcie_tl_tlp tlp);
+    return encode_descriptor(tlp, XILINX_CH_CQ);
+  endfunction
+endclass
+
 class xilinx_pcie_adapter_codec_test extends uvm_test;
   `uvm_component_utils(xilinx_pcie_adapter_codec_test)
 
   int unsigned errs = 0;
+  xilinx_cq_route_probe route_probe;
 
   function new(string n, uvm_component p); super.new(n, p); endfunction
+
+  function void build_phase(uvm_phase phase);
+    super.build_phase(phase);
+    route_probe = xilinx_cq_route_probe::type_id::create("route_probe", this);
+  endfunction
 
   // check helper: increments errs and logs on mismatch
   function void chk(string what, bit ok);
     if (!ok) begin
       errs++;
       `uvm_error("CODEC_CHK", $sformatf("FAIL: %s", what))
+    end
+  endfunction
+
+  function void chk_eq(string what, bit [31:0] got, bit [31:0] expected);
+    if (got != expected) begin
+      errs++;
+      `uvm_error("CODEC_CHK",
+                 $sformatf("FAIL: %s got=0x%0h expected=0x%0h",
+                           what, got, expected))
     end
   endfunction
 
@@ -114,6 +149,36 @@ class xilinx_pcie_adapter_codec_test extends uvm_test;
       chk("CQ tc", d.tc == m.tc);
       chk("CQ attr", d.attr == m.attr);
     end
+
+    // Adapter path: validated route metadata must drive CQ descriptor sideband.
+    m.cq_route = pcie_tl_cq_route_default();
+    m.cq_route.valid        = 1'b1;
+    m.cq_route.target_bdf   = 16'h0114;
+    m.cq_route.target_func  = 8'h03;
+    m.cq_route.bar_id       = 3'h2;
+    m.cq_route.bar_aperture = 6'h04;
+    m.cq_route.bar_offset   = 64'h40;
+    m.cq_route.is_vf        = 1'b1;
+    m.cq_route.pf_index     = 1;
+    m.cq_route.vf_index     = 3;
+    desc = route_probe.probe(m);
+    chk_eq("adapter CQ valid route target_func",
+           xilinx_desc_codec::get_cq_target_func(desc), 8'h03);
+    chk_eq("adapter CQ valid route bar_id",
+           xilinx_desc_codec::get_cq_bar_id(desc), 3'h2);
+    chk_eq("adapter CQ valid route bar_aperture",
+           xilinx_desc_codec::get_cq_bar_aperture(desc), 6'h04);
+
+    // Invalid metadata retains the legacy all-zero CQ sideband, even if stale
+    // field values remain in the record.
+    m.cq_route.valid = 1'b0;
+    desc = route_probe.probe(m);
+    chk_eq("adapter CQ invalid route target_func stays zero",
+           xilinx_desc_codec::get_cq_target_func(desc), 8'h00);
+    chk_eq("adapter CQ invalid route bar_id stays zero",
+           xilinx_desc_codec::get_cq_bar_id(desc), 3'h0);
+    chk_eq("adapter CQ invalid route bar_aperture stays zero",
+           xilinx_desc_codec::get_cq_bar_aperture(desc), 6'h00);
   endfunction
 
   // --- RC: completion with data ---

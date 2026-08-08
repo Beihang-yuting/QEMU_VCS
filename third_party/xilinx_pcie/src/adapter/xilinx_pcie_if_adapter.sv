@@ -338,8 +338,15 @@ class xilinx_pcie_if_adapter extends pcie_tl_if_adapter;
                 bit [95:0] d96 = xilinx_desc_codec::encode_rc(tlp);
                 desc = {32'h0, d96};
             end
-            XILINX_CH_CQ: desc = xilinx_desc_codec::encode_cq(
-                              tlp, .bar_id(3'h0), .bar_aperture(6'h0), .target_func(8'h0));
+            XILINX_CH_CQ: begin
+                pcie_tl_cq_route_t route;
+                route = tlp.cq_route;
+                desc = xilinx_desc_codec::encode_cq(
+                    tlp,
+                    .bar_id(route.valid ? route.bar_id : 3'h0),
+                    .bar_aperture(route.valid ? route.bar_aperture : 6'h0),
+                    .target_func(route.valid ? route.target_func : 8'h0));
+            end
             XILINX_CH_CC: begin
                 bit [95:0] d96 = xilinx_desc_codec::encode_cc(tlp);
                 desc = {32'h0, d96};
