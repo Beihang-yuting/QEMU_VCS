@@ -93,6 +93,10 @@ add_test(NAME test_qemu_request_routing_source
          COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/test_qemu_request_routing_source.sh)
 set_tests_properties(test_qemu_request_routing_source PROPERTIES TIMEOUT 10)
 
+add_test(NAME test_cq_bar_routing_source
+         COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/test_cq_bar_routing_source.sh)
+set_tests_properties(test_cq_bar_routing_source PROPERTIES TIMEOUT 10)
+
 add_test(NAME test_runtime_bdf_utils
          COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/../sv/run_test_runtime_bdf_utils.sh)
 set_tests_properties(test_runtime_bdf_utils PROPERTIES TIMEOUT 120)

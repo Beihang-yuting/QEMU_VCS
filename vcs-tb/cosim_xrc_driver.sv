@@ -50,6 +50,10 @@ class cosim_xrc_driver extends pcie_tl_rc_driver;
     // ---- 统一 config space: func_mgr(num_pfs=1 即单func, 多func/SR-IOV 同一套)----
     pcie_tl_func_manager func_mgr;
 
+    // ---- Live BAR decode for QEMU host requests (per RC, never shared) ----
+    pcie_tl_bar_decoder bar_decoder;
+    bit config_bar_decode_enable;
+
     // ---- EP data-plane model (stand-in DUT) ------------------------------
     // A minimal behavioral EP that exercises the VF DMA/MSI-X data plane. The
     // guest programs a per-VF doorbell in the VF BAR0 register file; a write to
@@ -103,6 +107,7 @@ class cosim_xrc_driver extends pcie_tl_rc_driver;
     int unsigned     dpi_data[16];
     int              dpi_len;
     int              dpi_tag;
+    int              dpi_requester_id;
     byte unsigned    dpi_first_be;
     byte unsigned    dpi_last_be;
 
@@ -128,6 +133,8 @@ class cosim_xrc_driver extends pcie_tl_rc_driver;
     int unsigned total_cpl_count;
     int unsigned unknown_type_count;
     int unsigned inbound_req_count;   // DUT-initiated (DMA) — TODO next increment
+    longint unsigned bar_decode_error_count[int];
+    longint unsigned host_requester_error_count;
 
     function new(string name = "cosim_xrc_driver", uvm_component parent = null);
         super.new(name, parent);
@@ -237,6 +244,10 @@ class cosim_xrc_driver extends pcie_tl_rc_driver;
             func_mgr.cfg_profile = cfg_profile;
             func_mgr.set_tag_bit(tag_bit);
             func_mgr.build_topology(topo, n_pfs, max_vfs, ven[15:0], dev[15:0], vfdev[15:0]);
+            bar_decoder = pcie_tl_bar_decoder::type_id::create("bar_decoder");
+            bar_decoder.func_mgr = func_mgr;
+            config_bar_decode_enable = real_dut ||
+                cfg_profile != pcie_tl_device_profile_pkg::PCIE_CFG_PROFILE_LEGACY;
             `uvm_info(get_name(), $sformatf(
                 "[CFG_PROFILE] resolved name=%s TAG_BIT=%0d PFs=%0d PF0=%04h:%04h VF=%04h",
                 cfg_profile_name, tag_bit, n_pfs, func_mgr.pf_ctx[0].vendor_id,
@@ -1058,6 +1069,33 @@ class cosim_xrc_driver extends pcie_tl_rc_driver;
             dpi_last_be  = bridge_vcs_get_poll_last_be_rc(rc_index);
             for (int i = 0; i < 16; i++)
                 dpi_data[i] = bridge_vcs_get_poll_data_rc(rc_index, i);
+            dpi_requester_id = bridge_vcs_get_tlp_requester_id_rc(rc_index);
+
+            // QEMU represents the host/RC and therefore must source these
+            // transactions with requester ID zero. This check is deliberately
+            // confined to the poll path; DUT-originated DMA keeps its function
+            // requester identity in rx_loop and the DMA callbacks.
+            if ((dpi_type == BV_TLP_CFGRD0 || dpi_type == BV_TLP_CFGWR0 ||
+                 dpi_type == BV_TLP_MRD || dpi_type == BV_TLP_MWR ||
+                 dpi_type == BV_TLP_ATS_INVAL) && dpi_requester_id != 0) begin
+                host_requester_error_count++;
+                `uvm_error(get_name(), $sformatf(
+                    "RC%0d rejected QEMU TLP type=0x%02h tag=0x%03h requester_id=0x%04h (host must be 0000)",
+                    rc_index, dpi_type, dpi_tag[9:0], dpi_requester_id[15:0]))
+                if (dpi_type == BV_TLP_CFGRD0 || dpi_type == BV_TLP_MRD ||
+                    dpi_type == BV_TLP_ATS_INVAL) begin
+                    for (int i = 0; i < 16; i++)
+                        bridge_vcs_set_cpl_data_rc(rc_index, i, 0);
+                    if (bridge_vcs_send_cpl_scalar_status_rc(
+                            rc_index, dpi_tag, 0, int'(CPL_STATUS_UR)) != 0)
+                        `uvm_error(get_name(), $sformatf(
+                            "RC%0d failed to return requester-reject UR tag=0x%03h",
+                            rc_index, dpi_tag[9:0]))
+                end
+                total_tlp_count++;
+                #1;
+                continue;
+            end
 
             // ---- ATS Invalidation (RC -> device): send an Invalidate Message,
             //      then ACK QEMU ONLY after the DUT returns an Invalidation
@@ -1154,25 +1192,10 @@ class cosim_xrc_driver extends pcie_tl_rc_driver;
                 end
             end
 
-            // ---- EP data-plane model: intercept VF BAR writes (doorbell) ----
-            // A write to an enabled VF's BAR is handled by the stand-in EP model
-            // (initiates VF-sourced DMA/MSI-X). Reads still flow to the VIP DUT.
-            // Stand-in only: intercept VF-BAR writes as the EP doorbell. With a
-            // real DUT the write must flow THROUGH to the DUT (fall to send_tlp).
-            if (!real_dut && dpi_type == BV_TLP_MWR && func_mgr != null) begin
-                bit [15:0] vf_tgt = bridge_vcs_get_tlp_target_bdf_rc(rc_index);
-                pcie_tl_func_context vf_ctx = func_mgr.lookup_by_bdf(vf_tgt);
-                if (vf_ctx != null && vf_ctx.is_vf) begin
-                    ep_vf_mmio_write(rc_index, vf_tgt, dpi_addr, dpi_data[0]);
-                    total_tlp_count++;
-                    #1;
-                    continue;
-                end
-            end
-
             // ---- MMIO to DUT: build a VIP TLP, send through the pipeline ----
             vip_tlp = build_mmio_tlp(dpi_type, dpi_addr, dpi_data, dpi_len, dpi_tag,
-                                     dpi_first_be[3:0], dpi_last_be[3:0]);
+                                     dpi_first_be[3:0], dpi_last_be[3:0],
+                                     dpi_requester_id[15:0]);
             if (vip_tlp == null) begin
                 unknown_type_count++;
                 `uvm_warning(get_name(),
@@ -1181,15 +1204,82 @@ class cosim_xrc_driver extends pcie_tl_rc_driver;
                 continue;
             end
 
-            begin
-                bit [9:0] qemu_tag_10 = dpi_tag[9:0];   // 10-bit QEMU tag
-                int request_inst_id = vip_tlp.get_inst_id();
-                if (vip_tlp.requires_completion())
-                    pending_qemu_tag_by_inst[request_inst_id] = qemu_tag_10;
-                send_tlp(vip_tlp);   // adapter.send -> CQ channel -> DUT
-                // Normally deleted by on_tag_assigned() before adapter.send;
-                // keep cleanup here for future send paths that skip allocation.
-                pending_qemu_tag_by_inst.delete(request_inst_id);
+            begin : route_and_send_qemu_mmio
+                pcie_tl_mem_tlp mem_tlp;
+                pcie_tl_cq_route_t route;
+                pcie_bar_decode_result_e decode_result;
+                string decode_reason;
+                bit [15:0] target_bdf;
+
+                route = pcie_tl_cq_route_default();
+
+                // Decode address and live config before creating any staged
+                // tag-map entry. target_bdf is only the decoder's final
+                // cross-check; it never selects a function or fallback BAR.
+                if ((dpi_type == BV_TLP_MRD || dpi_type == BV_TLP_MWR) &&
+                    config_bar_decode_enable) begin
+                    target_bdf = bridge_vcs_get_tlp_target_bdf_rc(rc_index);
+                    if (!$cast(mem_tlp, vip_tlp))
+                        `uvm_fatal(get_name(),
+                            "build_mmio_tlp returned a non-memory TLP")
+                    decode_result = bar_decoder.decode(
+                        mem_tlp, target_bdf, route, decode_reason);
+                    if (decode_result == PCIE_BAR_DECODE_OK) begin
+                        vip_tlp.cq_route = route;
+                    end else begin
+                        longint unsigned decode_error_count;
+                        bar_decode_error_count[int'(decode_result)]++;
+                        decode_error_count =
+                            bar_decode_error_count[int'(decode_result)];
+                        total_tlp_count++;
+                        if (decode_error_count <= 8 ||
+                            decode_error_count % 1024 == 0)
+                            `uvm_error(get_name(), $sformatf(
+                                "RC%0d BAR decode rejected type=0x%02h addr=0x%016h target_bdf=0x%04h result=%0d count=%0d: %s",
+                                rc_index, dpi_type, dpi_addr, target_bdf,
+                                int'(decode_result), decode_error_count,
+                                decode_reason))
+                        if (decode_result == PCIE_BAR_DECODE_OVERLAP ||
+                            decode_result == PCIE_BAR_DECODE_INVALID_CONFIG)
+                            `uvm_fatal(get_name(), $sformatf(
+                                "RC%0d fatal BAR decode result=%0d: %s",
+                                rc_index, int'(decode_result), decode_reason))
+                        if (dpi_type == BV_TLP_MRD) begin
+                            for (int i = 0; i < 16; i++)
+                                bridge_vcs_set_cpl_data_rc(rc_index, i, 0);
+                            if (bridge_vcs_send_cpl_scalar_status_rc(
+                                    rc_index, dpi_tag, 0,
+                                    int'(CPL_STATUS_UR)) != 0)
+                                `uvm_error(get_name(), $sformatf(
+                                    "RC%0d failed to return BAR-decode UR tag=0x%03h",
+                                    rc_index, dpi_tag[9:0]))
+                        end
+                        #1;
+                        continue;
+                    end
+                end
+
+                // Stand-in only: handle decoded VF BAR writes as doorbells.
+                // The decoded route, not the QEMU BDF hint, selects the VF.
+                if (!real_dut && dpi_type == BV_TLP_MWR &&
+                    route.valid && route.is_vf) begin
+                    ep_vf_mmio_write(
+                        rc_index, route.target_bdf, dpi_addr, dpi_data[0]);
+                    total_tlp_count++;
+                    #1;
+                    continue;
+                end
+
+                begin : send_decoded_mmio
+                    bit [9:0] qemu_tag_10 = dpi_tag[9:0]; // 10-bit QEMU tag
+                    int request_inst_id = vip_tlp.get_inst_id();
+                    if (vip_tlp.requires_completion())
+                        pending_qemu_tag_by_inst[request_inst_id] = qemu_tag_10;
+                    send_tlp(vip_tlp);   // adapter.send -> CQ channel -> DUT
+                    // Normally deleted by on_tag_assigned() before adapter.send;
+                    // keep cleanup here for future send paths that skip allocation.
+                    pending_qemu_tag_by_inst.delete(request_inst_id);
+                end
             end
             total_tlp_count++;
         end
@@ -1273,7 +1363,8 @@ class cosim_xrc_driver extends pcie_tl_rc_driver;
                 cpl.payload, dw * 4);
             bridge_vcs_set_cpl_data_rc(rc_index, dw, rdata);
         end
-        if (bridge_vcs_send_cpl_scalar_rc(rc_index, qemu_tag, 1) != 0)
+        if (bridge_vcs_send_cpl_scalar_status_rc(
+                rc_index, qemu_tag, 1, int'(cpl.cpl_status)) != 0)
             `uvm_error(get_name(),
                 $sformatf("RC%0d send_cpl failed qemu_tag=0x%03h", rc_index, qemu_tag))
         total_cpl_count++;
@@ -1294,7 +1385,8 @@ class cosim_xrc_driver extends pcie_tl_rc_driver;
         input int              len,
         input int              tag,
         input bit [3:0]        first_be,
-        input bit [3:0]        last_be);
+        input bit [3:0]        last_be,
+        input bit [15:0]       requester_id);
 
         pcie_tl_mem_tlp m;
         int payload_bytes;
@@ -1307,6 +1399,7 @@ class cosim_xrc_driver extends pcie_tl_rc_driver;
                 m.is_64bit = (addr[63:32] != 0);
                 m.fmt      = m.is_64bit ? FMT_4DW_WITH_DATA : FMT_3DW_WITH_DATA;
                 m.type_f   = TLP_TYPE_MEM_RD;   // MEM_WR shares encoding
+                m.requester_id = requester_id;
                 m.first_be = first_be;
                 m.last_be  = last_be;
                 payload_bytes = (len > 0) ? len : 4;
@@ -1321,6 +1414,7 @@ class cosim_xrc_driver extends pcie_tl_rc_driver;
                 m.is_64bit = (addr[63:32] != 0);
                 m.fmt      = m.is_64bit ? FMT_4DW_NO_DATA : FMT_3DW_NO_DATA;
                 m.type_f   = TLP_TYPE_MEM_RD;
+                m.requester_id = requester_id;
                 m.first_be = first_be;
                 m.last_be  = last_be;
                 m.length   = (len > 0) ? (len + 3) / 4 : 1;
@@ -1349,9 +1443,14 @@ class cosim_xrc_driver extends pcie_tl_rc_driver;
     virtual function void report_phase(uvm_phase phase);
         super.report_phase(phase);
         `uvm_info(get_name(), $sformatf(
-            "=== cosim_xrc_driver RC%0d: tlp=%0d cpl=%0d unknown=%0d inbound(DMA-todo)=%0d ===",
-            rc_index, total_tlp_count, total_cpl_count, unknown_type_count, inbound_req_count),
+            "=== cosim_xrc_driver RC%0d: tlp=%0d cpl=%0d unknown=%0d inbound(DMA-todo)=%0d host_requester_errors=%0d ===",
+            rc_index, total_tlp_count, total_cpl_count, unknown_type_count,
+            inbound_req_count, host_requester_error_count),
             UVM_NONE)
+        foreach (bar_decode_error_count[result])
+            `uvm_info(get_name(), $sformatf(
+                "RC%0d BAR decode result=%0d errors=%0d",
+                rc_index, result, bar_decode_error_count[result]), UVM_NONE)
     endfunction
 
 endclass
