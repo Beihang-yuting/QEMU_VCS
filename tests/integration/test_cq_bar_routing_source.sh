@@ -26,6 +26,13 @@ def compact(text: str) -> str:
     return re.sub(r"\s+", "", without_comments(text))
 
 
+def masked_code(text: str) -> str:
+    """Mask comments and strings while preserving structural token offsets."""
+    pattern = r'"(?:\\.|[^"\\])*"|/\*.*?\*/|//[^\n]*'
+    return re.sub(pattern, lambda match: " " * len(match.group(0)), text,
+                  flags=re.DOTALL)
+
+
 def block(source: str, declaration: str, terminator: str) -> str:
     start = re.search(declaration, source)
     if start is None:
@@ -73,6 +80,55 @@ def parsed_if(source: str, search_from: int = 0) -> Tuple[str, str, int, int]:
     if body_end < 0:
         fail("if statement has unbalanced begin/end")
     return source[open_paren + 1:close_paren], source[body_start:body_end], if_start, end_pos
+
+
+def parsed_else_body(source: str, search_from: int) -> str:
+    structure = masked_code(source)
+    else_begin = re.match(r"\s*else\s+begin\b", structure[search_from:])
+    if else_begin is None:
+        fail("decode success branch must have an else begin failure body")
+    begin_start = search_from + else_begin.end() - len("begin")
+    body_start = begin_start + len("begin")
+    depth = 1
+    for token in re.finditer(r"\b(begin|end)\b", structure[body_start:]):
+        if token.group(1) == "begin":
+            depth += 1
+        else:
+            depth -= 1
+            if depth == 0:
+                body_end = body_start + token.start()
+                return source[body_start:body_end]
+    fail("decode failure else body has unbalanced begin/end")
+
+
+def top_level_statements(source: str) -> Tuple[str, ...]:
+    structure = masked_code(source)
+    statements = []
+    statement_start = 0
+    depth = 0
+    for token in re.finditer(r"\b(begin|end)\b|;", structure):
+        if token.group(0) == "begin":
+            depth += 1
+        elif token.group(0) == "end":
+            if depth == 0:
+                fail("decode failure body has an unmatched end")
+            depth -= 1
+            if depth == 0:
+                statement = source[statement_start:token.end()]
+                if compact(statement):
+                    statements.append(statement)
+                statement_start = token.end()
+        elif depth == 0:
+            statement = source[statement_start:token.end()]
+            if compact(statement):
+                statements.append(statement)
+            statement_start = token.end()
+    if depth != 0:
+        fail("decode failure body has an unmatched begin")
+    trailing = source[statement_start:]
+    if compact(trailing):
+        statements.append(trailing)
+    return tuple(statements)
 
 
 def predicate_types(condition: str) -> Set[str]:
@@ -192,9 +248,14 @@ if request[decode_call:tag_map].count("bridge_vcs_get_tlp_target_bdf_rc(rc_index
 decode_assignment = request_raw.find("decode_result = bar_decoder.decode(")
 if decode_assignment < 0:
     fail("missing BAR decode assignment")
-decode_condition, _, _, _ = parsed_if(request_raw, decode_assignment)
+decode_condition, _, _, decode_success_end = parsed_if(request_raw, decode_assignment)
 if compact(decode_condition) != "decode_result==PCIE_BAR_DECODE_OK":
     fail("decode success must be exactly PCIE_BAR_DECODE_OK")
+decode_failure_body = parsed_else_body(request_raw, decode_success_end)
+failure_statements = tuple(compact(statement) for statement in
+                           top_level_statements(decode_failure_body))
+if len(failure_statements) < 2 or failure_statements[-2:] != ("#1;", "continue;"):
+    fail("decode failure must end with unconditional top-level #1; continue;")
 
 decode_window = request[decode_call:tag_map]
 if "vip_tlp.cq_route=route;" not in decode_window:
@@ -215,12 +276,9 @@ decoded_doorbell = request.find(
     "if(!real_dut&&dpi_type==BV_TLP_MWR&&route.valid&&route.is_vf)begin",
     decode_call,
 )
-failure_continue = request.find("#1;continue;", decode_call)
 route_assign = request.find("vip_tlp.cq_route=route;", decode_call)
 if decoded_doorbell < 0 or not route_assign < decoded_doorbell < legacy:
     fail("config-driven VF doorbell must use the valid decoded route")
-if failure_continue < 0 or not failure_continue < decoded_doorbell < legacy:
-    fail("decode failure must continue before decoded or LEGACY doorbells")
 decoded_window = request[decoded_doorbell:legacy]
 if "route.target_bdf" not in decoded_window or "ep_vf_mmio_write(" not in decoded_window:
     fail("decoded doorbell must select its function from route.target_bdf")
