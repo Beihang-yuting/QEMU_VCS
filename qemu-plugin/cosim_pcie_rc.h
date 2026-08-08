@@ -77,6 +77,7 @@ struct CosimPCIeRC {
      * 0xFFFFFFFF(设备视为无响应), guest 不再死等 -> 能启动到登录。0=禁用(永久阻塞,
      * 旧行为)。默认 180000(3min)。-device cosim-pcie-rc,...,mmio_timeout_ms=N */
     uint32_t mmio_timeout_ms;
+    uint64_t mmio_cpl_error_count;
 
     /* 运行时 debug 开关 -- -device cosim-pcie-rc,...,debug=on */
     bool debug;

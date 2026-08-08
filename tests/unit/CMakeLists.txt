@@ -43,3 +43,8 @@ add_test(NAME test_cosim_topology COMMAND test_cosim_topology)
 add_executable(test_cosim_mmio_be test_cosim_mmio_be.c)
 target_include_directories(test_cosim_mmio_be PRIVATE ${CMAKE_SOURCE_DIR}/qemu-plugin)
 add_test(NAME test_cosim_mmio_be COMMAND test_cosim_mmio_be)
+
+add_executable(test_cosim_pcie_request test_cosim_pcie_request.c)
+target_include_directories(test_cosim_pcie_request PRIVATE ${CMAKE_SOURCE_DIR}/qemu-plugin)
+target_link_libraries(test_cosim_pcie_request cosim_bridge_common)
+add_test(NAME test_cosim_pcie_request COMMAND test_cosim_pcie_request)

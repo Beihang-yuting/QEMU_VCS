@@ -543,12 +543,19 @@ int bridge_vcs_poll_tlp_ext(unsigned char *tlp_type, unsigned long long *addr,
     return 0;
 }
 
-static int send_completion_ctx(rc_ctx_t *ctx, int tag, const unsigned int *data, int len) {
+static int send_completion_status_ctx(rc_ctx_t *ctx, int tag,
+                                      const unsigned int *data, int len,
+                                      int status) {
     cpl_entry_t cpl;
+    if (status < 0 || status > UINT8_MAX ||
+        !cosim_cpl_status_is_valid((uint8_t)status)) {
+        fprintf(stderr, "[VCS Bridge] invalid completion status=%d\n", status);
+        return -1;
+    }
     memset(&cpl, 0, sizeof(cpl));
     cpl.type = TLP_CPL;
     cpl.tag = (uint16_t)tag;
-    cpl.status = 0;
+    cpl.status = (uint8_t)status;
     cpl.requester_id = 0;     /* P3: default single-function */
     cpl.completer_id = 0;     /* P3: default single-function */
     cpl.len = len;
@@ -579,6 +586,12 @@ static int send_completion_ctx(rc_ctx_t *ctx, int tag, const unsigned int *data,
     /* 通知 QEMU */
     sync_msg_t msg = { .type = SYNC_MSG_CPL_READY, .payload = 0 };
     return sock_sync_send(g_sock_fd, &msg);
+}
+
+static int send_completion_ctx(rc_ctx_t *ctx, int tag,
+                               const unsigned int *data, int len) {
+    return send_completion_status_ctx(ctx, tag, data, len,
+                                      COSIM_CPL_STATUS_SC);
 }
 
 /* DPI-C: 发送 Completion（legacy 单 RC = g_rc[0]） */
@@ -1675,9 +1688,14 @@ void bridge_vcs_set_cpl_data_rc(int rc, int index, unsigned int value) {
     if (rc_ok(rc) && index >= 0 && index < 16)
         g_send_cpl_buf[rc][index] = value;
 }
-int bridge_vcs_send_cpl_scalar_rc(int rc, int tag, int len) {
+int bridge_vcs_send_cpl_scalar_status_rc(int rc, int tag, int len, int status) {
     if (!rc_ok(rc)) return -1;
-    return send_completion_ctx(&g_rc[rc], tag, g_send_cpl_buf[rc], len);
+    return send_completion_status_ctx(&g_rc[rc], tag, g_send_cpl_buf[rc], len,
+                                      status);
+}
+int bridge_vcs_send_cpl_scalar_rc(int rc, int tag, int len) {
+    return bridge_vcs_send_cpl_scalar_status_rc(
+        rc, tag, len, COSIM_CPL_STATUS_SC);
 }
 
 /* ---- Legacy single-RC scalar DPI (= slot 0, byte-equivalent to before) ---- */
@@ -1725,8 +1743,12 @@ void bridge_vcs_set_cpl_data(int index, unsigned int value) {
 }
 
 /* Send completion using pre-set buffer — pure scalar DPI (legacy = slot 0) */
+int bridge_vcs_send_cpl_scalar_status(int tag, int len, int status) {
+    return bridge_vcs_send_cpl_scalar_status_rc(0, tag, len, status);
+}
+
 int bridge_vcs_send_cpl_scalar(int tag, int len) {
-    return bridge_vcs_send_cpl_scalar_rc(0, tag, len);
+    return bridge_vcs_send_cpl_scalar_status(tag, len, COSIM_CPL_STATUS_SC);
 }
 
 /* DPI-C: 关闭连接 */

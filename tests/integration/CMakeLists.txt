@@ -6,6 +6,12 @@ add_executable(test_bridge_loopback test_bridge_loopback.c)
 target_link_libraries(test_bridge_loopback cosim_bridge)
 add_test(NAME test_bridge_loopback COMMAND test_bridge_loopback)
 
+add_executable(test_bridge_completion_status test_bridge_completion_status.c)
+target_link_libraries(test_bridge_completion_status
+                      cosim_bridge cosim_bridge_vcs pthread)
+add_test(NAME test_bridge_completion_status COMMAND test_bridge_completion_status)
+set_tests_properties(test_bridge_completion_status PROPERTIES TIMEOUT 20)
+
 add_executable(test_dma_roundtrip test_dma_roundtrip.c)
 target_link_libraries(test_dma_roundtrip cosim_bridge cosim_bridge_common)
 add_test(NAME test_dma_roundtrip COMMAND test_dma_roundtrip)
@@ -82,6 +88,10 @@ set_tests_properties(test_inject_modules_debugfs_paths PROPERTIES TIMEOUT 30)
 add_test(NAME test_pcie_launch_topology
          COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/test_pcie_launch_topology.sh)
 set_tests_properties(test_pcie_launch_topology PROPERTIES TIMEOUT 10)
+
+add_test(NAME test_qemu_request_routing_source
+         COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/test_qemu_request_routing_source.sh)
+set_tests_properties(test_qemu_request_routing_source PROPERTIES TIMEOUT 10)
 
 add_test(NAME test_runtime_bdf_utils
          COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/../sv/run_test_runtime_bdf_utils.sh)

@@ -11,6 +11,11 @@ qemu_mmio_header_relative='qemu-plugin/cosim_mmio_be.h'
 qemu_mmio_header="$project_dir/$qemu_mmio_header_relative"
 make_mmio_sync_line=$'\t@cp "$(PROJECT_DIR)/qemu-plugin/cosim_mmio_be.h" "$(QEMU_SRC_DIR)/include/hw/net/cosim_mmio_be.h"'
 setup_mmio_sync_line='        cp "${PROJECT_DIR}/qemu-plugin/cosim_mmio_be.h" "${QEMU_DIR}/include/hw/net/"'
+qemu_request_include='hw/net/cosim_pcie_request.h'
+qemu_request_header_relative='qemu-plugin/cosim_pcie_request.h'
+qemu_request_header="$project_dir/$qemu_request_header_relative"
+make_request_sync_line=$'\t@cp "$(PROJECT_DIR)/qemu-plugin/cosim_pcie_request.h" "$(QEMU_SRC_DIR)/include/hw/net/cosim_pcie_request.h"'
+setup_request_sync_line='        cp "${PROJECT_DIR}/qemu-plugin/cosim_pcie_request.h" "${QEMU_DIR}/include/hw/net/"'
 fixture_parent="$project_dir/build/tmp"
 mkdir -p "$fixture_parent"
 fixture_root=$(mktemp -d "$fixture_parent/test-pcie-launch-topology.XXXXXX")
@@ -60,6 +65,10 @@ populate_qemu_injection_project_fixture() {
         "$project_fixture/qemu-plugin/cosim_pcie_rc.h"
     cp "$qemu_mmio_header" \
         "$project_fixture/qemu-plugin/cosim_mmio_be.h"
+    if [[ -f "$qemu_request_header" ]]; then
+        cp "$qemu_request_header" \
+            "$project_fixture/qemu-plugin/cosim_pcie_request.h"
+    fi
     cp "$project_dir/bridge/common/cosim_topology.h" \
         "$project_fixture/bridge/common/cosim_topology.h"
 }
@@ -146,6 +155,121 @@ qemu_mmio_injection_contract_is_valid() {
         qemu_rc_depends_on_mmio_header "$rc_path" &&
         qemu_device_executes_mmio_sync "$make_body" &&
         setup_injection_executes_mmio_sync "$setup_body"
+}
+
+qemu_request_header_is_tracked() {
+    local header_path=$1
+    local tracked_path
+
+    [[ -f "$header_path" ]] || return 1
+    tracked_path=$(git -C "$project_dir" ls-files --error-unmatch -- \
+        "$qemu_request_header_relative" 2>/dev/null) || return 1
+    [[ "$tracked_path" == "$qemu_request_header_relative" ]] || return 1
+    [[ "$header_path" == "$project_dir/$tracked_path" ]]
+}
+
+qemu_rc_depends_on_request_header() {
+    local rc_path=$1
+    local dependencies
+
+    if ! dependencies=$(cpp -MM -MG "$rc_path"); then
+        return 1
+    fi
+    awk -v expected="$qemu_request_include" '
+        {
+            for (field = 1; field <= NF; field++) {
+                token = $field
+                sub(/\\$/, "", token)
+                if (token == expected)
+                    found = 1
+            }
+        }
+        END { exit !found }
+    ' <<<"$dependencies"
+}
+
+qemu_device_executes_request_sync() {
+    local make_body=$1
+    local make_fixture project_fixture qemu_fixture makefile_fixture
+    local ninja_stub make_log make_rc target_header
+
+    make_fixture=$(mktemp -d "$fixture_root/qemu-device-request.XXXXXX")
+    project_fixture="$make_fixture/project"
+    qemu_fixture="$make_fixture/qemu"
+    makefile_fixture="$make_fixture/Makefile"
+    ninja_stub="$make_fixture/bin/ninja"
+    make_log="$make_fixture/make.log"
+    populate_qemu_injection_project_fixture "$project_fixture"
+    mkdir -p "$qemu_fixture/hw/net" "$qemu_fixture/include/hw/net" \
+        "$qemu_fixture/build" "$make_fixture/bin"
+    printf '# isolated qemu-device request-header fixture\n' >"$qemu_fixture/build/build.ninja"
+    {
+        printf '#!/bin/sh\n'
+        printf 'exit 0\n'
+    } >"$ninja_stub"
+    chmod +x "$ninja_stub"
+    {
+        printf 'PROJECT_DIR := %s\n' "$project_fixture"
+        printf 'QEMU_SRC_DIR := %s\n' "$qemu_fixture"
+        printf 'QEMU_BUILD := %s\n' "$qemu_fixture/build"
+        printf '.PHONY: bridge qemu-device\n'
+        printf 'bridge:\n\t@:\n'
+        printf '%s\n' "$make_body"
+    } >"$makefile_fixture"
+    if PATH="$make_fixture/bin:$PATH" make --no-print-directory \
+            -C "$make_fixture" -f "$makefile_fixture" qemu-device \
+            >"$make_log" 2>&1; then
+        make_rc=0
+    else
+        make_rc=$?
+    fi
+    if ((make_rc != 0)); then
+        return 1
+    fi
+    target_header="$qemu_fixture/include/hw/net/cosim_pcie_request.h"
+    [[ -f "$target_header" ]] || return 1
+    cmp -s "$project_fixture/qemu-plugin/cosim_pcie_request.h" "$target_header"
+}
+
+setup_injection_executes_request_sync() {
+    local setup_body=$1
+    local setup_fixture project_fixture qemu_fixture target_header
+    local worktree_status_before worktree_status_after
+
+    setup_fixture=$(mktemp -d "$fixture_root/setup-request.XXXXXX")
+    project_fixture="$setup_fixture/project"
+    qemu_fixture="$setup_fixture/qemu"
+    populate_qemu_injection_project_fixture "$project_fixture"
+    mkdir -p "$qemu_fixture/hw/net" "$qemu_fixture/include/hw/net"
+    {
+        printf '#!/bin/bash\nset -euo pipefail\n'
+        printf 'info() { :; }\n'
+        printf '%s\n' "$setup_body"
+    } >"$setup_fixture/inject.sh"
+    worktree_status_before=$(git -C "$project_dir" status --porcelain=v1 \
+        --untracked-files=all) || return 1
+    if ! PROJECT_DIR="$project_fixture" QEMU_DIR="$qemu_fixture" \
+            bash "$setup_fixture/inject.sh"; then
+        return 1
+    fi
+    worktree_status_after=$(git -C "$project_dir" status --porcelain=v1 \
+        --untracked-files=all) || return 1
+    [[ "$worktree_status_before" == "$worktree_status_after" ]] || return 1
+    target_header="$qemu_fixture/include/hw/net/cosim_pcie_request.h"
+    [[ -f "$target_header" ]] || return 1
+    cmp -s "$project_fixture/qemu-plugin/cosim_pcie_request.h" "$target_header"
+}
+
+qemu_request_injection_contract_is_valid() {
+    local make_body=$1
+    local setup_body=$2
+    local header_path=${3:-$qemu_request_header}
+    local rc_path=${4:-$qemu_rc}
+
+    qemu_request_header_is_tracked "$header_path" &&
+        qemu_rc_depends_on_request_header "$rc_path" &&
+        qemu_device_executes_request_sync "$make_body" &&
+        setup_injection_executes_request_sync "$setup_body"
 }
 
 extract_unique_setup_qemu_injection_body() {
@@ -315,6 +439,77 @@ for sync_cmd in \
         exit 1
     fi
 done
+if ! qemu_request_injection_contract_is_valid \
+        "$qemu_device_body" "$setup_qemu_injection_body"; then
+    if ! qemu_request_header_is_tracked "$qemu_request_header"; then
+        echo "FAIL: qemu-plugin/cosim_pcie_request.h is not the tracked source header" >&2
+    elif ! qemu_rc_depends_on_request_header "$qemu_rc"; then
+        echo "FAIL: cpp dependencies do not contain active hw/net/cosim_pcie_request.h" >&2
+    elif ! qemu_device_executes_request_sync "$qemu_device_body"; then
+        echo "FAIL: isolated qemu-device execution does not copy matching cosim_pcie_request.h bytes" >&2
+    else
+        echo "FAIL: setup QEMU injection does not copy matching cosim_pcie_request.h bytes" >&2
+    fi
+    exit 1
+fi
+make_without_request=${qemu_device_body/"$make_request_sync_line"/}
+setup_without_request=${setup_qemu_injection_body/"$setup_request_sync_line"/}
+if [[ "$make_without_request" == "$qemu_device_body" ||
+      "$setup_without_request" == "$setup_qemu_injection_body" ]]; then
+    echo "FAIL: request-header deletion mutations could not be constructed" >&2
+    exit 1
+fi
+make_with_disabled_request=${qemu_device_body/"$make_request_sync_line"/$'ifeq (1,0)\n'"$make_request_sync_line"$'\nendif'}
+setup_with_disabled_request=${setup_qemu_injection_body/"$setup_request_sync_line"/$'        if false; then\n'"$setup_request_sync_line"$'\n        fi'}
+untracked_request_header="$fixture_root/untracked-cosim_pcie_request.h"
+commented_request_rc="$fixture_root/cosim_pcie_rc-request-block-comment.c"
+cp "$qemu_request_header" "$untracked_request_header"
+awk '
+    $0 == "#include \"hw/net/cosim_pcie_request.h\"" {
+        print "/*"
+        print
+        print "*/"
+        next
+    }
+    { print }
+' "$qemu_rc" >"$commented_request_rc"
+request_contract_false_greens=0
+if qemu_request_injection_contract_is_valid \
+        "$make_without_request" "$setup_qemu_injection_body"; then
+    echo "FAIL: request-header contract accepted a missing Make copy" >&2
+    request_contract_false_greens=$((request_contract_false_greens + 1))
+fi
+if qemu_request_injection_contract_is_valid \
+        "$qemu_device_body" "$setup_without_request"; then
+    echo "FAIL: request-header contract accepted a missing setup copy" >&2
+    request_contract_false_greens=$((request_contract_false_greens + 1))
+fi
+if qemu_request_injection_contract_is_valid \
+        "$make_with_disabled_request" "$setup_qemu_injection_body"; then
+    echo "FAIL: request-header contract accepted an ifeq-disabled Make copy" >&2
+    request_contract_false_greens=$((request_contract_false_greens + 1))
+fi
+if qemu_request_injection_contract_is_valid \
+        "$qemu_device_body" "$setup_with_disabled_request"; then
+    echo "FAIL: request-header contract accepted an if-false setup copy" >&2
+    request_contract_false_greens=$((request_contract_false_greens + 1))
+fi
+if qemu_request_injection_contract_is_valid \
+        "$qemu_device_body" "$setup_qemu_injection_body" \
+        "$untracked_request_header" "$qemu_rc"; then
+    echo "FAIL: request-header contract accepted an untracked source" >&2
+    request_contract_false_greens=$((request_contract_false_greens + 1))
+fi
+if qemu_request_injection_contract_is_valid \
+        "$qemu_device_body" "$setup_qemu_injection_body" \
+        "$qemu_request_header" "$commented_request_rc"; then
+    echo "FAIL: request-header contract accepted a block-comment include" >&2
+    request_contract_false_greens=$((request_contract_false_greens + 1))
+fi
+if ((request_contract_false_greens != 0)); then
+    echo "FAIL: request-header injection contract false greens: $request_contract_false_greens/6" >&2
+    exit 1
+fi
 if ! qemu_mmio_injection_contract_is_valid \
         "$qemu_device_body" "$setup_qemu_injection_body"; then
     if ! qemu_mmio_header_is_tracked "$qemu_mmio_header"; then

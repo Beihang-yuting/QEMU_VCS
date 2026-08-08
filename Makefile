@@ -133,6 +133,7 @@ qemu-device: bridge
 	@cp "$(PROJECT_DIR)/qemu-plugin/cosim_pcie_rc.c" "$(QEMU_SRC_DIR)/hw/net/cosim_pcie_rc.c"
 	@cp "$(PROJECT_DIR)/qemu-plugin/cosim_pcie_rc.h" "$(QEMU_SRC_DIR)/include/hw/net/cosim_pcie_rc.h"
 	@cp "$(PROJECT_DIR)/qemu-plugin/cosim_mmio_be.h" "$(QEMU_SRC_DIR)/include/hw/net/cosim_mmio_be.h"
+	@cp "$(PROJECT_DIR)/qemu-plugin/cosim_pcie_request.h" "$(QEMU_SRC_DIR)/include/hw/net/cosim_pcie_request.h"
 	@cp "$(PROJECT_DIR)/bridge/common/cosim_topology.h" "$(QEMU_SRC_DIR)/include/hw/net/cosim_topology.h"
 	ninja -C $(QEMU_BUILD) qemu-system-x86_64
 	@echo "[BUILD] $(QEMU_BUILD)/qemu-system-x86_64"

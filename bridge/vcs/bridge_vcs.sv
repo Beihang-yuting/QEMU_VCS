@@ -78,6 +78,8 @@ package cosim_bridge_pkg;
                                                           input int unsigned value);
     import "DPI-C" function int bridge_vcs_send_cpl_scalar(input int tag,
                                                             input int len);
+    import "DPI-C" function int bridge_vcs_send_cpl_scalar_status(
+        input int tag, input int len, input int status);
 
     import "DPI-C" function int bridge_vcs_dma_request(
         input int direction,
@@ -222,6 +224,8 @@ package cosim_bridge_pkg;
         input int rc, input int index, input int unsigned value);
     import "DPI-C" function int bridge_vcs_send_cpl_scalar_rc(
         input int rc, input int tag, input int len);
+    import "DPI-C" function int bridge_vcs_send_cpl_scalar_status_rc(
+        input int rc, input int tag, input int len, input int status);
     import "DPI-C" function void bridge_vcs_set_bar_base_rc(
         input int rc, input int idx, input longint unsigned base);
     import "DPI-C" function longint unsigned bridge_vcs_get_bar_base_rc(input int rc, input int idx);

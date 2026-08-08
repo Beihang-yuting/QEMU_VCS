@@ -30,8 +30,14 @@
 #include "cosim_transport.h"
 #include "irq_poller.h"
 #include "hw/net/cosim_mmio_be.h"
+#include "hw/net/cosim_pcie_request.h"
 
 /* ========== MMIO 操作 ========== */
+
+static uint16_t cosim_current_bdf(PCIDevice *dev)
+{
+    return cosim_pcie_bdf((uint8_t)pci_bus_num(pci_get_bus(dev)), dev->devfn);
+}
 
 /* A VCS/DUT round trip can consume seconds of host time while the vCPU is
  * blocked in a device callback. The guest executes no instructions during
@@ -105,7 +111,7 @@ static uint64_t cosim_mmio_do_read(CosimPCIeRC *s, uint64_t pcie_addr,
     req.len        = layout.wire_len;
     req.first_be   = layout.first_be;
     req.last_be    = layout.last_be;
-    req.target_bdf = target_bdf;
+    cosim_route_host_to_device(&req, target_bdf);
 
     cpl_entry_t cpl = {0};
     /* mmio_timeout_ms>0: 超时即返回 0xFFFFFFFF, guest 不死等无响应的 VCS。 */
@@ -117,6 +123,18 @@ static uint64_t cosim_mmio_do_read(CosimPCIeRC *s, uint64_t pcie_addr,
                       "cosim: MRd %s pcie=0x%lx bdf=0x%04x -> 0xFFFFFFFF\n",
                       ret == -2 ? "timeout" : "failed",
                       (unsigned long)pcie_addr, target_bdf);
+        return UINT64_MAX;
+    }
+
+    if (!cosim_cpl_status_is_success(cpl.status)) {
+        uint64_t error_count = ++s->mmio_cpl_error_count;
+        if (error_count <= 8 || error_count % 1024 == 0) {
+            qemu_log_mask(LOG_GUEST_ERROR,
+                          "cosim: MRd completion error status=%u pcie=0x%lx "
+                          "bdf=0x%04x count=%" PRIu64 " -> 0xFFFFFFFF\n",
+                          cpl.status, (unsigned long)pcie_addr, target_bdf,
+                          error_count);
+        }
         return UINT64_MAX;
     }
 
@@ -146,7 +164,7 @@ static void cosim_mmio_do_write(CosimPCIeRC *s, uint64_t pcie_addr,
     req.len        = layout.wire_len;
     req.first_be   = layout.first_be;
     req.last_be    = layout.last_be;
-    req.target_bdf = target_bdf;
+    cosim_route_host_to_device(&req, target_bdf);
     memcpy(req.data, layout.data, layout.wire_len);
 
     if (bridge_send_tlp_fire(ctx, &req) < 0) {
@@ -168,7 +186,8 @@ static uint64_t cosim_mmio_read(void *opaque, hwaddr addr, unsigned size)
                          ? bc->explicit_base
                          : pci_get_bar_addr(&bc->dev->parent_obj, bc->bar_index);
     uint64_t pcie_addr = bar_base + addr;
-    uint64_t val = cosim_mmio_do_read(s, pcie_addr, bc->target_bdf, size);
+    uint16_t target_bdf = cosim_current_bdf(PCI_DEVICE(bc->dev));
+    uint64_t val = cosim_mmio_do_read(s, pcie_addr, target_bdf, size);
     COSIM_DPRINTF(s, "MRd bar%d off=0x%04lx pcie=0x%lx val=0x%lx\n",
             bc->bar_index, (unsigned long)addr, (unsigned long)pcie_addr,
             (unsigned long)val);
@@ -188,7 +207,8 @@ static void cosim_mmio_write(void *opaque, hwaddr addr, uint64_t val,
                          ? bc->explicit_base
                          : pci_get_bar_addr(&bc->dev->parent_obj, bc->bar_index);
     uint64_t pcie_addr = bar_base + addr;
-    cosim_mmio_do_write(s, pcie_addr, bc->target_bdf, val, size);
+    uint16_t target_bdf = cosim_current_bdf(PCI_DEVICE(bc->dev));
+    cosim_mmio_do_write(s, pcie_addr, target_bdf, val, size);
     COSIM_DPRINTF(s, "MWr bar%d off=0x%04lx pcie=0x%lx val=0x%lx\n",
             bc->bar_index, (unsigned long)addr, (unsigned long)pcie_addr,
             (unsigned long)val);
@@ -724,8 +744,7 @@ static uint32_t cosim_config_read(PCIDevice *pci_dev, uint32_t address, int len)
             /* Route to this device's function: target_bdf = its PCIe BDF.
                Without it the VCS config_proxy (multi-function) cannot match
                the PF and returns 0xFFFFFFFF -> device never enumerates. */
-            probe_req.target_bdf   = (uint16_t)((bus << 8) | (dev << 3) | func);
-            probe_req.requester_id = probe_req.target_bdf;
+            cosim_route_host_to_device(&probe_req, cosim_current_bdf(pci_dev));
 
             cpl_entry_t probe_cpl = {0};
             int probe_ret = bridge_send_tlp_and_wait(ctx, &probe_req, &probe_cpl);
@@ -774,8 +793,7 @@ static uint32_t cosim_config_read(PCIDevice *pci_dev, uint32_t address, int len)
     req.type = TLP_CFGRD;
     req.addr = dword_addr;
     req.len = 4;
-    req.target_bdf   = (uint16_t)((bus << 8) | (dev << 3) | func);
-    req.requester_id = req.target_bdf;
+    cosim_route_host_to_device(&req, cosim_current_bdf(pci_dev));
 
     cpl_entry_t cpl = {0};
     int ret = bridge_send_tlp_and_wait(ctx, &req, &cpl);
@@ -833,8 +851,7 @@ static void cosim_config_write(PCIDevice *pci_dev, uint32_t address,
     req.type = TLP_CFGWR;
     req.addr = address;
     req.len = len;
-    req.target_bdf   = (uint16_t)((bus << 8) | (dev << 3) | func);
-    req.requester_id = req.target_bdf;
+    cosim_route_host_to_device(&req, cosim_current_bdf(pci_dev));
     for (int i = 0; i < len && i < COSIM_TLP_DATA_SIZE; i++) {
         req.data[i] = (data >> (i * 8)) & 0xFF;
     }
@@ -863,12 +880,14 @@ static void cosim_config_write(PCIDevice *pci_dev, uint32_t address,
 
 /* ========== 设备发现: 从 VCS EP 查询配置 ========== */
 
-static uint32_t cosim_cfgrd(bridge_ctx_t *ctx, uint32_t reg) {
+static uint32_t cosim_cfgrd(bridge_ctx_t *ctx, uint16_t target_bdf,
+                            uint32_t reg) {
     tlp_entry_t req = {0};
     req.type = TLP_CFGRD;
     req.addr = reg & ~3u;
     req.len  = 4;
     req.first_be = 0xF;
+    cosim_route_host_to_device(&req, target_bdf);
     cpl_entry_t cpl = {0};
     if (bridge_send_tlp_and_wait(ctx, &req, &cpl) < 0) return 0xFFFFFFFF;
     uint32_t dw = 0;
@@ -876,23 +895,26 @@ static uint32_t cosim_cfgrd(bridge_ctx_t *ctx, uint32_t reg) {
     return dw;
 }
 
-static void cosim_cfgwr(bridge_ctx_t *ctx, uint32_t reg, uint32_t data) {
+static void cosim_cfgwr(bridge_ctx_t *ctx, uint16_t target_bdf,
+                        uint32_t reg, uint32_t data) {
     tlp_entry_t req = {0};
     req.type = TLP_CFGWR;
     req.addr = reg;
     req.len  = 4;
     req.first_be = 0xF;
+    cosim_route_host_to_device(&req, target_bdf);
     for (int i = 0; i < 4; i++) req.data[i] = (data >> (i * 8)) & 0xFF;
     bridge_send_tlp_fire(ctx, &req);
 }
 
 /* BAR sizing: 写 0xFFFFFFFF → 读回 mask → 恢复 → 计算大小 */
-static uint32_t cosim_query_bar_size(bridge_ctx_t *ctx, int bar) {
+static uint32_t cosim_query_bar_size(bridge_ctx_t *ctx, uint16_t target_bdf,
+                                     int bar) {
     uint32_t reg = 0x10 + bar * 4;  /* PCI_BASE_ADDRESS_0 = 0x10 */
-    uint32_t orig = cosim_cfgrd(ctx, reg);
-    cosim_cfgwr(ctx, reg, 0xFFFFFFFF);
-    uint32_t mask = cosim_cfgrd(ctx, reg);
-    cosim_cfgwr(ctx, reg, orig);  /* 恢复 */
+    uint32_t orig = cosim_cfgrd(ctx, target_bdf, reg);
+    cosim_cfgwr(ctx, target_bdf, reg, 0xFFFFFFFF);
+    uint32_t mask = cosim_cfgrd(ctx, target_bdf, reg);
+    cosim_cfgwr(ctx, target_bdf, reg, orig);  /* 恢复 */
     if (mask == 0 || mask == 0xFFFFFFFF) return 0;
     /* 清除低 4 位 (type/prefetch bits) */
     mask &= ~0xFu;
@@ -901,15 +923,16 @@ static uint32_t cosim_query_bar_size(bridge_ctx_t *ctx, int bar) {
 
 /* 遍历 capability 链找 MSI */
 static void cosim_discover_caps(CosimPCIeRC *s, bridge_ctx_t *ctx,
+                                 uint16_t target_bdf,
                                  int *msi_offset, int *msi_vectors) {
     *msi_offset = -1;
     *msi_vectors = 0;
-    uint32_t status_cmd = cosim_cfgrd(ctx, 0x04);
+    uint32_t status_cmd = cosim_cfgrd(ctx, target_bdf, 0x04);
     if (!((status_cmd >> 20) & 1)) return;  /* CAP_LIST bit in Status */
-    uint8_t ptr = cosim_cfgrd(ctx, 0x34) & 0xFC;
+    uint8_t ptr = cosim_cfgrd(ctx, target_bdf, 0x34) & 0xFC;
     int safety = 48;  /* 防止无限循环 */
     while (ptr && safety-- > 0) {
-        uint32_t dw = cosim_cfgrd(ctx, ptr);
+        uint32_t dw = cosim_cfgrd(ctx, target_bdf, ptr);
         uint8_t cap_id = dw & 0xFF;
         if (cap_id == 0x05) {  /* PCI_CAP_ID_MSI */
             *msi_offset = ptr;
@@ -1050,8 +1073,7 @@ static uint32_t cosim_rc_vf_config_read(PCIDevice *pci_dev, uint32_t address, in
     req.addr = address & ~3u;
     req.len = 4;
     req.first_be = 0xF;
-    req.target_bdf   = vf->vf_bdf;
-    req.requester_id = vf->vf_bdf;
+    cosim_route_host_to_device(&req, vf->vf_bdf);
 
     cpl_entry_t cpl = {0};
     if (bridge_send_tlp_and_wait(ctx, &req, &cpl) < 0)
@@ -1081,8 +1103,7 @@ static void cosim_rc_vf_config_write(PCIDevice *pci_dev, uint32_t address,
     req.type = TLP_CFGWR;
     req.addr = address;
     req.len = len;
-    req.target_bdf   = vf->vf_bdf;
-    req.requester_id = vf->vf_bdf;
+    cosim_route_host_to_device(&req, vf->vf_bdf);
     for (int i = 0; i < len && i < COSIM_TLP_DATA_SIZE; i++)
         req.data[i] = (data >> (i * 8)) & 0xFF;
     bridge_send_tlp_fire(ctx, &req);
@@ -1134,16 +1155,13 @@ static void cosim_vf_invalidate_atc(CosimPCIeRC *s)
     if (!ctx || !ctx->transport || !s->vf_iommu_mr || s->num_vf_iommu <= 0)
         return;
     CosimVfIommu *ima = (CosimVfIommu *)s->vf_iommu_mr;
-    uint16_t pf_bdf = (uint16_t)(pci_bus_num(pci_get_bus(PCI_DEVICE(s))) << 8 |
-                                 PCI_DEVICE(s)->devfn);
     for (int i = 0; i < s->num_vf_iommu; i++) {
         tlp_entry_t req = {0};
         cpl_entry_t cpl = {0};
         req.type         = TLP_ATS_INVAL;
         req.addr         = ima[i].win_base;
         req.len          = 1;
-        req.requester_id = pf_bdf;
-        req.target_bdf   = ima[i].vf_bdf;
+        cosim_route_host_to_device(&req, ima[i].vf_bdf);
         int r = bridge_send_tlp_and_wait_timed(ctx, &req, &cpl, 5000);
         qemu_log("cosim: ATS invalidate VF 0x%04x win=0x%lx -> %s\n",
                  ima[i].vf_bdf, (unsigned long)ima[i].win_base,
@@ -1519,7 +1537,8 @@ static void cosim_pcie_rc_realize(PCIDevice *pci_dev, Error **errp)
      * It remains single-PF BAR0 discovery only; cosim topology profiles never
      * enter this compatibility path. */
     if (!s->topology_valid) {
-        uint32_t bar0_size = cosim_query_bar_size(ctx, 0);
+        uint32_t bar0_size = cosim_query_bar_size(
+            ctx, cosim_current_bdf(pci_dev), 0);
         if (bar0_size == 0) bar0_size = 64 * 1024;
         COSIM_DPRINTF(s, "legacy realize BAR0 size: %u bytes (0x%x)\n",
                 bar0_size, bar0_size);
@@ -1536,7 +1555,8 @@ static void cosim_pcie_rc_realize(PCIDevice *pci_dev, Error **errp)
 
     /* Capability 链遍历 — 找 MSI cap */
     int msi_offset = -1, msi_vectors = 0;
-    cosim_discover_caps(s, ctx, &msi_offset, &msi_vectors);
+    cosim_discover_caps(s, ctx, cosim_current_bdf(pci_dev),
+                        &msi_offset, &msi_vectors);
 
     /* Enable bus mastering. In config-bypass mode the guest's PCI_COMMAND
      * writes go to VCS, so QEMU's shadow command never gets MASTER set and the

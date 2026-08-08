@@ -1,6 +1,7 @@
 #ifndef COSIM_TYPES_H
 #define COSIM_TYPES_H
 
+#include <stdbool.h>
 #include <stdint.h>
 #include "compat_atomic.h"
 
@@ -103,6 +104,26 @@ typedef struct {
 } __attribute__((packed)) tlp_entry_t;
 
 _Static_assert(sizeof(tlp_entry_t) == 112, "tlp_entry_t must be 112 bytes");
+
+typedef enum {
+    COSIM_CPL_STATUS_SC  = 0,
+    COSIM_CPL_STATUS_UR  = 1,
+    COSIM_CPL_STATUS_CRS = 2,
+    COSIM_CPL_STATUS_CA  = 4,
+} cosim_cpl_status_t;
+
+static inline bool cosim_cpl_status_is_valid(uint8_t status)
+{
+    return status == COSIM_CPL_STATUS_SC ||
+           status == COSIM_CPL_STATUS_UR ||
+           status == COSIM_CPL_STATUS_CRS ||
+           status == COSIM_CPL_STATUS_CA;
+}
+
+static inline bool cosim_cpl_status_is_success(uint8_t status)
+{
+    return status == COSIM_CPL_STATUS_SC;
+}
 
 typedef struct {
     uint8_t   type;

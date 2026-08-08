@@ -2071,6 +2071,7 @@ if [ "$NEED_QEMU" = true ]; then
         cp "${PROJECT_DIR}/qemu-plugin/cosim_pcie_rc.c" "${QEMU_DIR}/hw/net/"
         cp "${PROJECT_DIR}/qemu-plugin/cosim_pcie_rc.h" "${QEMU_DIR}/include/hw/net/"
         cp "${PROJECT_DIR}/qemu-plugin/cosim_mmio_be.h" "${QEMU_DIR}/include/hw/net/"
+        cp "${PROJECT_DIR}/qemu-plugin/cosim_pcie_request.h" "${QEMU_DIR}/include/hw/net/"
 
         # 共享头文件（topology 等）
         cp "${PROJECT_DIR}/bridge/common/cosim_topology.h" "${QEMU_DIR}/include/hw/net/"
