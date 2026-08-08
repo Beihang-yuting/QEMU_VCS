@@ -47,6 +47,8 @@ class pcie_tl_bar_state_proxy extends pcie_tl_config_proxy;
     int last_lifecycle_pf_index;
     int last_lifecycle_num_vfs;
     pcie_tl_sriov_cap last_lifecycle_sc;
+    bit last_lifecycle_serialized_valid;
+    bit [15:0] last_lifecycle_serialized_control;
 
     function new(string name = "pcie_tl_bar_state_proxy",
                  uvm_component parent = null);
@@ -64,6 +66,12 @@ class pcie_tl_bar_state_proxy extends pcie_tl_config_proxy;
         last_lifecycle_pf_index = pf_index;
         last_lifecycle_num_vfs = num_vfs;
         last_lifecycle_sc      = sc;
+        last_lifecycle_serialized_valid =
+            sc != null && sc.data.size() > 5;
+        if (last_lifecycle_serialized_valid)
+            last_lifecycle_serialized_control = {sc.data[5], sc.data[4]};
+        else
+            last_lifecycle_serialized_control = '0;
         if (enable)
             vf_enable_notifications++;
         else
@@ -415,7 +423,7 @@ class pcie_tl_bar_state_test extends uvm_test;
                        "oversized NumVFs was not clamped into state/raw image")
         expect_generation("accepted oversized NumVFs",
                           mgr.config_generation, g0 + 1);
-        void'(proxy.handle_cfg_write_bdf(pf_bdf, sriov_dw + 2, 32'h0000_0011, 0, 2));
+        void'(proxy.handle_cfg_write_bdf(pf_bdf, sriov_dw + 2, 32'h0000_001b, 0, 2));
         cfg_dw = mgr.cfg_read(pf_bdf, (sriov_dw + 4) << 2);
         if (!mgr.sriov_caps[0].vf_enable || !mgr.sriov_caps[0].vf_mse ||
             mgr.sriov_caps[0].num_vfs != 16 ||
@@ -429,7 +437,17 @@ class pcie_tl_bar_state_test extends uvm_test;
             !proxy.last_lifecycle_enable ||
             proxy.last_lifecycle_pf_index != 0 ||
             proxy.last_lifecycle_num_vfs != 16 ||
-            proxy.last_lifecycle_sc != mgr.sriov_caps[0])
+            proxy.last_lifecycle_sc != mgr.sriov_caps[0] ||
+            !proxy.last_lifecycle_serialized_valid ||
+            proxy.last_lifecycle_serialized_control != 16'h001b ||
+            proxy.last_lifecycle_serialized_control[0] !=
+                proxy.last_lifecycle_sc.vf_enable ||
+            proxy.last_lifecycle_serialized_control[1] !=
+                proxy.last_lifecycle_sc.vf_migration_enable ||
+            proxy.last_lifecycle_serialized_control[3] !=
+                proxy.last_lifecycle_sc.ari_capable ||
+            proxy.last_lifecycle_serialized_control[4] !=
+                proxy.last_lifecycle_sc.vf_mse)
             `uvm_error("BAR_STATE", "normal VFE enable lifecycle payload mismatch")
         expect_vf_lut("SR-IOV enabled", 16);
 
@@ -437,7 +455,7 @@ class pcie_tl_bar_state_test extends uvm_test;
         disable_notifications = proxy.vf_disable_notifications;
         g0 = mgr.config_generation;
         void'(proxy.handle_cfg_write_bdf(pf_bdf, sriov_dw + 4, 32'd16, 0, 2));
-        void'(proxy.handle_cfg_write_bdf(pf_bdf, sriov_dw + 2, 32'h0000_0011, 0, 2));
+        void'(proxy.handle_cfg_write_bdf(pf_bdf, sriov_dw + 2, 32'h0000_001b, 0, 2));
         expect_generation("repeated NumVFs/Control", mgr.config_generation, g0);
         if (proxy.vf_enable_notifications != enable_notifications ||
             proxy.vf_disable_notifications != disable_notifications)
@@ -455,19 +473,19 @@ class pcie_tl_bar_state_test extends uvm_test;
         expect_generation("active NumVFs write rejected", mgr.config_generation, g0);
 
         g0 = mgr.config_generation;
-        void'(proxy.handle_cfg_write_bdf(pf_bdf, sriov_dw + 2, 32'h0000_0001, 0, 2));
+        void'(proxy.handle_cfg_write_bdf(pf_bdf, sriov_dw + 2, 32'h0000_000b, 0, 2));
         if (!mgr.sriov_caps[0].vf_enable || mgr.sriov_caps[0].vf_mse ||
             mgr.config_generation != g0 + 1)
             `uvm_error("BAR_STATE", "VF MSE clear edge mismatch")
         expect_vf_lut("VF MSE clear preserves enabled VFs", 16);
-        void'(proxy.handle_cfg_write_bdf(pf_bdf, sriov_dw + 2, 32'h0000_0001, 0, 2));
+        void'(proxy.handle_cfg_write_bdf(pf_bdf, sriov_dw + 2, 32'h0000_000b, 0, 2));
         expect_generation("repeated VF MSE clear", mgr.config_generation, g0 + 1);
 
         g0 = mgr.config_generation;
         enable_notifications = proxy.vf_enable_notifications;
         disable_notifications = proxy.vf_disable_notifications;
         lifecycle_notifications = proxy.vf_lifecycle_notifications;
-        void'(proxy.handle_cfg_write_bdf(pf_bdf, sriov_dw + 2, 32'h0000_0000, 0, 2));
+        void'(proxy.handle_cfg_write_bdf(pf_bdf, sriov_dw + 2, 32'h0000_000a, 0, 2));
         if (mgr.sriov_caps[0].vf_enable || mgr.sriov_caps[0].vf_mse ||
             mgr.sriov_caps[0].num_vfs != 16 ||
             mgr.config_generation != g0 + 1)
@@ -479,7 +497,17 @@ class pcie_tl_bar_state_test extends uvm_test;
             proxy.last_lifecycle_enable ||
             proxy.last_lifecycle_pf_index != 0 ||
             proxy.last_lifecycle_num_vfs != 16 ||
-            proxy.last_lifecycle_sc != mgr.sriov_caps[0])
+            proxy.last_lifecycle_sc != mgr.sriov_caps[0] ||
+            !proxy.last_lifecycle_serialized_valid ||
+            proxy.last_lifecycle_serialized_control != 16'h000a ||
+            proxy.last_lifecycle_serialized_control[0] !=
+                proxy.last_lifecycle_sc.vf_enable ||
+            proxy.last_lifecycle_serialized_control[1] !=
+                proxy.last_lifecycle_sc.vf_migration_enable ||
+            proxy.last_lifecycle_serialized_control[3] !=
+                proxy.last_lifecycle_sc.ari_capable ||
+            proxy.last_lifecycle_serialized_control[4] !=
+                proxy.last_lifecycle_sc.vf_mse)
             `uvm_error("BAR_STATE", "normal VFE disable lifecycle payload mismatch")
         expect_vf_lut("VFE clear", 0);
         enable_notifications = proxy.vf_enable_notifications;

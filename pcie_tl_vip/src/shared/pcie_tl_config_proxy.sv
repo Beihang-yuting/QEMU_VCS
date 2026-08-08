@@ -574,35 +574,40 @@ class pcie_tl_config_proxy extends uvm_component;
             bit old_vf_mse = sc.vf_mse;
             bit vf_en = merged_dw[0];
             bit vf_mse = merged_dw[4];
-            int n;
+            bit notify_pending;
+            bit notify_enable;
+            int notify_num_vfs;
 
             sc.vf_migration_enable = merged_dw[1];
             sc.ari_capable = merged_dw[3];
             sc.vf_mse = vf_mse;
             if (vf_en && !old_vf_en) begin
                 func_mgr.enable_vfs(ctx.pf_index, int'(sc.num_vfs), 0);
-                n = int'(sc.num_vfs);
+                notify_num_vfs = int'(sc.num_vfs);
                 `uvm_info("CFG_PROXY", $sformatf("SR-IOV VF Enable BDF=0x%04h num_vfs=%0d",
-                    target_bdf, n), UVM_MEDIUM)
-                if (n > 0)
-                    notify_vf_lifecycle(1, ctx.pf_index, n, sc);
+                    target_bdf, notify_num_vfs), UVM_MEDIUM)
+                notify_pending = notify_num_vfs > 0;
+                notify_enable = 1;
             end else if (!vf_en && old_vf_en) begin
                 // Only fire the disable path on a real enabled->disabled edge.
                 // The kernel writes SR-IOV Control (VFE=0) many times during
                 // enumeration (ARIHierarchy/MSE setup); firing VF_EVENT/VF_CONFIG
                 // on those spurious writes desyncs the ctrl_fd stream.
                 func_mgr.disable_vfs(ctx.pf_index, 0);
-                n = int'(sc.num_vfs);
+                notify_num_vfs = int'(sc.num_vfs);
                 // An n=0 VFE edge is maintained internally but never emitted
                 // an enable event, so it must not emit an unmatched disable.
-                if (n > 0)
-                    notify_vf_lifecycle(0, ctx.pf_index, n, sc);
+                notify_pending = notify_num_vfs > 0;
+                notify_enable = 0;
             end else
                 sc.vf_enable = vf_en;
             if (old_vf_mse != vf_mse)
                 func_mgr.mark_routing_dirty($sformatf(
                     "BDF %04h SR-IOV VF MSE", target_bdf));
             sc.build_data();
+            if (notify_pending)
+                notify_vf_lifecycle(notify_enable, ctx.pf_index,
+                                    notify_num_vfs, sc);
         end
 
         // SR-IOV VF BAR descriptors have the same paired BAR semantics as
