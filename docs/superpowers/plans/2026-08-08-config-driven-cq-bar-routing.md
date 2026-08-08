@@ -242,7 +242,7 @@ if (!mgr.pf_ctx[0].memory_space_en ||
     !mgr.pf_ctx[0].bar_enable[0] ||
     !mgr.pf_ctx[0].bar_enable[2] ||
     !mgr.pf_ctx[0].bar_enable[4] ||
-    mgr.config_generation != g0 + 2)
+    mgr.config_generation != g0 + 1)
     `uvm_error("BAR_STATE", "Command.MSE/BME was not mirrored exactly")
 
 g0 = mgr.config_generation;
@@ -258,7 +258,7 @@ if (mgr.config_generation != g0)
 void'(proxy.handle_cfg_write_bdf(pf_bdf, 6, 32'h0800_000c, 0, 4));
 void'(proxy.handle_cfg_write_bdf(pf_bdf, 7, 32'h0000_0009, 0, 4));
 if (mgr.pf_ctx[0].bar_base[2] != 64'h0000_0009_0800_0000 ||
-    mgr.config_generation != g0 + 1)
+    mgr.config_generation != g0 + 2)
     `uvm_error("BAR_STATE", "paired BAR2 assignment/generation mismatch")
 
 sriov_dw = int'(mgr.sriov_caps[0].offset >> 2);
@@ -277,6 +277,10 @@ if (!mgr.bind_runtime_pf_base(16'h0200) ||
 ~~~
 
 Add the test to both filelists.
+
+The generation deltas are intentional: one Command write creates one MSE
+edge, while programming both low and high DWORDs of a 64-bit BAR creates two
+successive canonical-base changes. BME-only changes do not affect routing.
 
 - [ ] **Step 2: Run red**
 
