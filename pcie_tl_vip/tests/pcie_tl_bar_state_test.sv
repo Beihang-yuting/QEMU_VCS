@@ -1,0 +1,276 @@
+import uvm_pkg::*;
+import pcie_tl_pkg::*;
+import pcie_tl_device_profile_pkg::*;
+`include "uvm_macros.svh"
+
+class pcie_tl_bar_state_test extends uvm_test;
+    `uvm_component_utils(pcie_tl_bar_state_test)
+
+    pcie_tl_func_manager mgr;
+    pcie_tl_config_proxy proxy;
+
+    function new(string name = "pcie_tl_bar_state_test",
+                 uvm_component parent = null);
+        super.new(name, parent);
+    endfunction
+
+    function void build_phase(uvm_phase phase);
+        super.build_phase(phase);
+        proxy = pcie_tl_config_proxy::type_id::create("proxy", this);
+    endfunction
+
+    function void expect_generation(
+        string label,
+        longint unsigned actual,
+        longint unsigned expected
+    );
+        if (actual != expected)
+            `uvm_error("BAR_STATE", $sformatf(
+                "%s: generation=%0d expected=%0d", label, actual, expected))
+    endfunction
+
+    function void expect_owner_bar_enable(
+        string label,
+        pcie_tl_func_context ctx,
+        bit expected
+    );
+        for (int bar = 0; bar < 6; bar++) begin
+            bit owner_enabled = expected && ctx.bar_owner[bar] == bar &&
+                                ctx.bar_size[bar] != 0;
+            if (ctx.bar_enable[bar] != owner_enabled)
+                `uvm_error("BAR_STATE", $sformatf(
+                    "%s: BAR%0d enable=%0d expected=%0d owner=%0d size=%0h",
+                    label, bar, ctx.bar_enable[bar], owner_enabled,
+                    ctx.bar_owner[bar], ctx.bar_size[bar]))
+        end
+        if (ctx.bar_enable[1] || ctx.bar_enable[3] || ctx.bar_enable[5])
+            `uvm_error("BAR_STATE", $sformatf(
+                "%s: upper BAR slots became independently enabled", label))
+    endfunction
+
+    function void expect_vf_lut(string label, int enabled_count);
+        for (int vf = 0; vf < mgr.max_vfs_per_pf; vf++) begin
+            bit should_enable = vf < enabled_count;
+            pcie_tl_func_context lut_ctx =
+                mgr.lookup_by_bdf(mgr.vf_ctx[0][vf].bdf);
+            bit lut_matches = lut_ctx == mgr.vf_ctx[0][vf];
+            if (mgr.vf_ctx[0][vf].enabled != should_enable ||
+                (should_enable && !lut_matches) ||
+                (!should_enable && lut_ctx != null))
+                `uvm_error("BAR_STATE", $sformatf(
+                    "%s: VF%0d enabled=%0d lut_matches=%0d expected=%0d",
+                    label, vf, mgr.vf_ctx[0][vf].enabled, lut_matches,
+                    should_enable))
+        end
+    endfunction
+
+    task run_phase(uvm_phase phase);
+        bit [15:0] pf_bdf;
+        int sriov_dw;
+        longint unsigned g0;
+        bit [31:0] cfg_dw;
+
+        phase.raise_objection(this);
+
+        mgr = pcie_tl_func_manager::type_id::create("mgr");
+        mgr.cfg_profile = PCIE_CFG_PROFILE_DPU_20F9_501X;
+        mgr.build_topology(0, 1, 16, 16'h20f9, 16'h5011, 16'h8689);
+        proxy.func_mgr = mgr;
+        proxy.multi_function_mode = 1;
+        proxy.bypass_enable = 1;
+        pf_bdf = mgr.pf_ctx[0].bdf;
+
+        // One Command write can change MSE and BME together, but only the MSE
+        // edge invalidates Host-to-BAR routing.
+        g0 = mgr.config_generation;
+        void'(proxy.handle_cfg_write_bdf(pf_bdf, 1, 32'h0000_0006, 0, 4));
+        if (!mgr.pf_ctx[0].memory_space_en ||
+            !mgr.pf_ctx[0].bus_master_en ||
+            !mgr.pf_ctx[0].bar_enable[0] ||
+            !mgr.pf_ctx[0].bar_enable[2] ||
+            !mgr.pf_ctx[0].bar_enable[4] ||
+            mgr.config_generation != g0 + 1)
+            `uvm_error("BAR_STATE", "Command.MSE/BME was not mirrored exactly")
+        expect_owner_bar_enable("Command.MSE set", mgr.pf_ctx[0], 1'b1);
+
+        g0 = mgr.config_generation;
+        void'(proxy.handle_cfg_write_bdf(pf_bdf, 1, 32'h0000_0006, 0, 4));
+        expect_generation("repeated Command 0x6", mgr.config_generation, g0);
+
+        g0 = mgr.config_generation;
+        void'(proxy.handle_cfg_write_bdf(pf_bdf, 1, 32'h0000_0002, 0, 4));
+        if (mgr.pf_ctx[0].bus_master_en || mgr.config_generation != g0)
+            `uvm_error("BAR_STATE", "BME-only change must not invalidate BAR routing")
+        void'(proxy.handle_cfg_write_bdf(pf_bdf, 1, 32'h0000_0002, 0, 4));
+        expect_generation("repeated Command 0x2", mgr.config_generation, g0);
+
+        // A packed write to the upper Command byte must preserve the MSE/BME
+        // bits in byte zero and therefore remain a routing no-op.
+        void'(proxy.handle_cfg_write_bdf(pf_bdf, 1, 32'h0000_00ff, 1, 1));
+        if (!mgr.pf_ctx[0].memory_space_en || mgr.pf_ctx[0].bus_master_en)
+            `uvm_error("BAR_STATE", "partial Command byte write corrupted MSE/BME")
+        expect_generation("upper Command byte write", mgr.config_generation, g0);
+
+        // A sizing probe changes only the transient sizing response. Each
+        // effective low/high assignment changes the one canonical 64-bit base.
+        g0 = mgr.config_generation;
+        void'(proxy.handle_cfg_write_bdf(pf_bdf, 6, 32'hffff_ffff, 0, 4));
+        if (mgr.config_generation != g0)
+            `uvm_error("BAR_STATE", "BAR sizing write changed the active generation")
+
+        void'(proxy.handle_cfg_write_bdf(pf_bdf, 6, 32'h0800_000c, 0, 4));
+        void'(proxy.handle_cfg_write_bdf(pf_bdf, 7, 32'h0000_0009, 0, 4));
+        if (mgr.pf_ctx[0].bar_base[2] != 64'h0000_0009_0800_0000 ||
+            mgr.config_generation != g0 + 2)
+            `uvm_error("BAR_STATE", "paired BAR2 assignment/generation mismatch")
+        g0 = mgr.config_generation;
+        void'(proxy.handle_cfg_write_bdf(pf_bdf, 6, 32'h0800_000c, 0, 4));
+        void'(proxy.handle_cfg_write_bdf(pf_bdf, 7, 32'h0000_0009, 0, 4));
+        expect_generation("repeated PF BAR2 pair", mgr.config_generation, g0);
+
+        // Clearing MSE disables all owner apertures once; re-setting it enables
+        // only the owner slots once. Upper halves never route independently.
+        g0 = mgr.config_generation;
+        void'(proxy.handle_cfg_write_bdf(pf_bdf, 1, 32'h0000_0000, 0, 1));
+        if (mgr.pf_ctx[0].memory_space_en || mgr.config_generation != g0 + 1)
+            `uvm_error("BAR_STATE", "Command.MSE clear edge mismatch")
+        expect_owner_bar_enable("Command.MSE clear", mgr.pf_ctx[0], 1'b0);
+        void'(proxy.handle_cfg_write_bdf(pf_bdf, 1, 32'h0000_0000, 0, 1));
+        expect_generation("repeated Command.MSE clear", mgr.config_generation, g0 + 1);
+
+        g0 = mgr.config_generation;
+        void'(proxy.handle_cfg_write_bdf(pf_bdf, 1, 32'h0000_0002, 0, 1));
+        if (!mgr.pf_ctx[0].memory_space_en || mgr.config_generation != g0 + 1)
+            `uvm_error("BAR_STATE", "Command.MSE set edge mismatch")
+        expect_owner_bar_enable("Command.MSE re-set", mgr.pf_ctx[0], 1'b1);
+        void'(proxy.handle_cfg_write_bdf(pf_bdf, 1, 32'h0000_0002, 0, 1));
+        expect_generation("repeated Command.MSE set", mgr.config_generation, g0 + 1);
+
+        sriov_dw = int'(mgr.sriov_caps[0].offset >> 2);
+
+        // SR-IOV VF BARs use the same canonical paired-base and sizing rules.
+        g0 = mgr.config_generation;
+        void'(proxy.handle_cfg_write_bdf(
+            pf_bdf, sriov_dw + 9, 32'hffff_ffff, 0, 4));
+        expect_generation("VF BAR sizing", mgr.config_generation, g0);
+        void'(proxy.handle_cfg_write_bdf(
+            pf_bdf, sriov_dw + 9, 32'h1000_000c, 0, 4));
+        void'(proxy.handle_cfg_write_bdf(
+            pf_bdf, sriov_dw + 10, 32'h0000_000a, 0, 4));
+        if (mgr.sriov_caps[0].vf_bar[0] != 64'h0000_000a_1000_0000 ||
+            mgr.config_generation != g0 + 2)
+            `uvm_error("BAR_STATE", "paired VF BAR0 assignment/generation mismatch")
+        g0 = mgr.config_generation;
+        void'(proxy.handle_cfg_write_bdf(
+            pf_bdf, sriov_dw + 9, 32'h1000_000c, 0, 4));
+        void'(proxy.handle_cfg_write_bdf(
+            pf_bdf, sriov_dw + 10, 32'h0000_000a, 0, 4));
+        expect_generation("repeated VF BAR0 pair", mgr.config_generation, g0);
+
+        // NumVFs, VFE, and VF MSE are three independent route-state edges.
+        g0 = mgr.config_generation;
+        void'(proxy.handle_cfg_write_bdf(pf_bdf, sriov_dw + 4, 32'd16, 0, 2));
+        void'(proxy.handle_cfg_write_bdf(pf_bdf, sriov_dw + 2, 32'h0000_0011, 0, 2));
+        if (!mgr.sriov_caps[0].vf_enable || !mgr.sriov_caps[0].vf_mse ||
+            mgr.sriov_caps[0].num_vfs != 16 ||
+            mgr.config_generation != g0 + 3)
+            `uvm_error("BAR_STATE", "SR-IOV state was not mirrored")
+        expect_vf_lut("SR-IOV enabled", 16);
+
+        g0 = mgr.config_generation;
+        void'(proxy.handle_cfg_write_bdf(pf_bdf, sriov_dw + 4, 32'd16, 0, 2));
+        void'(proxy.handle_cfg_write_bdf(pf_bdf, sriov_dw + 2, 32'h0000_0011, 0, 2));
+        expect_generation("repeated NumVFs/Control", mgr.config_generation, g0);
+
+        // NumVFs is programmed before VFE. Once VFE is active, reject an
+        // attempted count change so the register, enabled contexts, LUT, and
+        // generation cannot diverge.
+        g0 = mgr.config_generation;
+        void'(proxy.handle_cfg_write_bdf(pf_bdf, sriov_dw + 4, 32'd8, 0, 2));
+        cfg_dw = mgr.cfg_read(pf_bdf, (sriov_dw + 4) << 2);
+        if (mgr.sriov_caps[0].num_vfs != 16 || cfg_dw[15:0] != 16)
+            `uvm_error("BAR_STATE", "active NumVFs write was not rejected atomically")
+        expect_vf_lut("active NumVFs write rejected", 16);
+        expect_generation("active NumVFs write rejected", mgr.config_generation, g0);
+
+        g0 = mgr.config_generation;
+        void'(proxy.handle_cfg_write_bdf(pf_bdf, sriov_dw + 2, 32'h0000_0001, 0, 2));
+        if (!mgr.sriov_caps[0].vf_enable || mgr.sriov_caps[0].vf_mse ||
+            mgr.config_generation != g0 + 1)
+            `uvm_error("BAR_STATE", "VF MSE clear edge mismatch")
+        expect_vf_lut("VF MSE clear preserves enabled VFs", 16);
+        void'(proxy.handle_cfg_write_bdf(pf_bdf, sriov_dw + 2, 32'h0000_0001, 0, 2));
+        expect_generation("repeated VF MSE clear", mgr.config_generation, g0 + 1);
+
+        g0 = mgr.config_generation;
+        void'(proxy.handle_cfg_write_bdf(pf_bdf, sriov_dw + 2, 32'h0000_0000, 0, 2));
+        if (mgr.sriov_caps[0].vf_enable || mgr.sriov_caps[0].vf_mse ||
+            mgr.sriov_caps[0].num_vfs != 16 ||
+            mgr.config_generation != g0 + 1)
+            `uvm_error("BAR_STATE", "VFE clear edge/state mismatch")
+        expect_vf_lut("VFE clear", 0);
+        void'(proxy.handle_cfg_write_bdf(pf_bdf, sriov_dw + 2, 32'h0000_0000, 0, 2));
+        expect_generation("repeated VFE clear", mgr.config_generation, g0 + 1);
+
+        g0 = mgr.config_generation;
+        void'(proxy.handle_cfg_write_bdf(pf_bdf, sriov_dw + 2, 32'h0000_0011, 0, 2));
+        if (!mgr.sriov_caps[0].vf_enable || !mgr.sriov_caps[0].vf_mse ||
+            mgr.config_generation != g0 + 2)
+            `uvm_error("BAR_STATE", "combined VFE/VF MSE set edge mismatch")
+        expect_vf_lut("VFE/VF MSE re-enabled", 16);
+
+        g0 = mgr.config_generation;
+        void'(proxy.handle_cfg_write_bdf(pf_bdf, sriov_dw + 2, 32'h0000_0000, 0, 2));
+        if (mgr.sriov_caps[0].vf_enable || mgr.sriov_caps[0].vf_mse ||
+            mgr.config_generation != g0 + 2)
+            `uvm_error("BAR_STATE", "combined VFE/VF MSE clear edge mismatch")
+        expect_vf_lut("VFE/VF MSE disabled", 0);
+        void'(proxy.handle_cfg_write_bdf(pf_bdf, sriov_dw + 2, 32'h0000_0000, 0, 2));
+        expect_generation("repeated disabled Control", mgr.config_generation, g0 + 2);
+
+        // A zero-count VFE edge is still maintained state, but it enables no
+        // function and leaves no LUT entry. Repeated writes remain no-ops.
+        g0 = mgr.config_generation;
+        void'(proxy.handle_cfg_write_bdf(pf_bdf, sriov_dw + 4, 32'd0, 0, 2));
+        void'(proxy.handle_cfg_write_bdf(pf_bdf, sriov_dw + 2, 32'h0000_0001, 0, 2));
+        if (!mgr.sriov_caps[0].vf_enable || mgr.sriov_caps[0].num_vfs != 0 ||
+            mgr.config_generation != g0 + 2)
+            `uvm_error("BAR_STATE", "zero-NumVFs VFE set edge mismatch")
+        expect_vf_lut("zero-NumVFs VFE set", 0);
+        void'(proxy.handle_cfg_write_bdf(pf_bdf, sriov_dw + 2, 32'h0000_0001, 0, 2));
+        expect_generation("repeated zero-NumVFs VFE set",
+                          mgr.config_generation, g0 + 2);
+        void'(proxy.handle_cfg_write_bdf(pf_bdf, sriov_dw + 2, 32'h0000_0000, 0, 2));
+        expect_generation("zero-NumVFs VFE clear",
+                          mgr.config_generation, g0 + 3);
+        expect_vf_lut("zero-NumVFs VFE clear", 0);
+
+        // Leave VFs enabled across runtime rekey and then reuse this manager;
+        // build() must discard every old VF LUT entry while resetting the
+        // routing generation.
+        g0 = mgr.config_generation;
+        void'(proxy.handle_cfg_write_bdf(pf_bdf, sriov_dw + 4, 32'd16, 0, 2));
+        void'(proxy.handle_cfg_write_bdf(pf_bdf, sriov_dw + 2, 32'h0000_0001, 0, 2));
+        if (mgr.config_generation != g0 + 2)
+            `uvm_error("BAR_STATE", "VF setup before rebuild edge mismatch")
+        expect_vf_lut("VFs enabled before rebuild", 16);
+
+        g0 = mgr.config_generation;
+        if (!mgr.bind_runtime_pf_base(16'h0200) ||
+            mgr.pf_ctx[0].bdf != 16'h0200 ||
+            mgr.config_generation != g0 + 1)
+            `uvm_error("BAR_STATE", "runtime BDF bind did not invalidate routing once")
+        g0 = mgr.config_generation;
+        if (!mgr.bind_runtime_pf_base(16'h0200))
+            `uvm_error("BAR_STATE", "repeated runtime BDF bind was rejected")
+        expect_generation("repeated runtime BDF bind", mgr.config_generation, g0);
+
+        // Reusing a manager for a fresh topology must not inherit a stale
+        // decoder generation from the prior build.
+        mgr.build_topology(0, 1, 16, 16'h20f9, 16'h5011, 16'h8689);
+        expect_generation("fresh topology generation", mgr.config_generation, 1);
+        expect_vf_lut("fresh topology has no stale VF LUT", 0);
+
+        phase.drop_objection(this);
+    endtask
+endclass

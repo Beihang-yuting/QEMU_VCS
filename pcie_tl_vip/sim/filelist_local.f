@@ -53,6 +53,7 @@ pcie_tl_vip/tests/pcie_tl_rw_readback_test.sv
 pcie_tl_vip/tests/pcie_tl_switch_rw_readback_test.sv
 pcie_tl_vip/tests/pcie_tl_dpu_501x_profile_test.sv
 pcie_tl_vip/tests/pcie_tl_route_metadata_test.sv
+pcie_tl_vip/tests/pcie_tl_bar_state_test.sv
 
 // ---- testbench top ----
 pcie_tl_vip/tests/pcie_tl_tb_top.sv
