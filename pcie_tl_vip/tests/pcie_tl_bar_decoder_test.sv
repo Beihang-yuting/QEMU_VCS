@@ -97,6 +97,7 @@ class pcie_tl_bar_decoder_test extends uvm_test;
         string label, pcie_tl_bar_decoder dec, pcie_tl_mem_tlp req,
         bit [15:0] target_bdf, pcie_bar_decode_result_e expected);
         pcie_tl_cq_route_t route;
+        pcie_tl_cq_route_t default_route;
         pcie_bar_decode_result_e actual;
         string reason;
         actual = dec.decode(req, target_bdf, route, reason);
@@ -104,11 +105,11 @@ class pcie_tl_bar_decoder_test extends uvm_test;
             `uvm_error("BAR_DECODE", $sformatf(
                 "%s: result=%s expected=%s reason=%s",
                 label, actual.name(), expected.name(), reason))
-        if (expected != PCIE_BAR_DECODE_OK &&
-            (route.valid || route.vf_index != -1))
+        default_route = pcie_tl_cq_route_default();
+        if (expected != PCIE_BAR_DECODE_OK && route !== default_route)
             `uvm_error("BAR_DECODE", $sformatf(
-                "%s: failure leaked route valid=%0b vf_index=%0d",
-                label, route.valid, route.vf_index))
+                "%s: failure leaked route got=%p expected=%p",
+                label, route, default_route))
         return route;
     endfunction
 
@@ -131,10 +132,12 @@ class pcie_tl_bar_decoder_test extends uvm_test;
     task run_phase(uvm_phase phase);
         pcie_tl_mem_tlp req;
         pcie_tl_cq_route_t route;
+        pcie_tl_func_manager partial_overlap_mgr;
         pcie_tl_func_manager overlap_mgr;
         pcie_tl_func_manager invalid_mgr;
         pcie_tl_func_manager isolated_mgr;
         pcie_tl_func_manager legacy_mgr;
+        pcie_tl_bar_decoder partial_overlap_decoder;
         pcie_tl_bar_decoder overlap_decoder;
         pcie_tl_bar_decoder invalid_decoder;
         pcie_tl_bar_decoder isolated_decoder;
@@ -393,8 +396,47 @@ class pcie_tl_bar_decoder_test extends uvm_test;
             make_read(vf_base[0][0]), mgr.sriov_caps[0].get_vf_rid(0),
             PCIE_BAR_DECODE_OK));
 
+        // A request whose first DW selects only PF0 BAR0 becomes ambiguous when
+        // its second DW enters the PF1 BAR2 range nested inside that BAR0.
+        partial_overlap_mgr = pcie_tl_func_manager::type_id::create(
+            "partial_overlap_mgr");
+        partial_overlap_mgr.cfg_profile = PCIE_CFG_PROFILE_DPU_20F9_501X;
+        partial_overlap_mgr.build_topology(
+            0, 2, 16, 16'h20f9, 16'h5011, 16'h8689);
+        aux_proxy.func_mgr = partial_overlap_mgr;
+        aux_proxy.multi_function_mode = 1;
+        program_pf_bar(aux_proxy, partial_overlap_mgr, 0, 0,
+                       64'h0000_0010_0000_0000);
+        program_pf_bar(aux_proxy, partial_overlap_mgr, 1, 2,
+                       64'h0000_0010_0001_0000);
+        set_command(aux_proxy, partial_overlap_mgr, 0, 1, 0);
+        set_command(aux_proxy, partial_overlap_mgr, 1, 1, 0);
+        partial_overlap_decoder = pcie_tl_bar_decoder::type_id::create(
+            "partial_overlap_decoder");
+        partial_overlap_decoder.func_mgr = partial_overlap_mgr;
+        req = make_read(64'h0000_0010_0000_fffc);
+        req.length = 2;
+        req.first_be = 4'hf;
+        req.last_be = 4'hf;
+        void'(expect_decode("later enabled byte enters overlapping BAR",
+            partial_overlap_decoder, req, partial_overlap_mgr.pf_ctx[0].bdf,
+            PCIE_BAR_DECODE_OVERLAP));
+
+        // Moving BAR2 immediately after BAR0 makes the same two-DW shape touch
+        // two BARs without any one enabled byte belonging to both. Boundary
+        // handling, rather than overlap detection, must classify this request.
+        program_pf_bar(aux_proxy, partial_overlap_mgr, 1, 2,
+                       64'h0000_0010_0200_0000);
+        req = make_read(64'h0000_0010_01ff_fffc);
+        req.length = 2;
+        req.first_be = 4'hf;
+        req.last_be = 4'hf;
+        void'(expect_decode("enabled bytes touch disjoint adjacent BARs",
+            partial_overlap_decoder, req, partial_overlap_mgr.pf_ctx[0].bdf,
+            PCIE_BAR_DECODE_CROSS_BOUNDARY));
+
         // A disabled range overlapping an enabled one is not fatal. Enabling
-        // both through Command.MSE makes the same address ambiguous.
+        // both through Command.MSE makes the same first byte ambiguous.
         overlap_mgr = pcie_tl_func_manager::type_id::create("overlap_mgr");
         overlap_mgr.cfg_profile = PCIE_CFG_PROFILE_DPU_20F9_501X;
         overlap_mgr.build_topology(0, 2, 16, 16'h20f9, 16'h5011, 16'h8689);

@@ -197,9 +197,12 @@ class pcie_tl_bar_decoder extends uvm_object;
         bit [63:0] last_index;
         bit [63:0] function_base;
         bit [15:0] decoded_bdf;
+        bit [3:0] enabled_be;
+        bit [63:0] enabled_byte_addr;
         int first_be_lane;
         int last_be_lane;
         int decoded_vf_index;
+        int enabled_entry_count;
 
         route = pcie_tl_cq_route_default();
         reason = "";
@@ -247,6 +250,39 @@ class pcie_tl_bar_decoder extends uvm_object;
         end
         first_byte = req.addr + first_be_lane;
         last_byte = req.addr + tail_bytes;
+
+        // Overlap is a property of each byte actually enabled by the request,
+        // not only its first byte or its enclosing continuous address span.
+        // This also avoids treating a request that touches two disjoint BARs as
+        // overlap; the normal boundary checks below classify that request.
+        for (longint unsigned dw = 0; dw < dwords; dw++) begin
+            if (dwords == 1)
+                enabled_be = req.first_be;
+            else if (dw == 0)
+                enabled_be = req.first_be;
+            else if (dw == dwords - 1)
+                enabled_be = req.last_be;
+            else
+                enabled_be = 4'hf;
+            for (int lane = 0; lane < 4; lane++) begin
+                if (!enabled_be[lane])
+                    continue;
+                enabled_byte_addr = req.addr + dw * 64'd4 + lane;
+                enabled_entry_count = 0;
+                foreach (entries[i]) begin
+                    if (entries[i].enabled &&
+                        enabled_byte_addr >= entries[i].base &&
+                        enabled_byte_addr < entries[i].base + entries[i].span)
+                        enabled_entry_count++;
+                end
+                if (enabled_entry_count > 1) begin
+                    reason = $sformatf(
+                        "%0d enabled BARs overlap at enabled byte %016h",
+                        enabled_entry_count, enabled_byte_addr);
+                    return PCIE_BAR_DECODE_OVERLAP;
+                end
+            end
+        end
 
         // Address selection is authoritative. The QEMU BDF hint is deliberately
         // not consulted until a unique function has been derived below.
