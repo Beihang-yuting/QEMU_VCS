@@ -180,7 +180,7 @@ class pcie_tl_func_manager extends uvm_object;
 
     // Consumers cache BAR routing derived from the configuration state and
     // rebuild only when this generation changes.
-    longint unsigned config_generation = 1;
+    longint unsigned config_generation = 0;
 
     //--- MSI-X and tag configuration (CoSim topology export) ---
     int        pf_msix_vectors = 64;

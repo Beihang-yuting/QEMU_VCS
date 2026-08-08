@@ -129,6 +129,23 @@ class pcie_tl_bar_decoder_test extends uvm_test;
                 route.is_vf, route.pf_index, route.vf_index))
     endfunction
 
+    function bit string_contains(string value, string needle);
+        if (needle.len() == 0)
+            return 1;
+        if (value.len() < needle.len())
+            return 0;
+        for (int i = 0; i <= value.len() - needle.len(); i++) begin
+            bit found_match;
+            found_match = 1;
+            for (int j = 0; j < needle.len(); j++)
+                if (value.getc(i + j) != needle.getc(j))
+                    found_match = 0;
+            if (found_match)
+                return 1;
+        end
+        return 0;
+    endfunction
+
     task run_phase(uvm_phase phase);
         pcie_tl_mem_tlp req;
         pcie_tl_cq_route_t route;
@@ -137,12 +154,25 @@ class pcie_tl_bar_decoder_test extends uvm_test;
         pcie_tl_func_manager invalid_mgr;
         pcie_tl_func_manager isolated_mgr;
         pcie_tl_func_manager legacy_mgr;
+        pcie_tl_func_manager prebuild_mgr;
+        pcie_tl_func_manager swap_a_mgr;
+        pcie_tl_func_manager swap_b_mgr;
+        pcie_tl_func_manager swap_invalid_mgr;
+        pcie_tl_func_manager swap_valid_mgr;
+        pcie_tl_func_manager rid_overflow_mgr;
+        pcie_tl_func_manager pf_only_mgr;
         pcie_tl_bar_decoder partial_overlap_decoder;
         pcie_tl_bar_decoder overlap_decoder;
         pcie_tl_bar_decoder invalid_decoder;
         pcie_tl_bar_decoder isolated_decoder;
         pcie_tl_bar_decoder legacy_decoder;
+        pcie_tl_bar_decoder prebuild_decoder;
+        pcie_tl_bar_decoder swap_decoder;
+        pcie_tl_bar_decoder failure_swap_decoder;
+        pcie_tl_bar_decoder rid_overflow_decoder;
+        pcie_tl_bar_decoder pf_only_decoder;
         pcie_tl_bar_decoder null_decoder;
+        pcie_tl_func_context spoof_vf_context;
         pcie_tl_bar_decode_entry saved_entry;
         pcie_tl_bar_decode_entry isolated_entry;
         longint unsigned saved_generation;
@@ -375,6 +405,22 @@ class pcie_tl_bar_decoder_test extends uvm_test;
         mgr.bdf_lut[vf_bdf] = mgr.vf_ctx[0][3];
         mgr.mark_routing_dirty("restore test-only VF LUT metadata");
 
+        spoof_vf_context = pcie_tl_func_context::type_id::create(
+            "spoof_vf_context");
+        spoof_vf_context.enabled = 1;
+        spoof_vf_context.is_vf = 1;
+        spoof_vf_context.pf_index = 0;
+        spoof_vf_context.vf_index = 3;
+        spoof_vf_context.bdf = vf_bdf;
+        mgr.bdf_lut[vf_bdf] = spoof_vf_context;
+        mgr.mark_routing_dirty("test-only wrong-object VF LUT metadata");
+        void'(expect_decode("wrong-object exact VF context", decoder,
+            make_read(vf_base[0][0] +
+                3 * mgr.sriov_caps[0].vf_bar_size[0]),
+            vf_bdf, PCIE_BAR_DECODE_DISABLED));
+        mgr.bdf_lut[vf_bdf] = mgr.vf_ctx[0][3];
+        mgr.mark_routing_dirty("restore exact VF context identity");
+
         set_sriov(proxy, mgr, 0, 16, 1, 0);
         void'(expect_decode("VF MSE disabled", decoder,
             make_read(vf_base[0][0]), mgr.sriov_caps[0].get_vf_rid(0),
@@ -529,6 +575,158 @@ class pcie_tl_bar_decoder_test extends uvm_test;
             isolated_decoder.entries[0] != isolated_entry ||
             isolated_decoder.entries[0] == decoder.entries[0])
             `uvm_error("BAR_DECODE", "decoder caches are not manager-isolated")
+
+        // A decoder cache is identified by both generation and manager handle.
+        // Two independently configured managers can legitimately publish the
+        // same generation while describing different routing snapshots.
+        swap_a_mgr = pcie_tl_func_manager::type_id::create("swap_a_mgr");
+        swap_a_mgr.cfg_profile = PCIE_CFG_PROFILE_LEGACY;
+        swap_a_mgr.build_topology(0, 1, 16,
+                                  16'h1234, 16'h5678, 16'h9abc);
+        if (!swap_a_mgr.bind_runtime_pf_base(16'h0100))
+            `uvm_error("BAR_DECODE", "manager A runtime BDF bind failed")
+        legacy_proxy.func_mgr = swap_a_mgr;
+        legacy_proxy.multi_function_mode = 1;
+        program_pf_bar(legacy_proxy, swap_a_mgr, 0, 0,
+                       64'h0000_0000_1000_0000);
+        set_command(legacy_proxy, swap_a_mgr, 0, 1, 0);
+
+        swap_b_mgr = pcie_tl_func_manager::type_id::create("swap_b_mgr");
+        swap_b_mgr.cfg_profile = PCIE_CFG_PROFILE_LEGACY;
+        swap_b_mgr.build_topology(0, 1, 16,
+                                  16'h1234, 16'h5678, 16'h9abc);
+        if (!swap_b_mgr.bind_runtime_pf_base(16'h0200))
+            `uvm_error("BAR_DECODE", "manager B runtime BDF bind failed")
+        legacy_proxy.func_mgr = swap_b_mgr;
+        program_pf_bar(legacy_proxy, swap_b_mgr, 0, 0,
+                       64'h0000_0000_2000_0000);
+        set_command(legacy_proxy, swap_b_mgr, 0, 1, 0);
+        if (swap_a_mgr.config_generation != swap_b_mgr.config_generation)
+            `uvm_error("BAR_DECODE", "manager swap generations differ")
+
+        swap_decoder = pcie_tl_bar_decoder::type_id::create("swap_decoder");
+        swap_decoder.func_mgr = swap_a_mgr;
+        route = expect_decode("manager A cache", swap_decoder,
+            make_read(64'h0000_0000_1000_0000), swap_a_mgr.pf_ctx[0].bdf,
+            PCIE_BAR_DECODE_OK);
+        expect_route("manager A cache", route, swap_a_mgr.pf_ctx[0].bdf,
+                     0, 4, 0, 0, 0, -1);
+        swap_decoder.func_mgr = swap_b_mgr;
+        route = expect_decode("same-generation manager B cache", swap_decoder,
+            make_read(64'h0000_0000_2000_0000), swap_b_mgr.pf_ctx[0].bdf,
+            PCIE_BAR_DECODE_OK);
+        expect_route("same-generation manager B cache", route,
+                     swap_b_mgr.pf_ctx[0].bdf, 0, 4, 0, 0, 0, -1);
+        void'(expect_decode("manager A route removed after swap", swap_decoder,
+            make_read(64'h0000_0000_1000_0000), swap_a_mgr.pf_ctx[0].bdf,
+            PCIE_BAR_DECODE_NO_MATCH));
+
+        // A failed cache result must likewise be replaced when a different
+        // same-generation manager is selected.
+        swap_invalid_mgr = pcie_tl_func_manager::type_id::create(
+            "swap_invalid_mgr");
+        swap_invalid_mgr.cfg_profile = PCIE_CFG_PROFILE_LEGACY;
+        swap_invalid_mgr.build_topology(0, 1, 16,
+                                        16'h1234, 16'h5678, 16'h9abc);
+        swap_invalid_mgr.pf_ctx[0].bar_size[0] = 64'h1800;
+        swap_invalid_mgr.mark_routing_dirty(
+            "test-only same-generation invalid manager");
+        swap_valid_mgr = pcie_tl_func_manager::type_id::create(
+            "swap_valid_mgr");
+        swap_valid_mgr.cfg_profile = PCIE_CFG_PROFILE_LEGACY;
+        swap_valid_mgr.build_topology(0, 1, 16,
+                                      16'h1234, 16'h5678, 16'h9abc);
+        swap_valid_mgr.mark_routing_dirty(
+            "match invalid manager generation");
+        if (swap_invalid_mgr.config_generation !=
+            swap_valid_mgr.config_generation)
+            `uvm_error("BAR_DECODE", "failure swap generations differ")
+        failure_swap_decoder = pcie_tl_bar_decoder::type_id::create(
+            "failure_swap_decoder");
+        failure_swap_decoder.func_mgr = swap_invalid_mgr;
+        void'(expect_decode("same-generation invalid manager",
+            failure_swap_decoder, make_read(0),
+            swap_invalid_mgr.pf_ctx[0].bdf,
+            PCIE_BAR_DECODE_INVALID_CONFIG));
+        failure_swap_decoder.func_mgr = swap_valid_mgr;
+        void'(expect_decode("same-generation valid manager recovery",
+            failure_swap_decoder, make_read(0), swap_valid_mgr.pf_ctx[0].bdf,
+            PCIE_BAR_DECODE_DISABLED));
+
+        // A manager publishes generation zero until its first topology build.
+        // A failed pre-build decode must therefore be rebuilt at generation one.
+        prebuild_mgr = pcie_tl_func_manager::type_id::create("prebuild_mgr");
+        prebuild_mgr.cfg_profile = PCIE_CFG_PROFILE_LEGACY;
+        if (prebuild_mgr.config_generation != 0)
+            `uvm_error("BAR_DECODE", $sformatf(
+                "pre-build generation=%0d expected=0",
+                prebuild_mgr.config_generation))
+        prebuild_decoder = pcie_tl_bar_decoder::type_id::create(
+            "prebuild_decoder");
+        prebuild_decoder.func_mgr = prebuild_mgr;
+        void'(expect_decode("decode before topology build", prebuild_decoder,
+            make_read(0), 0, PCIE_BAR_DECODE_INVALID_CONFIG));
+        prebuild_mgr.build_topology(0, 1, 16,
+                                    16'h1234, 16'h5678, 16'h9abc);
+        if (prebuild_mgr.config_generation != 1)
+            `uvm_error("BAR_DECODE", $sformatf(
+                "first-build generation=%0d expected=1",
+                prebuild_mgr.config_generation))
+        void'(expect_decode("decode after first topology build",
+            prebuild_decoder, make_read(0), prebuild_mgr.pf_ctx[0].bdf,
+            PCIE_BAR_DECODE_DISABLED));
+
+        // Normal DPU FirstVFOffset/Stride values overflow a 16-bit RID when
+        // firmware assigns PF0 near the end of the routing-ID space.
+        rid_overflow_mgr = pcie_tl_func_manager::type_id::create(
+            "rid_overflow_mgr");
+        rid_overflow_mgr.cfg_profile = PCIE_CFG_PROFILE_DPU_20F9_501X;
+        rid_overflow_mgr.build_topology(0, 4, 16,
+                                        16'h20f9, 16'h5011, 16'h8689);
+        if (!rid_overflow_mgr.bind_runtime_pf_base(16'hfff8))
+            `uvm_error("BAR_DECODE", "RID-overflow runtime BDF bind failed")
+        aux_proxy.func_mgr = rid_overflow_mgr;
+        aux_proxy.multi_function_mode = 1;
+        program_vf_bar(aux_proxy, rid_overflow_mgr, 0, 0,
+                       64'h0000_0020_0000_0000);
+        set_sriov(aux_proxy, rid_overflow_mgr, 0, 16, 1, 1);
+        rid_overflow_decoder = pcie_tl_bar_decoder::type_id::create(
+            "rid_overflow_decoder");
+        rid_overflow_decoder.func_mgr = rid_overflow_mgr;
+        void'(expect_decode("VF RID overflow", rid_overflow_decoder,
+            make_read(64'h0000_0020_0000_0000), 16'hfffc,
+            PCIE_BAR_DECODE_INVALID_CONFIG));
+        if (!string_contains(rid_overflow_decoder.cache_reason,
+                             "RID overflow"))
+            `uvm_error("BAR_DECODE", $sformatf(
+                "VF RID overflow reason missing: %s",
+                rid_overflow_decoder.cache_reason))
+
+        // RID metadata is relevant only when the cache emits a VF BAR entry.
+        // A PF-only snapshot must not fail on an otherwise unused VF stride.
+        pf_only_mgr = pcie_tl_func_manager::type_id::create("pf_only_mgr");
+        pf_only_mgr.cfg_profile = PCIE_CFG_PROFILE_DPU_20F9_501X;
+        pf_only_mgr.build_topology(0, 1, 16,
+                                   16'h20f9, 16'h5011, 16'h8689);
+        aux_proxy.func_mgr = pf_only_mgr;
+        aux_proxy.multi_function_mode = 1;
+        program_pf_bar(aux_proxy, pf_only_mgr, 0, 0,
+                       64'h0000_0000_4000_0000);
+        set_command(aux_proxy, pf_only_mgr, 0, 1, 0);
+        foreach (pf_only_mgr.sriov_caps[0].vf_bar_size[bar])
+            pf_only_mgr.sriov_caps[0].vf_bar_size[bar] = 0;
+        pf_only_mgr.sriov_caps[0].num_vfs = 1;
+        pf_only_mgr.sriov_caps[0].vf_stride = 0;
+        pf_only_mgr.mark_routing_dirty(
+            "test-only unused VF RID metadata");
+        pf_only_decoder = pcie_tl_bar_decoder::type_id::create(
+            "pf_only_decoder");
+        pf_only_decoder.func_mgr = pf_only_mgr;
+        route = expect_decode("PF-only cache ignores unused VF RID metadata",
+            pf_only_decoder, make_read(64'h0000_0000_4000_0000),
+            pf_only_mgr.pf_ctx[0].bdf, PCIE_BAR_DECODE_OK);
+        expect_route("PF-only cache ignores unused VF RID metadata", route,
+                     pf_only_mgr.pf_ctx[0].bdf, 0, 13, 0, 0, 0, -1);
 
         // Legacy no-truncation unit regression: only PF8 is routable.
         legacy_mgr = pcie_tl_func_manager::type_id::create("legacy_mgr");

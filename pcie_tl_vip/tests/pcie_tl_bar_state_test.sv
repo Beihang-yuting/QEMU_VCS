@@ -211,8 +211,9 @@ class pcie_tl_bar_state_test extends uvm_test;
 
         mgr = pcie_tl_func_manager::type_id::create("mgr");
         mgr.cfg_profile = PCIE_CFG_PROFILE_DPU_20F9_501X;
+        expect_generation("pre-build generation", mgr.config_generation, 0);
         mgr.build_topology(0, 1, 16, 16'h20f9, 16'h5011, 16'h8689);
-        expect_generation("initial topology generation", mgr.config_generation, 1);
+        expect_generation("first topology generation", mgr.config_generation, 1);
         g0 = mgr.config_generation;
         mgr.build_topology(0, 1, 16, 16'h20f9, 16'h5011, 16'h8689);
         expect_generation("cached initial topology invalidated by rebuild",

@@ -12,8 +12,8 @@ class pcie_tl_bar_decode_entry extends uvm_object;
     bit [63:0] function_size;
     bit [15:0] pf_bdf;
     bit [15:0] first_vf_bdf;
-    int        vf_bdf_stride;
-    int        num_vfs;
+    int unsigned vf_bdf_stride;
+    int unsigned num_vfs;
     int        pf_index;
     bit [2:0]  bar_id;
     bit [5:0]  bar_aperture;
@@ -27,6 +27,7 @@ class pcie_tl_bar_decoder extends uvm_object;
     `uvm_object_utils(pcie_tl_bar_decoder)
 
     pcie_tl_func_manager func_mgr;
+    pcie_tl_func_manager cached_func_mgr;
     longint unsigned cached_generation = '1;
     pcie_tl_bar_decode_entry entries[$];
     pcie_bar_decode_result_e cache_result = PCIE_BAR_DECODE_OK;
@@ -78,6 +79,12 @@ class pcie_tl_bar_decoder extends uvm_object;
         pcie_tl_func_context ctx;
         pcie_tl_sriov_cap sc;
         bit [63:0] span;
+        longint unsigned first_vf_rid;
+        longint unsigned last_vf_rid;
+        longint unsigned vf_count;
+        longint unsigned vf_index_span;
+        longint unsigned vf_stride;
+        bit vf_rid_validated;
         int unsigned aperture_log2;
 
         // A failed generation must never retain the old snapshot or expose a
@@ -137,10 +144,51 @@ class pcie_tl_bar_decoder extends uvm_object;
                 reason = $sformatf("PF%0d SR-IOV capability is null", pf);
                 return PCIE_BAR_DECODE_INVALID_CONFIG;
             end
+            vf_rid_validated = 0;
             for (int bar = 0; bar < 6; bar++) begin
                 if (sc.vf_bar_owner[bar] != bar ||
                     sc.vf_bar_size[bar] == 0 || sc.num_vfs == 0)
                     continue;
+                if (!vf_rid_validated) begin
+                    vf_count = sc.num_vfs;
+                    vf_stride = sc.vf_stride;
+                    if (vf_count == 0 || vf_stride == 0) begin
+                        reason = $sformatf(
+                            "invalid PF%0d VF RID count=%0d stride=%0d",
+                            pf, vf_count, vf_stride);
+                        return PCIE_BAR_DECODE_INVALID_CONFIG;
+                    end
+                    first_vf_rid = ctx.bdf;
+                    if (first_vf_rid >
+                        (~64'b0 - sc.first_vf_offset)) begin
+                        reason = $sformatf(
+                            "PF%0d VF RID overflow computing first RID", pf);
+                        return PCIE_BAR_DECODE_INVALID_CONFIG;
+                    end
+                    first_vf_rid += sc.first_vf_offset;
+                    if ((vf_count - 1) > (~64'b0 / vf_stride)) begin
+                        reason = $sformatf(
+                            "PF%0d VF RID overflow count=%0d stride=%0d",
+                            pf, vf_count, vf_stride);
+                        return PCIE_BAR_DECODE_INVALID_CONFIG;
+                    end
+                    vf_index_span = (vf_count - 1) * vf_stride;
+                    if (first_vf_rid > (~64'b0 - vf_index_span)) begin
+                        reason = $sformatf(
+                            "PF%0d VF RID overflow first=%0h span=%0h",
+                            pf, first_vf_rid, vf_index_span);
+                        return PCIE_BAR_DECODE_INVALID_CONFIG;
+                    end
+                    last_vf_rid = first_vf_rid + vf_index_span;
+                    if (first_vf_rid > 64'hffff ||
+                        last_vf_rid > 64'hffff) begin
+                        reason = $sformatf(
+                            "PF%0d VF RID overflow first=%0h last=%0h",
+                            pf, first_vf_rid, last_vf_rid);
+                        return PCIE_BAR_DECODE_INVALID_CONFIG;
+                    end
+                    vf_rid_validated = 1;
+                end
                 aperture_log2 = log2_size(sc.vf_bar_size[bar]);
                 if (!size_is_valid(sc.vf_bar_size[bar]) ||
                     aperture_log2 < 12 || aperture_log2 - 12 > 63 ||
@@ -165,9 +213,9 @@ class pcie_tl_bar_decoder extends uvm_object;
                 entry.span = span;
                 entry.function_size = sc.vf_bar_size[bar];
                 entry.pf_bdf = ctx.bdf;
-                entry.first_vf_bdf = sc.get_vf_rid(0);
-                entry.vf_bdf_stride = sc.vf_stride;
-                entry.num_vfs = int'(sc.num_vfs);
+                entry.first_vf_bdf = first_vf_rid[15:0];
+                entry.vf_bdf_stride = int'(vf_stride);
+                entry.num_vfs = int'(vf_count);
                 entry.pf_index = pf;
                 entry.bar_id = bar[2:0];
                 entry.bar_aperture = 6'(aperture_log2 - 12);
@@ -189,7 +237,10 @@ class pcie_tl_bar_decoder extends uvm_object;
         pcie_tl_bar_decode_entry disabled_hits[$];
         pcie_tl_bar_decode_entry selected;
         pcie_tl_func_context vf_context;
+        pcie_tl_func_context expected_vf_context;
         longint unsigned dwords;
+        longint unsigned decoded_rid;
+        longint unsigned decoded_rid_offset;
         bit [63:0] first_byte;
         bit [63:0] last_byte;
         bit [63:0] tail_bytes;
@@ -212,8 +263,10 @@ class pcie_tl_bar_decoder extends uvm_object;
             return PCIE_BAR_DECODE_INVALID_CONFIG;
         end
 
-        if (cached_generation != func_mgr.config_generation) begin
+        if (cached_func_mgr != func_mgr ||
+            cached_generation != func_mgr.config_generation) begin
             cache_result = rebuild_cache(cache_reason);
+            cached_func_mgr = func_mgr;
             cached_generation = func_mgr.config_generation;
         end
         if (cache_result != PCIE_BAR_DECODE_OK) begin
@@ -330,20 +383,49 @@ class pcie_tl_bar_decoder extends uvm_object;
                 reason = "request crosses VF function BAR boundary";
                 return PCIE_BAR_DECODE_CROSS_BOUNDARY;
             end
-            decoded_bdf = selected.first_vf_bdf +
-                          int'(first_index) * selected.vf_bdf_stride;
+            if (selected.vf_bdf_stride == 0 ||
+                first_index > (~64'b0 / selected.vf_bdf_stride)) begin
+                reason = "decoded VF RID overflow";
+                return PCIE_BAR_DECODE_INVALID_CONFIG;
+            end
+            decoded_rid_offset = first_index * selected.vf_bdf_stride;
+            decoded_rid = selected.first_vf_bdf;
+            if (decoded_rid > (~64'b0 - decoded_rid_offset)) begin
+                reason = "decoded VF RID overflow";
+                return PCIE_BAR_DECODE_INVALID_CONFIG;
+            end
+            decoded_rid += decoded_rid_offset;
+            if (decoded_rid > 64'hffff) begin
+                reason = $sformatf("decoded VF RID overflow RID=%0h",
+                                   decoded_rid);
+                return PCIE_BAR_DECODE_INVALID_CONFIG;
+            end
+            decoded_bdf = decoded_rid[15:0];
             vf_context = func_mgr.lookup_by_bdf(decoded_bdf);
-            if (vf_context == null || !vf_context.enabled ||
+            decoded_vf_index = int'(first_index);
+            if (selected.pf_index < 0 ||
+                selected.pf_index >= func_mgr.vf_ctx.size() ||
+                decoded_vf_index < 0 ||
+                decoded_vf_index >=
+                    func_mgr.vf_ctx[selected.pf_index].size()) begin
+                reason = $sformatf(
+                    "decoded VF context PF%0d VF%0d is out of bounds",
+                    selected.pf_index, decoded_vf_index);
+                return PCIE_BAR_DECODE_DISABLED;
+            end
+            expected_vf_context =
+                func_mgr.vf_ctx[selected.pf_index][decoded_vf_index];
+            if (vf_context == null || expected_vf_context == null ||
+                vf_context != expected_vf_context || !vf_context.enabled ||
                 !vf_context.is_vf ||
                 vf_context.pf_index != selected.pf_index ||
-                vf_context.vf_index != int'(first_index)) begin
+                vf_context.vf_index != decoded_vf_index) begin
                 reason = $sformatf("decoded VF BDF %04h is not enabled",
                                    decoded_bdf);
                 return PCIE_BAR_DECODE_DISABLED;
             end
             function_base = selected.base +
                             first_index * selected.function_size;
-            decoded_vf_index = int'(first_index);
         end
 
         if (decoded_bdf != qemu_target_bdf) begin
