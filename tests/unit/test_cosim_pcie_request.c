@@ -37,9 +37,53 @@ static void test_host_route_sets_rc_requester_and_target_only(void)
     assert(req.data[0] == 0xff);
 }
 
+static void test_sc_completion_decodes_little_endian_by_size(void)
+{
+    static const uint8_t payload[8] = {
+        0x08, 0x07, 0x06, 0x05, 0x04, 0x03, 0x02, 0x01,
+    };
+    static const unsigned sizes[] = { 1, 2, 4, 8 };
+    static const uint64_t expected[] = {
+        UINT64_C(0x08),
+        UINT64_C(0x0708),
+        UINT64_C(0x05060708),
+        UINT64_C(0x0102030405060708),
+    };
+
+    for (unsigned i = 0; i < sizeof(sizes) / sizeof(sizes[0]); i++) {
+        uint64_t value = UINT64_MAX;
+
+        assert(cosim_cpl_value_decode(COSIM_CPL_STATUS_SC, payload,
+                                      sizes[i], &value));
+        assert(value == expected[i]);
+    }
+}
+
+static void test_non_sc_completion_does_not_read_poisoned_payload(void)
+{
+    static const uint8_t statuses[] = {
+        COSIM_CPL_STATUS_UR,
+        COSIM_CPL_STATUS_CRS,
+        COSIM_CPL_STATUS_CA,
+        3,
+        UINT8_MAX,
+    };
+    const uint8_t *poisoned_payload = (const uint8_t *)(uintptr_t)1;
+
+    for (unsigned i = 0; i < sizeof(statuses) / sizeof(statuses[0]); i++) {
+        uint64_t value = 0;
+
+        assert(!cosim_cpl_value_decode(statuses[i], poisoned_payload, 8,
+                                       &value));
+        assert(value == UINT64_MAX);
+    }
+}
+
 int main(void)
 {
     test_bdf_keeps_full_devfn();
     test_host_route_sets_rc_requester_and_target_only();
+    test_sc_completion_decodes_little_endian_by_size();
+    test_non_sc_completion_does_not_read_poisoned_payload();
     return 0;
 }

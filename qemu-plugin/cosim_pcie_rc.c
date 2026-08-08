@@ -126,7 +126,9 @@ static uint64_t cosim_mmio_do_read(CosimPCIeRC *s, uint64_t pcie_addr,
         return UINT64_MAX;
     }
 
-    if (!cosim_cpl_status_is_success(cpl.status)) {
+    uint64_t val;
+    bool cpl_success = cosim_cpl_value_decode(cpl.status, cpl.data, size, &val);
+    if (!cpl_success) {
         uint64_t error_count = ++s->mmio_cpl_error_count;
         if (error_count <= 8 || error_count % 1024 == 0) {
             qemu_log_mask(LOG_GUEST_ERROR,
@@ -135,12 +137,8 @@ static uint64_t cosim_mmio_do_read(CosimPCIeRC *s, uint64_t pcie_addr,
                           cpl.status, (unsigned long)pcie_addr, target_bdf,
                           error_count);
         }
-        return UINT64_MAX;
+        return val;
     }
-
-    uint64_t val = 0;
-    for (unsigned i = 0; i < size && i < COSIM_TLP_DATA_SIZE; i++)
-        val |= (uint64_t)cpl.data[i] << (i * 8);
     return val;
 }
 

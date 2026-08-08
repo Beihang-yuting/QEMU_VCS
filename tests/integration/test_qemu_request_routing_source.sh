@@ -106,6 +106,64 @@ def forbid(body, needle, where):
         fail(f"{where} must not contain {needle!r}")
 
 
+def compact_code(text):
+    text = re.sub(r"/\*.*?\*/", "", text, flags=re.S)
+    text = re.sub(r"//[^\n]*", "", text)
+    return re.sub(r"\s+", "", text)
+
+
+def brace_depth_at(text, stop):
+    depth = 0
+    state = "code"
+    i = 0
+    while i < stop:
+        ch = text[i]
+        nxt = text[i:i + 2]
+        if state == "code":
+            if nxt == "//":
+                state = "line_comment"
+                i += 2
+                continue
+            if nxt == "/*":
+                state = "block_comment"
+                i += 2
+                continue
+            if ch == '"':
+                state = "string"
+            elif ch == "'":
+                state = "char"
+            elif ch == "{":
+                depth += 1
+            elif ch == "}":
+                depth -= 1
+        elif state == "line_comment":
+            if ch == "\n":
+                state = "code"
+        elif state == "block_comment":
+            if nxt == "*/":
+                state = "code"
+                i += 2
+                continue
+        elif state in ("string", "char"):
+            if ch == "\\":
+                i += 2
+                continue
+            if (state == "string" and ch == '"') or (state == "char" and ch == "'"):
+                state = "code"
+        i += 1
+    return depth
+
+
+current_bdf = compact_code(function_body("cosim_current_bdf"))
+expected_bdf = (
+    "returncosim_pcie_bdf((uint8_t)pci_bus_num(pci_get_bus(dev)),"
+    "dev->devfn);"
+)
+if current_bdf != expected_bdf:
+    fail("cosim_current_bdf must pass the live bus and full 8-bit devfn "
+         "directly to the tested cosim_pcie_bdf helper")
+
+
 for callback in ("cosim_mmio_read", "cosim_mmio_write"):
     body = function_body(callback)
     require(body, "cosim_current_bdf(PCI_DEVICE(bc->dev))", callback)
@@ -156,16 +214,24 @@ require(dma, "req->requester_id", "cosim_dma_cb")
 forbid(dma, "cosim_route_host_to_device", "cosim_dma_cb")
 
 mmio_read = function_body("cosim_mmio_do_read")
-require(mmio_read,
-        "if (!cosim_cpl_status_is_success(cpl.status))",
+decode_call = "cosim_cpl_value_decode(cpl.status, cpl.data, size, &val)"
+if mmio_read.count(decode_call) != 1:
+    fail("cosim_mmio_do_read must call cosim_cpl_value_decode exactly once")
+decode_pos = mmio_read.find(decode_call)
+if brace_depth_at(mmio_read, decode_pos) != 0:
+    fail("cosim_mmio_do_read completion decode must be unconditional, not nested")
+require(
+        compact_code(mmio_read),
+        "uint64_tval;"
+        "boolcpl_success=cosim_cpl_value_decode(cpl.status,cpl.data,size,&val);"
+        "if(!cpl_success){",
         "cosim_mmio_do_read")
+forbid(mmio_read, "cosim_cpl_status_is_success", "cosim_mmio_do_read")
+forbid(mmio_read, "cpl.data[", "cosim_mmio_do_read")
 require(mmio_read, "++s->mmio_cpl_error_count", "cosim_mmio_do_read")
 require(mmio_read, "error_count <= 8", "cosim_mmio_do_read")
 require(mmio_read, "error_count % 1024 == 0", "cosim_mmio_do_read")
-status_check = mmio_read.find("if (!cosim_cpl_status_is_success(cpl.status))")
-payload_read = mmio_read.find("cpl.data[i]")
-if status_check < 0 or payload_read < 0 or status_check >= payload_read:
-    fail("cosim_mmio_do_read must reject non-SC before reading completion payload")
+require(mmio_read, "return val;", "cosim_mmio_do_read")
 
 if "uint64_t mmio_cpl_error_count;" not in header:
     fail("CosimPCIeRC must track MMIO completion errors")

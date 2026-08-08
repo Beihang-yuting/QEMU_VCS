@@ -20,7 +20,9 @@ int bridge_vcs_poll_tlp_scalar(void);
 int bridge_vcs_get_poll_type(void);
 int bridge_vcs_get_poll_tag(void);
 int bridge_vcs_send_cpl_scalar_status_rc(int rc, int tag, int len, int status);
+int bridge_vcs_send_cpl_scalar_rc(int rc, int tag, int len);
 int bridge_vcs_send_cpl_scalar_status(int tag, int len, int status);
+int bridge_vcs_send_cpl_scalar(int tag, int len);
 
 #define CHECK_OR_GOTO(cond, label) do {                                      \
     if (!(cond)) {                                                            \
@@ -42,19 +44,34 @@ static int vcs_stub(int port_base)
     CHECK_OR_GOTO(bridge_vcs_send_cpl_scalar_status_rc(
                       0, 0, 0, 3) == -1, out);
 
-    for (int attempt = 0; attempt < 500; attempt++) {
-        int poll_rc = bridge_vcs_poll_tlp_scalar();
-        if (poll_rc == 0) {
-            CHECK_OR_GOTO(bridge_vcs_get_poll_type() == TLP_MRD, out);
-            CHECK_OR_GOTO(bridge_vcs_send_cpl_scalar_status(
-                              bridge_vcs_get_poll_tag(), 0,
-                              COSIM_CPL_STATUS_UR) == 0, out);
-            result = 0;
-            break;
+    for (int transaction = 0; transaction < 3; transaction++) {
+        int completed = 0;
+
+        for (int attempt = 0; attempt < 500; attempt++) {
+            int poll_rc = bridge_vcs_poll_tlp_scalar();
+            if (poll_rc == 0) {
+                int tag = bridge_vcs_get_poll_tag();
+
+                CHECK_OR_GOTO(bridge_vcs_get_poll_type() == TLP_MRD, out);
+                if (transaction == 0) {
+                    CHECK_OR_GOTO(bridge_vcs_send_cpl_scalar_status(
+                                      tag, 0, COSIM_CPL_STATUS_UR) == 0, out);
+                } else if (transaction == 1) {
+                    CHECK_OR_GOTO(bridge_vcs_send_cpl_scalar_rc(
+                                      0, tag, 0) == 0, out);
+                } else {
+                    CHECK_OR_GOTO(bridge_vcs_send_cpl_scalar(tag, 0) == 0,
+                                  out);
+                }
+                completed = 1;
+                break;
+            }
+            CHECK_OR_GOTO(poll_rc > 0, out);
+            usleep(10000);
         }
-        CHECK_OR_GOTO(poll_rc > 0, out);
-        usleep(10000);
+        CHECK_OR_GOTO(completed, out);
     }
+    result = 0;
 
 out:
     if (initialized) {
@@ -85,6 +102,11 @@ static int wait_child(pid_t child)
 
 int main(void)
 {
+    static const uint8_t expected_status[] = {
+        COSIM_CPL_STATUS_UR,
+        COSIM_CPL_STATUS_SC,
+        COSIM_CPL_STATUS_SC,
+    };
     int result = 1;
     int port_base = 20000 + (int)(getpid() % 10000) * 3;
     bridge_ctx_t *ctx = NULL;
@@ -110,20 +132,29 @@ int main(void)
     CHECK_OR_GOTO(ctx != NULL, cleanup_child);
     CHECK_OR_GOTO(bridge_connect_ex(ctx) == 0, cleanup_ctx);
 
-    tlp_entry_t req;
-    cpl_entry_t cpl;
-    memset(&req, 0, sizeof(req));
-    memset(&cpl, 0, sizeof(cpl));
-    req.type = TLP_MRD;
-    req.addr = UINT64_C(0x12345000);
-    req.len = 4;
+    for (unsigned transaction = 0;
+         transaction < sizeof(expected_status) / sizeof(expected_status[0]);
+         transaction++) {
+        tlp_entry_t req;
+        cpl_entry_t cpl;
 
-    CHECK_OR_GOTO(bridge_send_tlp_and_wait_timed(ctx, &req, &cpl, 5000) == 0,
-                  cleanup_ctx);
-    CHECK_OR_GOTO(cpl.type == TLP_CPL, cleanup_ctx);
-    CHECK_OR_GOTO(cpl.status == COSIM_CPL_STATUS_UR, cleanup_ctx);
-    CHECK_OR_GOTO(cpl.len == 0, cleanup_ctx);
-    CHECK_OR_GOTO(!cosim_cpl_status_is_success(cpl.status), cleanup_ctx);
+        memset(&req, 0, sizeof(req));
+        memset(&cpl, 0, sizeof(cpl));
+        req.type = TLP_MRD;
+        req.addr = UINT64_C(0x12345000) + transaction * UINT64_C(0x1000);
+        req.len = 4;
+
+        CHECK_OR_GOTO(
+            bridge_send_tlp_and_wait_timed(ctx, &req, &cpl, 5000) == 0,
+            cleanup_ctx);
+        CHECK_OR_GOTO(cpl.type == TLP_CPL, cleanup_ctx);
+        CHECK_OR_GOTO(cpl.tag == req.tag, cleanup_ctx);
+        CHECK_OR_GOTO(cpl.status == expected_status[transaction], cleanup_ctx);
+        CHECK_OR_GOTO(cpl.len == 0, cleanup_ctx);
+        CHECK_OR_GOTO(cosim_cpl_status_is_success(cpl.status) ==
+                          (transaction != 0),
+                      cleanup_ctx);
+    }
 
     result = 0;
 
