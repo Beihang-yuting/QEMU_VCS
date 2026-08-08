@@ -312,10 +312,11 @@ class pcie_tl_cfg_space_manager extends uvm_object;
         return data;
     endfunction
 
-    //=========================================================================
-    // Write config space (DW-aligned) with BE and callback
-    //=========================================================================
-    function void write(bit [11:0] addr, bit [31:0] data, bit [3:0] be);
+    protected function void apply_write(
+        bit [11:0] addr,
+        bit [31:0] data,
+        bit [3:0] be
+    );
         bit [11:0] aligned_addr = {addr[11:2], 2'b00};
 
         for (int i = 0; i < 4; i++) begin
@@ -335,10 +336,29 @@ class pcie_tl_cfg_space_manager extends uvm_object;
                 endcase
             end
         end
+    endfunction
+
+    //=========================================================================
+    // Write config space (DW-aligned) with BE and callback
+    //=========================================================================
+    function void write(bit [11:0] addr, bit [31:0] data, bit [3:0] be);
+        bit [11:0] aligned_addr = {addr[11:2], 2'b00};
+
+        apply_write(aligned_addr, data, be);
 
         // Trigger callback
         if (callbacks.exists(aligned_addr))
             callbacks[aligned_addr].on_write(aligned_addr, data, be);
+    endfunction
+
+    // Internal state synchronization uses the same field attributes, write
+    // masks, and byte enables as a normal write, but is not a guest event.
+    function void write_internal(
+        bit [11:0] addr,
+        bit [31:0] data,
+        bit [3:0] be
+    );
+        apply_write(addr, data, be);
     endfunction
 
     //=========================================================================

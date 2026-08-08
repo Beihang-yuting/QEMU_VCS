@@ -662,10 +662,14 @@ class pcie_tl_func_manager extends uvm_object;
         int limit;
         int accepted;
 
+        if (pf_idx < 0 || pf_idx >= num_pfs ||
+            pf_idx >= sriov_caps.size() || sriov_caps[pf_idx] == null) begin
+            `uvm_error("FUNC_MGR", $sformatf(
+                "accepted_vf_count: pf_idx %0d out of range", pf_idx))
+            return 0;
+        end
         limit = max_vfs_per_pf;
-        if (pf_idx >= 0 && pf_idx < sriov_caps.size() &&
-            sriov_caps[pf_idx] != null &&
-            int'(sriov_caps[pf_idx].total_vfs) < limit)
+        if (int'(sriov_caps[pf_idx].total_vfs) < limit)
             limit = int'(sriov_caps[pf_idx].total_vfs);
         if (limit < 0)
             limit = 0;
@@ -699,16 +703,20 @@ class pcie_tl_func_manager extends uvm_object;
         control[1] = sc.vf_migration_enable;
         control[3] = sc.ari_capable;
         control[4] = sc.vf_mse;
-        pf_ctx[pf_idx].cfg_mgr.write(
+        pf_ctx[pf_idx].cfg_mgr.write_internal(
             sc.offset + 12'h008, {16'h0000, control}, 4'b0011);
-        pf_ctx[pf_idx].cfg_mgr.write(
+        pf_ctx[pf_idx].cfg_mgr.write_internal(
             sc.offset + 12'h010, {16'h0000, sc.num_vfs}, 4'b0011);
     endfunction
 
     //=========================================================================
     // Enable a set of VFs for a given PF; add them to the BDF lookup table
     //=========================================================================
-    function void enable_vfs(int pf_idx, int num_vfs);
+    function void enable_vfs(
+        int pf_idx,
+        int num_vfs,
+        bit sync_cfg_image = 1
+    );
         bit routing_changed;
 
         if (pf_idx < 0 || pf_idx >= num_pfs) begin
@@ -739,7 +747,8 @@ class pcie_tl_func_manager extends uvm_object;
             else
                 bdf_lut.delete(vf_ctx[pf_idx][vf].bdf);
         end
-        sync_sriov_cfg_image(pf_idx);
+        if (sync_cfg_image)
+            sync_sriov_cfg_image(pf_idx);
         if (routing_changed)
             mark_routing_dirty($sformatf("PF%0d VF enable/LUT", pf_idx));
     endfunction
@@ -747,7 +756,7 @@ class pcie_tl_func_manager extends uvm_object;
     //=========================================================================
     // Disable all VFs for a given PF; remove them from the BDF lookup table
     //=========================================================================
-    function void disable_vfs(int pf_idx);
+    function void disable_vfs(int pf_idx, bit sync_cfg_image = 1);
         bit routing_changed;
 
         if (pf_idx < 0 || pf_idx >= num_pfs) begin
@@ -765,7 +774,8 @@ class pcie_tl_func_manager extends uvm_object;
         end
 
         sriov_caps[pf_idx].vf_enable = 0;
-        sync_sriov_cfg_image(pf_idx);
+        if (sync_cfg_image)
+            sync_sriov_cfg_image(pf_idx);
         if (routing_changed)
             mark_routing_dirty($sformatf("PF%0d VF disable/LUT", pf_idx));
     endfunction

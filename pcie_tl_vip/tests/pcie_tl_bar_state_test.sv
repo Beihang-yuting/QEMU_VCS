@@ -3,6 +3,40 @@ import pcie_tl_pkg::*;
 import pcie_tl_device_profile_pkg::*;
 `include "uvm_macros.svh"
 
+class pcie_tl_cfg_write_recorder extends pcie_cfg_callback;
+    `uvm_object_utils(pcie_tl_cfg_write_recorder)
+
+    int write_count;
+    bit [11:0] last_addr;
+    bit [31:0] last_data;
+    bit [3:0] last_be;
+
+    function new(string name = "pcie_tl_cfg_write_recorder");
+        super.new(name);
+    endfunction
+
+    virtual function void on_read(bit [11:0] addr, ref bit [31:0] data);
+    endfunction
+
+    virtual function void on_write(
+        bit [11:0] addr,
+        bit [31:0] data,
+        bit [3:0] be
+    );
+        write_count++;
+        last_addr = addr;
+        last_data = data;
+        last_be = be;
+    endfunction
+
+    function void clear_write_history();
+        write_count = 0;
+        last_addr = '0;
+        last_data = '0;
+        last_be = '0;
+    endfunction
+endclass
+
 class pcie_tl_bar_state_proxy extends pcie_tl_config_proxy;
     `uvm_component_utils(pcie_tl_bar_state_proxy)
 
@@ -61,6 +95,28 @@ class pcie_tl_bar_state_test extends uvm_test;
         if (actual != expected)
             `uvm_error("BAR_STATE", $sformatf(
                 "%s: generation=%0d expected=%0d", label, actual, expected))
+    endfunction
+
+    function void expect_cfg_callback(
+        string label,
+        pcie_tl_cfg_write_recorder recorder,
+        int expected_count,
+        bit [11:0] expected_addr = '0,
+        bit [31:0] expected_data = '0,
+        bit [3:0] expected_be = '0
+    );
+        if (recorder.write_count != expected_count)
+            `uvm_error("BAR_STATE", $sformatf(
+                "%s: callback count=%0d expected=%0d",
+                label, recorder.write_count, expected_count))
+        if (expected_count > 0 &&
+            (recorder.last_addr != expected_addr ||
+             recorder.last_data != expected_data ||
+             recorder.last_be != expected_be))
+            `uvm_error("BAR_STATE", $sformatf(
+                "%s: callback addr/data/be=%03h/%08h/%01h expected=%03h/%08h/%01h",
+                label, recorder.last_addr, recorder.last_data, recorder.last_be,
+                expected_addr, expected_data, expected_be))
     endfunction
 
     function void expect_owner_bar_enable(
@@ -135,6 +191,13 @@ class pcie_tl_bar_state_test extends uvm_test;
         pcie_tl_func_manager overlap_mgr;
         pcie_tl_func_manager stale_mgr;
         pcie_tl_func_manager direct_mgr;
+        pcie_tl_func_manager callback_mgr;
+        pcie_tl_cfg_write_recorder control_cb;
+        pcie_tl_cfg_write_recorder num_vfs_cb;
+        pcie_tl_cfg_write_recorder direct_control_cb;
+        pcie_tl_cfg_write_recorder direct_num_vfs_cb;
+        bit [15:0] callback_pf_bdf;
+        int callback_sriov_dw;
 
         phase.raise_objection(this);
 
@@ -150,6 +213,108 @@ class pcie_tl_bar_state_test extends uvm_test;
         proxy.multi_function_mode = 1;
         proxy.bypass_enable = 1;
         pf_bdf = mgr.pf_ctx[0].bdf;
+
+        // A guest write is externally observable exactly once at its target
+        // DWORD. Internal SR-IOV state reconciliation must neither duplicate
+        // that callback nor synthesize a callback for the neighboring DWORD.
+        callback_mgr = pcie_tl_func_manager::type_id::create("callback_mgr");
+        callback_mgr.cfg_profile = PCIE_CFG_PROFILE_DPU_20F9_501X;
+        callback_mgr.build_topology(0, 1, 16, 16'h20f9, 16'h5011, 16'h8689);
+        proxy.func_mgr = callback_mgr;
+        callback_pf_bdf = callback_mgr.pf_ctx[0].bdf;
+        callback_sriov_dw = int'(callback_mgr.sriov_caps[0].offset >> 2);
+        control_cb = pcie_tl_cfg_write_recorder::type_id::create("control_cb");
+        num_vfs_cb = pcie_tl_cfg_write_recorder::type_id::create("num_vfs_cb");
+        callback_mgr.pf_ctx[0].cfg_mgr.register_callback(
+            callback_mgr.sriov_caps[0].offset + 12'h008, control_cb);
+        callback_mgr.pf_ctx[0].cfg_mgr.register_callback(
+            callback_mgr.sriov_caps[0].offset + 12'h010, num_vfs_cb);
+
+        old_cfg_dw = callback_mgr.cfg_read(
+            callback_pf_bdf, (callback_sriov_dw + 4) << 2);
+        control_cb.clear_write_history();
+        num_vfs_cb.clear_write_history();
+        void'(proxy.handle_cfg_write_bdf(
+            callback_pf_bdf, callback_sriov_dw + 4, 32'h0000_0002, 1, 1));
+        cfg_dw = callback_mgr.cfg_read(
+            callback_pf_bdf, (callback_sriov_dw + 4) << 2);
+        if (callback_mgr.sriov_caps[0].num_vfs != 16 ||
+            cfg_dw[15:0] != 16)
+            `uvm_error("BAR_STATE", "partial NumVFs clamp state/raw mismatch")
+        expect_cfg_callback("guest partial NumVFs target", num_vfs_cb, 1,
+            callback_mgr.sriov_caps[0].offset + 12'h010,
+            {old_cfg_dw[31:16], 16'd16}, 4'b0011);
+        expect_cfg_callback("guest partial NumVFs unrelated Control", control_cb, 0);
+
+        // All mutable Control bits must be mirrored before lifecycle handling.
+        // A subsequent same-value NumVFs write must not reconstruct 0x9 as 0x1.
+        control_cb.clear_write_history();
+        num_vfs_cb.clear_write_history();
+        void'(proxy.handle_cfg_write_bdf(
+            callback_pf_bdf, callback_sriov_dw + 2, 32'h0000_0009, 0, 2));
+        cfg_dw = callback_mgr.cfg_read(
+            callback_pf_bdf, (callback_sriov_dw + 2) << 2);
+        if (!callback_mgr.sriov_caps[0].vf_enable ||
+            !callback_mgr.sriov_caps[0].ari_capable ||
+            callback_mgr.sriov_caps[0].vf_migration_enable ||
+            callback_mgr.sriov_caps[0].vf_mse ||
+            cfg_dw[15:0] != 16'h0009)
+            `uvm_error("BAR_STATE", "guest Control 0x9 state/raw mirror mismatch")
+        expect_cfg_callback("guest Control enable target", control_cb, 1,
+            callback_mgr.sriov_caps[0].offset + 12'h008,
+            32'h0000_0009, 4'b0011);
+        expect_cfg_callback("guest Control enable unrelated NumVFs", num_vfs_cb, 0);
+
+        old_cfg_dw = callback_mgr.cfg_read(
+            callback_pf_bdf, (callback_sriov_dw + 4) << 2);
+        control_cb.clear_write_history();
+        num_vfs_cb.clear_write_history();
+        void'(proxy.handle_cfg_write_bdf(
+            callback_pf_bdf, callback_sriov_dw + 4, 32'd16, 0, 2));
+        cfg_dw = callback_mgr.cfg_read(
+            callback_pf_bdf, (callback_sriov_dw + 2) << 2);
+        if (!callback_mgr.sriov_caps[0].vf_enable ||
+            !callback_mgr.sriov_caps[0].ari_capable ||
+            cfg_dw[15:0] != 16'h0009)
+            `uvm_error("BAR_STATE", "same NumVFs write corrupted Control 0x9")
+        expect_cfg_callback("same NumVFs target", num_vfs_cb, 1,
+            callback_mgr.sriov_caps[0].offset + 12'h010,
+            {old_cfg_dw[31:16], 16'd16}, 4'b0011);
+        expect_cfg_callback("same NumVFs unrelated Control", control_cb, 0);
+
+        control_cb.clear_write_history();
+        num_vfs_cb.clear_write_history();
+        void'(proxy.handle_cfg_write_bdf(
+            callback_pf_bdf, callback_sriov_dw + 2, 32'h0000_0009, 0, 2));
+        expect_cfg_callback("repeated guest Control target", control_cb, 1,
+            callback_mgr.sriov_caps[0].offset + 12'h008,
+            32'h0000_0009, 4'b0011);
+        expect_cfg_callback("repeated guest Control unrelated NumVFs", num_vfs_cb, 0);
+
+        // Active NumVFs changes reject the entire guest write before callbacks.
+        old_cfg_dw = callback_mgr.cfg_read(
+            callback_pf_bdf, (callback_sriov_dw + 4) << 2);
+        control_cb.clear_write_history();
+        num_vfs_cb.clear_write_history();
+        void'(proxy.handle_cfg_write_bdf(
+            callback_pf_bdf, callback_sriov_dw + 4,
+            {old_cfg_dw[31:16] ^ 16'h5a5a, 16'd32}, 0, 4));
+        cfg_dw = callback_mgr.cfg_read(
+            callback_pf_bdf, (callback_sriov_dw + 4) << 2);
+        if (cfg_dw != old_cfg_dw || callback_mgr.sriov_caps[0].num_vfs != 16)
+            `uvm_error("BAR_STATE", "active 16/request32 callback case was not atomic")
+        expect_cfg_callback("rejected active NumVFs target", num_vfs_cb, 0);
+        expect_cfg_callback("rejected active NumVFs unrelated Control", control_cb, 0);
+
+        control_cb.clear_write_history();
+        num_vfs_cb.clear_write_history();
+        void'(proxy.handle_cfg_write_bdf(
+            callback_pf_bdf, callback_sriov_dw + 2, 32'h0000_0008, 0, 2));
+        expect_cfg_callback("guest Control disable edge target", control_cb, 1,
+            callback_mgr.sriov_caps[0].offset + 12'h008,
+            32'h0000_0008, 4'b0011);
+        expect_cfg_callback("guest Control disable unrelated NumVFs", num_vfs_cb, 0);
+        proxy.func_mgr = mgr;
 
         // One Command write can change MSE and BME together, but only the MSE
         // edge invalidates Host-to-BAR routing.
@@ -558,9 +723,23 @@ class pcie_tl_bar_state_test extends uvm_test;
         direct_mgr.pf_ctx[0].cfg_mgr.cfg_space[
             direct_mgr.sriov_caps[0].offset + 10] = 8'h01;
         direct_mgr.pf_ctx[0].cfg_mgr.cfg_space[
+            direct_mgr.sriov_caps[0].offset + 8] = 8'h80;
+        direct_mgr.pf_ctx[0].cfg_mgr.write_masks[
+            direct_mgr.sriov_caps[0].offset + 8] = 8'h7f;
+        direct_mgr.pf_ctx[0].cfg_mgr.cfg_space[
             direct_mgr.sriov_caps[0].offset + 18] = 8'ha5;
         direct_mgr.pf_ctx[0].cfg_mgr.cfg_space[
             direct_mgr.sriov_caps[0].offset + 19] = 8'h5a;
+        direct_control_cb = pcie_tl_cfg_write_recorder::type_id::create(
+            "direct_control_cb");
+        direct_num_vfs_cb = pcie_tl_cfg_write_recorder::type_id::create(
+            "direct_num_vfs_cb");
+        direct_mgr.pf_ctx[0].cfg_mgr.register_callback(
+            direct_mgr.sriov_caps[0].offset + 12'h008, direct_control_cb);
+        direct_mgr.pf_ctx[0].cfg_mgr.register_callback(
+            direct_mgr.sriov_caps[0].offset + 12'h010, direct_num_vfs_cb);
+        direct_control_cb.clear_write_history();
+        direct_num_vfs_cb.clear_write_history();
         g0 = direct_mgr.config_generation;
         direct_mgr.enable_vfs(0, 32);
         cfg_dw = direct_mgr.cfg_read(
@@ -570,7 +749,8 @@ class pcie_tl_bar_state_test extends uvm_test;
         if (direct_mgr.sriov_caps[0].num_vfs != 16 ||
             !direct_mgr.sriov_caps[0].vf_enable ||
             cfg_dw[15:0] != 16 || cfg_dw[31:16] != 16'h5aa5 ||
-            !old_cfg_dw[0] || old_cfg_dw[23:16] != 8'h01)
+            !old_cfg_dw[0] || !old_cfg_dw[7] ||
+            old_cfg_dw[23:16] != 8'h01)
             `uvm_error("BAR_STATE", "direct VF enable raw config image mismatch")
         for (int vf = 0; vf < direct_mgr.max_vfs_per_pf; vf++)
             if (!direct_mgr.vf_ctx[0][vf].enabled ||
@@ -580,6 +760,10 @@ class pcie_tl_bar_state_test extends uvm_test;
                     "direct VF enable mapped VF%0d incorrectly", vf))
         expect_generation("direct oversized VF enable",
                           direct_mgr.config_generation, g0 + 1);
+        expect_cfg_callback("direct VF enable Control", direct_control_cb, 0);
+        expect_cfg_callback("direct VF enable NumVFs", direct_num_vfs_cb, 0);
+        direct_control_cb.clear_write_history();
+        direct_num_vfs_cb.clear_write_history();
         g0 = direct_mgr.config_generation;
         direct_mgr.disable_vfs(0);
         cfg_dw = direct_mgr.cfg_read(
@@ -589,7 +773,8 @@ class pcie_tl_bar_state_test extends uvm_test;
         if (direct_mgr.sriov_caps[0].num_vfs != 16 ||
             direct_mgr.sriov_caps[0].vf_enable ||
             cfg_dw[15:0] != 16 || cfg_dw[31:16] != 16'h5aa5 ||
-            old_cfg_dw[0] || old_cfg_dw[23:16] != 8'h01)
+            old_cfg_dw[0] || !old_cfg_dw[7] ||
+            old_cfg_dw[23:16] != 8'h01)
             `uvm_error("BAR_STATE", "direct VF disable raw config image mismatch")
         for (int vf = 0; vf < direct_mgr.max_vfs_per_pf; vf++)
             if (direct_mgr.vf_ctx[0][vf].enabled ||
@@ -598,6 +783,8 @@ class pcie_tl_bar_state_test extends uvm_test;
                     "direct VF disable retained VF%0d routing", vf))
         expect_generation("direct VF disable",
                           direct_mgr.config_generation, g0 + 1);
+        expect_cfg_callback("direct VF disable Control", direct_control_cb, 0);
+        expect_cfg_callback("direct VF disable NumVFs", direct_num_vfs_cb, 0);
 
         // Reconciliation must treat removal of a wrong object at a disabled
         // VF key as a routing change, even though the VF itself stays disabled.
