@@ -97,6 +97,19 @@ class pcie_tl_bar_state_test extends uvm_test;
         return 0;
     endfunction
 
+    function bit is_manager_current_lut_key(
+        pcie_tl_func_manager check_mgr,
+        bit [15:0] bdf,
+        int enabled_vfs
+    );
+        if (bdf == check_mgr.pf_ctx[0].bdf)
+            return 1;
+        for (int vf = 0; vf < enabled_vfs; vf++)
+            if (bdf == check_mgr.vf_ctx[0][vf].bdf)
+                return 1;
+        return 0;
+    endfunction
+
     task run_phase(uvm_phase phase);
         bit [15:0] pf_bdf;
         int sriov_dw;
@@ -107,6 +120,7 @@ class pcie_tl_bar_state_test extends uvm_test;
         bit [15:0] old_vf_bdf[];
         int enable_notifications;
         int disable_notifications;
+        pcie_tl_func_manager overlap_mgr;
 
         phase.raise_objection(this);
 
@@ -220,10 +234,15 @@ class pcie_tl_bar_state_test extends uvm_test;
             `uvm_error("BAR_STATE", "normal VFE set did not notify exactly once")
         expect_vf_lut("SR-IOV enabled", 16);
 
+        enable_notifications = proxy.vf_enable_notifications;
+        disable_notifications = proxy.vf_disable_notifications;
         g0 = mgr.config_generation;
         void'(proxy.handle_cfg_write_bdf(pf_bdf, sriov_dw + 4, 32'd16, 0, 2));
         void'(proxy.handle_cfg_write_bdf(pf_bdf, sriov_dw + 2, 32'h0000_0011, 0, 2));
         expect_generation("repeated NumVFs/Control", mgr.config_generation, g0);
+        if (proxy.vf_enable_notifications != enable_notifications ||
+            proxy.vf_disable_notifications != disable_notifications)
+            `uvm_error("BAR_STATE", "repeated VFE set emitted a notification")
 
         // NumVFs is programmed before VFE. Once VFE is active, reject an
         // attempted count change so the register, enabled contexts, LUT, and
@@ -257,8 +276,13 @@ class pcie_tl_bar_state_test extends uvm_test;
             proxy.vf_disable_notifications != disable_notifications + 1)
             `uvm_error("BAR_STATE", "normal VFE clear did not notify exactly once")
         expect_vf_lut("VFE clear", 0);
+        enable_notifications = proxy.vf_enable_notifications;
+        disable_notifications = proxy.vf_disable_notifications;
         void'(proxy.handle_cfg_write_bdf(pf_bdf, sriov_dw + 2, 32'h0000_0000, 0, 2));
         expect_generation("repeated VFE clear", mgr.config_generation, g0 + 1);
+        if (proxy.vf_enable_notifications != enable_notifications ||
+            proxy.vf_disable_notifications != disable_notifications)
+            `uvm_error("BAR_STATE", "repeated VFE clear emitted a notification")
 
         g0 = mgr.config_generation;
         void'(proxy.handle_cfg_write_bdf(pf_bdf, sriov_dw + 2, 32'h0000_0011, 0, 2));
@@ -325,6 +349,8 @@ class pcie_tl_bar_state_test extends uvm_test;
             mgr.sriov_caps[0].pf_bdf != 16'h0200 ||
             mgr.config_generation != g0 + 1)
             `uvm_error("BAR_STATE", "runtime BDF bind did not invalidate routing once")
+        if (mgr.lookup_by_bdf(mgr.pf_ctx[0].bdf) != mgr.pf_ctx[0])
+            `uvm_error("BAR_STATE", "runtime BDF bind mapped the new PF key incorrectly")
         if (!is_current_lut_key(old_pf_bdf, 16) &&
             mgr.lookup_by_bdf(old_pf_bdf) != null)
             `uvm_error("BAR_STATE", "runtime BDF bind retained the old PF LUT key")
@@ -372,6 +398,49 @@ class pcie_tl_bar_state_test extends uvm_test;
         expect_vf_lut("active NumVFs full-DWORD write rejected", 16);
         expect_generation("active NumVFs full-DWORD write rejected",
                           mgr.config_generation, g0);
+
+        // Rekey across a numerically overlapping range: old VF7 becomes the
+        // new PF key and old VF8..15 become new VF keys. Old keys are removed
+        // only when they are not also members of the final key set.
+        overlap_mgr = pcie_tl_func_manager::type_id::create("overlap_mgr");
+        overlap_mgr.cfg_profile = PCIE_CFG_PROFILE_DPU_20F9_501X;
+        overlap_mgr.build_topology(0, 1, 16, 16'h20f9, 16'h5011, 16'h8689);
+        overlap_mgr.enable_vfs(0, 16);
+        old_pf_bdf = overlap_mgr.pf_ctx[0].bdf;
+        old_vf_bdf = new[overlap_mgr.max_vfs_per_pf];
+        for (int vf = 0; vf < overlap_mgr.max_vfs_per_pf; vf++)
+            old_vf_bdf[vf] = overlap_mgr.vf_ctx[0][vf].bdf;
+        g0 = overlap_mgr.config_generation;
+        if (!overlap_mgr.bind_runtime_pf_base(16'h0108) ||
+            overlap_mgr.pf_ctx[0].bdf != 16'h0108 ||
+            overlap_mgr.sriov_caps[0].pf_bdf != 16'h0108 ||
+            overlap_mgr.config_generation != g0 + 1)
+            `uvm_error("BAR_STATE", "overlapping runtime BDF bind state mismatch")
+        if (overlap_mgr.lookup_by_bdf(overlap_mgr.pf_ctx[0].bdf) !=
+            overlap_mgr.pf_ctx[0])
+            `uvm_error("BAR_STATE", "overlapping runtime bind mapped the PF incorrectly")
+        for (int vf = 0; vf < overlap_mgr.max_vfs_per_pf; vf++) begin
+            if (overlap_mgr.vf_ctx[0][vf].bdf !=
+                overlap_mgr.sriov_caps[0].get_vf_rid(vf))
+                `uvm_error("BAR_STATE", $sformatf(
+                    "overlapping runtime bind left VF%0d BDF stale", vf))
+            if (overlap_mgr.lookup_by_bdf(overlap_mgr.vf_ctx[0][vf].bdf) !=
+                overlap_mgr.vf_ctx[0][vf])
+                `uvm_error("BAR_STATE", $sformatf(
+                    "overlapping runtime bind mapped VF%0d incorrectly", vf))
+            if (!is_manager_current_lut_key(overlap_mgr, old_vf_bdf[vf], 16) &&
+                overlap_mgr.lookup_by_bdf(old_vf_bdf[vf]) != null)
+                `uvm_error("BAR_STATE", $sformatf(
+                    "overlapping runtime bind retained old VF%0d key", vf))
+        end
+        if (!is_manager_current_lut_key(overlap_mgr, old_pf_bdf, 16) &&
+            overlap_mgr.lookup_by_bdf(old_pf_bdf) != null)
+            `uvm_error("BAR_STATE", "overlapping runtime bind retained old PF key")
+        g0 = overlap_mgr.config_generation;
+        if (!overlap_mgr.bind_runtime_pf_base(16'h0108))
+            `uvm_error("BAR_STATE", "repeated overlapping runtime bind was rejected")
+        expect_generation("repeated overlapping runtime BDF bind",
+                          overlap_mgr.config_generation, g0);
 
         // Reconciliation must treat removal of a wrong object at a disabled
         // VF key as a routing change, even though the VF itself stays disabled.
