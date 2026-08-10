@@ -57,15 +57,6 @@ class xilinx_pcie_adapter_codec_test extends uvm_test;
     end
   endfunction
 
-  function void chk_eq(string what, bit [31:0] got, bit [31:0] expected);
-    if (got != expected) begin
-      errs++;
-      `uvm_error("CODEC_CHK",
-                 $sformatf("FAIL: %s got=0x%0h expected=0x%0h",
-                           what, got, expected))
-    end
-  endfunction
-
   task run_phase(uvm_phase phase);
     phase.raise_objection(this);
     check_rq();
@@ -162,23 +153,23 @@ class xilinx_pcie_adapter_codec_test extends uvm_test;
     m.cq_route.pf_index     = 1;
     m.cq_route.vf_index     = 3;
     desc = route_probe.probe(m);
-    chk_eq("adapter CQ valid route target_func",
-           xilinx_desc_codec::get_cq_target_func(desc), 8'h03);
-    chk_eq("adapter CQ valid route bar_id",
-           xilinx_desc_codec::get_cq_bar_id(desc), 3'h2);
-    chk_eq("adapter CQ valid route bar_aperture",
-           xilinx_desc_codec::get_cq_bar_aperture(desc), 6'h04);
+    chk("adapter CQ valid route target_func",
+        xilinx_desc_codec::get_cq_target_func(desc) == 8'h03);
+    chk("adapter CQ valid route bar_id",
+        xilinx_desc_codec::get_cq_bar_id(desc) == 3'h2);
+    chk("adapter CQ valid route bar_aperture",
+        xilinx_desc_codec::get_cq_bar_aperture(desc) == 6'h04);
 
     // Invalid metadata retains the legacy all-zero CQ sideband, even if stale
     // field values remain in the record.
     m.cq_route.valid = 1'b0;
     desc = route_probe.probe(m);
-    chk_eq("adapter CQ invalid route target_func stays zero",
-           xilinx_desc_codec::get_cq_target_func(desc), 8'h00);
-    chk_eq("adapter CQ invalid route bar_id stays zero",
-           xilinx_desc_codec::get_cq_bar_id(desc), 3'h0);
-    chk_eq("adapter CQ invalid route bar_aperture stays zero",
-           xilinx_desc_codec::get_cq_bar_aperture(desc), 6'h00);
+    chk("adapter CQ invalid route target_func stays zero",
+        xilinx_desc_codec::get_cq_target_func(desc) == 8'h00);
+    chk("adapter CQ invalid route bar_id stays zero",
+        xilinx_desc_codec::get_cq_bar_id(desc) == 3'h0);
+    chk("adapter CQ invalid route bar_aperture stays zero",
+        xilinx_desc_codec::get_cq_bar_aperture(desc) == 6'h00);
   endfunction
 
   // --- RC: completion with data ---
