@@ -26,7 +26,7 @@
 - Create: `tests/integration/test_dpu_skip_eth_scan_source.sh`
 - Test input: `/home/ubuntu/test_cosim/releases/dpu-qid128-pf0only-vnetcache-20260804/source/host-driver-net`
 
-- [ ] **Step 1: Add the focused contract test**
+- [x] **Step 1: Add the focused contract test**
 
 Create the executable script below:
 
@@ -119,7 +119,7 @@ fi
 echo 'PASS: DPU skip_eth_scan source contract'
 ```
 
-- [ ] **Step 2: Validate the test syntax and make it executable**
+- [x] **Step 2: Validate the test syntax and make it executable**
 
 Run:
 
@@ -130,7 +130,7 @@ bash -n tests/integration/test_dpu_skip_eth_scan_source.sh
 
 Expected: both commands exit zero.
 
-- [ ] **Step 3: Run RED against the 2026-08-04 baseline on 53**
+- [x] **Step 3: Run RED against the 2026-08-04 baseline on 53**
 
 Copy the test to the established 53 driver-build worktree, then run:
 
@@ -151,7 +151,7 @@ Expected: nonzero exit with:
 FAIL: skip_eth_scan must be a default-false static bool
 ```
 
-- [ ] **Step 4: Commit the RED contract**
+- [x] **Step 4: Commit the RED contract**
 
 ```bash
 git add tests/integration/test_dpu_skip_eth_scan_source.sh
@@ -168,7 +168,7 @@ git commit -m "test(driver): define periodic ETH scan bypass contract"
 - Modify: new release `source/host-driver-net/af_mng.h`
 - Modify: new release `source/host-driver-net/af_mng.c`
 
-- [ ] **Step 1: Create a clean source copy without touching the old release**
+- [x] **Step 1: Create a clean source copy without touching the old release**
 
 On 53, first require that the destination does not exist, then copy source-only
 content:
@@ -194,7 +194,7 @@ Expected: the new source has `Makefile`, `main.c`, `af_mng.c`, `af_mng.h`, and
 `common.h`, contains no `.git`, `.o`, or `.ko`, and the old release timestamps
 and hashes remain unchanged.
 
-- [ ] **Step 2: Add the module parameter and task selection in `main.c`**
+- [x] **Step 2: Add the module parameter and task selection in `main.c`**
 
 Add this beside the existing module parameters:
 
@@ -232,7 +232,7 @@ Change only the final ETH selection in task 2:
 Keep `dpu_notify_backend_virtqueue_subtask()` and `dpu_reset_subtask()` before
 that selection.
 
-- [ ] **Step 3: Declare the helper in `af_mng.h`**
+- [x] **Step 3: Declare the helper in `af_mng.h`**
 
 Place the declaration next to `dpu_process_eth_status_subtask()`:
 
@@ -241,7 +241,7 @@ void dpu_process_eth_status_subtask(struct dpu_hw *hw);
 void dpu_force_eth_link_up_subtask(struct dpu_hw *hw);
 ```
 
-- [ ] **Step 4: Implement the helper in `af_mng.c`**
+- [x] **Step 4: Implement the helper in `af_mng.c`**
 
 Place this immediately after `dpu_process_eth_status_subtask()` so it can reuse
 the two file-local config helpers:
@@ -285,7 +285,7 @@ void dpu_force_eth_link_up_subtask(struct dpu_hw *hw)
 No `rd32()`, timer change, new workqueue, or bridge-side address filter is
 allowed in this helper.
 
-- [ ] **Step 5: Run GREEN source-contract validation**
+- [x] **Step 5: Run GREEN source-contract validation**
 
 ```bash
 release=/home/ubuntu/test_cosim/releases/dpu-qid128-pf0only-vnetcache-skipeth-20260810
@@ -311,7 +311,7 @@ PASS: DPU skip_eth_scan source contract
 - Create: top-level `dpu_snd1.ko`
 - Create: build and metadata logs
 
-- [ ] **Step 1: Create a deterministic source archive**
+- [x] **Step 1: Create a deterministic source archive**
 
 ```bash
 release=/home/ubuntu/test_cosim/releases/dpu-qid128-pf0only-vnetcache-skipeth-20260810
@@ -332,7 +332,7 @@ project=/home/ubuntu/test_cosim/worktrees/qemu-vcs-x86-dpu-driver
 
 Expected: `validated archive:` and no unsafe or unexpected entry error.
 
-- [ ] **Step 2: Build against the exact guest kernel headers**
+- [x] **Step 2: Build against the exact guest kernel headers**
 
 ```bash
 project=/home/ubuntu/test_cosim/worktrees/qemu-vcs-x86-dpu-driver
@@ -354,7 +354,7 @@ cp "$release/bundle/dpu_snd1.ko" "$release/dpu_snd1.ko"
 Expected: the command exits zero, uses project-local `build/tmp`, and prints
 `built DPU driver bundle:`.
 
-- [ ] **Step 3: Verify architecture, vermagic, binding, and parameter metadata**
+- [x] **Step 3: Verify architecture, vermagic, binding, and parameter metadata**
 
 ```bash
 release=/home/ubuntu/test_cosim/releases/dpu-qid128-pf0only-vnetcache-skipeth-20260810
@@ -371,7 +371,7 @@ modinfo -F parm "$module" | grep -q '^skip_eth_scan:'
 Expected: all assertions pass; the module is x86-64, matches the guest kernel,
 binds PF0 only, and exposes `skip_eth_scan`.
 
-- [ ] **Step 4: Run the existing bundle/import regressions**
+- [x] **Step 4: Run the existing bundle/import regressions**
 
 In the established QEMU_VCS driver-build checkout on 53:
 
@@ -394,7 +394,7 @@ module feature does not alter the existing generic setup/import paths.
 - VCS: `/home/ubuntu/test_cosim/builds/cq-bar-routing-final-20260809-00968c2/build/cosim-route-latest-20260809/simv`
 - Logs: new release `logs/runtime/`
 
-- [ ] **Step 1: Launch QEMU with iCount, management SSH, and request debug**
+- [x] **Step 1: Launch QEMU with iCount, management SSH, and request debug**
 
 Use port `28210` for co-simulation and `22410` for guest SSH. Launch QEMU first
 in the background with `debug=on` on `cosim-pcie-rc`:
@@ -425,7 +425,7 @@ echo $! > "$runtime/qemu.pid"
 Expected: QEMU listens on TCP `28210` and guest SSH `22410`; the process remains
 alive while waiting for VCS.
 
-- [ ] **Step 2: Launch the VCS cosim endpoint in the 53 login environment**
+- [x] **Step 2: Launch the VCS cosim endpoint in the 53 login environment**
 
 ```bash
 release=/home/ubuntu/test_cosim/releases/dpu-qid128-pf0only-vnetcache-skipeth-20260810
@@ -446,7 +446,7 @@ This repository-owned cosim top supplies deterministic completions for the
 driver validation. The user's real-DUT top later uses the same arguments plus
 `+REAL_DUT`; no driver source or load-command difference is required.
 
-- [ ] **Step 3: Copy the module into the running guest**
+- [x] **Step 3: Copy the module into the running guest**
 
 Wait until SSH accepts connections, then:
 
@@ -530,7 +530,7 @@ second load marker. The default path must show repeated
 repeated `BAR0+0x0c00024` link-status reads. Require zero `UVM_FATAL`; this is
 the compatibility proof that hardware-derived scanning remains intact.
 
-- [ ] **Step 6: Stop QEMU/VCS and preserve runtime evidence**
+- [x] **Step 6: Stop QEMU/VCS and preserve runtime evidence**
 
 Save guest state, then terminate only the recorded validation PIDs:
 
@@ -553,7 +553,7 @@ grep -E 'UVM_(ERROR|FATAL)' "$runtime/vcs.log" \
 - Create: remote release `SHA256SUMS`
 - Modify: `docs/superpowers/plans/2026-08-10-dpu-skip-eth-scan.md` checkboxes only while executing
 
-- [ ] **Step 1: Create and verify the release checksum manifest**
+- [x] **Step 1: Create and verify the release checksum manifest**
 
 From the new release directory, hash the source archive, top-level module,
 bundle module, bundle manifest, and all validation logs using relative paths;
@@ -574,7 +574,7 @@ sha256sum -c SHA256SUMS
 Expected: every listed artifact reports `OK`. Record the manifest hash
 separately in the handoff.
 
-- [ ] **Step 2: Confirm the old release is unchanged**
+- [x] **Step 2: Confirm the old release is unchanged**
 
 Verify the absolute-path snapshot captured before copying:
 
@@ -586,7 +586,7 @@ sha256sum -c \
 Expected: all three old-release files report `OK`; no file under
 `dpu-qid128-pf0only-vnetcache-20260804` was written.
 
-- [ ] **Step 3: Run repository verification**
+- [x] **Step 3: Run repository verification**
 
 ```bash
 git diff --check
@@ -599,14 +599,14 @@ git status --short
 Expected: no whitespace errors, syntax PASS, source contract PASS, and only the
 plan checkbox/evidence updates intended for the final commit remain.
 
-- [ ] **Step 4: Commit final plan evidence**
+- [x] **Step 4: Commit final plan evidence**
 
 ```bash
 git add docs/superpowers/plans/2026-08-10-dpu-skip-eth-scan.md
 git commit -m "docs: record DPU ETH scan bypass validation"
 ```
 
-- [ ] **Step 5: Handoff exact usage**
+- [x] **Step 5: Handoff exact usage**
 
 Report the new release path, module SHA-256, manifest SHA-256, source archive,
 build/result logs, and both load commands:
