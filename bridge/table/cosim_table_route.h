@@ -12,6 +12,14 @@ typedef struct {
     uint64_t generation_hash;
 } cosim_table_route_map_t;
 
+/*
+ * Every map, including a stack object, must use this initializer before its
+ * first use.  A successful load atomically replaces an initialized map, so the
+ * same object may be reloaded.  cosim_table_route_free() returns the object to
+ * this initial state.
+ */
+#define COSIM_TABLE_ROUTE_MAP_INIT { NULL, 0, UINT64_C(0) }
+
 int cosim_table_route_load(const char *path, cosim_table_route_map_t *map,
                            char *error, size_t error_bytes);
 void cosim_table_route_free(cosim_table_route_map_t *map);

@@ -249,7 +249,7 @@ static int append_route(route_builder_t *builder,
                     builder->line);
         return -1;
     }
-    if (*count > UINT32_MAX) {
+    if (*count >= (size_t)UINT32_MAX) {
         route_error(error, error_bytes, "too many routes");
         return -1;
     }
@@ -518,6 +518,7 @@ const cosim_table_route_entry_t *cosim_table_route_match(
         uint64_t end;
         uint64_t displacement;
         uint64_t entry_start;
+        uint64_t within_entry;
         uint32_t entry_bytes;
         uint32_t stride_bytes;
 
@@ -535,16 +536,23 @@ const cosim_table_route_entry_t *cosim_table_route_match(
         end = cosim_table_le64_to_cpu(route->end_offset);
         entry_bytes = cosim_table_le32_to_cpu(route->entry_bytes);
         stride_bytes = cosim_table_le32_to_cpu(route->stride_bytes);
-        if (bar_offset < start || bar_offset >= end || entry_bytes == 0 ||
-            stride_bytes < entry_bytes || end - bar_offset < 1) {
+        if (start >= end || entry_bytes == 0 ||
+            stride_bytes < entry_bytes || end - start < entry_bytes ||
+            bar_offset < start || bar_offset >= end) {
             continue;
         }
         displacement = bar_offset - start;
-        if (displacement % stride_bytes >= entry_bytes) {
+        within_entry = displacement % stride_bytes;
+        if (within_entry >= entry_bytes) {
             continue;
         }
-        entry_start = bar_offset - displacement % stride_bytes;
+        entry_start = bar_offset - within_entry;
         if (entry_start > end - entry_bytes) {
+            continue;
+        }
+        if (operation == COSIM_TABLE_OP_READ_DWORD &&
+            ((bar_offset & UINT64_C(3)) != 0 || entry_bytes < 4 ||
+             within_entry > entry_bytes - 4 || bar_offset > end - 4)) {
             continue;
         }
         return route;

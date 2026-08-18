@@ -65,33 +65,171 @@ static cosim_table_target_t make_target(uint16_t rc, uint16_t device,
     return target;
 }
 
+static cosim_table_route_entry_t make_read_route(uint64_t start, uint64_t end,
+                                                 uint32_t entry_bytes,
+                                                 uint32_t stride_bytes)
+{
+    cosim_table_route_entry_t route;
+
+    memset(&route, 0, sizeof(route));
+    route.target = make_target(0, 0, 0);
+    route.operation_mask = cosim_table_cpu_to_le32(
+        COSIM_TABLE_OP_WRITE | COSIM_TABLE_OP_READ_DWORD);
+    route.start_offset = cosim_table_cpu_to_le64(start);
+    route.end_offset = cosim_table_cpu_to_le64(end);
+    route.entry_bytes = cosim_table_cpu_to_le32(entry_bytes);
+    route.stride_bytes = cosim_table_cpu_to_le32(stride_bytes);
+    return route;
+}
+
+static size_t temp_write_limit = SIZE_MAX;
+static int temp_write_error;
+static int temp_close_error;
+static unsigned int temp_close_calls;
+
+static ssize_t temp_write(int fd, const void *buffer, size_t bytes)
+{
+    if (temp_write_error) {
+        errno = EIO;
+        return -1;
+    }
+    if (bytes > temp_write_limit) {
+        bytes = temp_write_limit;
+    }
+    return write(fd, buffer, bytes);
+}
+
+static int temp_close(int fd)
+{
+    int result;
+
+    ++temp_close_calls;
+    result = close(fd);
+    if (temp_close_error) {
+        temp_close_error = 0;
+        errno = EIO;
+        return -1;
+    }
+    return result;
+}
+
+static void reset_temp_io(void)
+{
+    temp_write_limit = SIZE_MAX;
+    temp_write_error = 0;
+    temp_close_error = 0;
+    temp_close_calls = 0;
+}
+
+static int write_all_temp(int fd, const char *contents, size_t bytes)
+{
+    size_t offset = 0;
+
+    while (offset < bytes) {
+        ssize_t written = temp_write(fd, contents + offset, bytes - offset);
+
+        if (written < 0) {
+            if (errno == EINTR) {
+                continue;
+            }
+            return -1;
+        }
+        if (written == 0) {
+            return -1;
+        }
+        offset += (size_t)written;
+    }
+    return 0;
+}
+
 static int write_temp_file(const char *contents, char *path, size_t path_bytes)
 {
     char pattern[] = "/tmp/cosim-table-route-XXXXXX";
-    size_t bytes = strlen(contents);
-    ssize_t written;
-    int fd;
+    size_t bytes;
+    int fd = -1;
+    int result = -1;
 
+    if (contents == NULL || path == NULL ||
+        strlen(pattern) + 1 > path_bytes) {
+        return -1;
+    }
+    bytes = strlen(contents);
     fd = mkstemp(pattern);
     if (fd < 0) {
         return -1;
     }
-    written = write(fd, contents, bytes);
-    if (written < 0 || (size_t)written != bytes || close(fd) != 0 ||
-        strlen(pattern) + 1 > path_bytes) {
-        if (written >= 0 && (size_t)written == bytes) {
-            close(fd);
-        }
-        unlink(pattern);
-        return -1;
+    if (write_all_temp(fd, contents, bytes) != 0) {
+        goto done;
+    }
+    result = temp_close(fd);
+    fd = -1;
+    if (result != 0) {
+        goto done;
     }
     memcpy(path, pattern, strlen(pattern) + 1);
+    return 0;
+
+done:
+    if (fd >= 0) {
+        (void)temp_close(fd);
+    }
+    unlink(pattern);
+    return -1;
+}
+
+static int test_temp_file_cleanup_paths(void)
+{
+    char path[128];
+    char short_path[1] = {'x'};
+    int failures = 0;
+    int result;
+
+    reset_temp_io();
+    temp_write_limit = 1;
+    result = write_temp_file("partial", path, sizeof(path));
+    if (result != 0 || temp_close_calls != 1) {
+        fprintf(stderr, "partial write was not completed and closed once\n");
+        ++failures;
+    } else {
+        unlink(path);
+    }
+
+    reset_temp_io();
+    temp_write_error = 1;
+    result = write_temp_file("error", path, sizeof(path));
+    if (result == 0 || temp_close_calls != 1) {
+        fprintf(stderr, "write failure did not close exactly once\n");
+        ++failures;
+        if (result == 0) {
+            unlink(path);
+        }
+    }
+
+    reset_temp_io();
+    temp_close_error = 1;
+    result = write_temp_file("close", path, sizeof(path));
+    if (result == 0 || temp_close_calls != 1) {
+        fprintf(stderr, "close failure retried or was accepted\n");
+        ++failures;
+        if (result == 0) {
+            unlink(path);
+        }
+    }
+
+    reset_temp_io();
+    result = write_temp_file("path", short_path, sizeof(short_path));
+    if (result == 0 || temp_close_calls != 0) {
+        fprintf(stderr, "short output path created or closed a file\n");
+        ++failures;
+    }
+
+    CHECK(failures == 0);
     return 0;
 }
 
 static int expect_invalid_text(const char *contents)
 {
-    cosim_table_route_map_t map = {0};
+    cosim_table_route_map_t map = COSIM_TABLE_ROUTE_MAP_INIT;
     char error[256] = {0};
     char path[128];
     int rc;
@@ -110,7 +248,7 @@ static int expect_invalid_text(const char *contents)
 static int test_valid_operations_and_fixed_width_entries(void)
 {
     const cosim_table_route_entry_t *entry;
-    cosim_table_route_map_t map = {0};
+    cosim_table_route_map_t map = COSIM_TABLE_ROUTE_MAP_INIT;
     char error[256] = {0};
 
     CHECK(cosim_table_route_load(fixture_path("table_routes_valid.ini"), &map,
@@ -160,10 +298,40 @@ static int test_valid_operations_and_fixed_width_entries(void)
     return 0;
 }
 
+static int test_map_initialization_reload_and_free_contract(void)
+{
+    cosim_table_route_map_t map = COSIM_TABLE_ROUTE_MAP_INIT;
+    char error[256] = {0};
+
+    CHECK(map.entries == NULL);
+    CHECK(map.count == 0);
+    CHECK(map.generation_hash == 0);
+    CHECK(cosim_table_route_load(fixture_path("table_routes_valid.ini"), &map,
+                                 error, sizeof(error)) == 0);
+    CHECK(map.entries != NULL);
+    CHECK(map.count == 3);
+    CHECK(cosim_table_route_load(fixture_path("table_routes_valid.ini"), &map,
+                                 error, sizeof(error)) == 0);
+    CHECK(map.entries != NULL);
+    CHECK(map.count == 3);
+    CHECK(map.generation_hash ==
+          fnv1a64(map.entries, map.count * sizeof(map.entries[0])));
+
+    cosim_table_route_free(&map);
+    CHECK(map.entries == NULL);
+    CHECK(map.count == 0);
+    CHECK(map.generation_hash == 0);
+    cosim_table_route_free(&map);
+    CHECK(map.entries == NULL);
+    CHECK(map.count == 0);
+    CHECK(map.generation_hash == 0);
+    return 0;
+}
+
 static int test_matching_and_slicing(void)
 {
     const cosim_table_route_entry_t *route;
-    cosim_table_route_map_t map = {0};
+    cosim_table_route_map_t map = COSIM_TABLE_ROUTE_MAP_INIT;
     cosim_table_target_t target;
     uint64_t first_index;
     uint32_t entry_count;
@@ -239,6 +407,35 @@ static int test_matching_and_slicing(void)
     return 0;
 }
 
+static int test_read_dword_stays_inside_one_entry(void)
+{
+    cosim_table_route_entry_t route;
+    cosim_table_route_map_t map = COSIM_TABLE_ROUTE_MAP_INIT;
+    cosim_table_target_t target = make_target(0, 0, 0);
+
+    map.entries = &route;
+    map.count = 1;
+
+    route = make_read_route(0, 128, 128, 128);
+    CHECK(cosim_table_route_match(&map, &target, 1,
+                                  COSIM_TABLE_OP_READ_DWORD) == NULL);
+    CHECK(cosim_table_route_match(&map, &target, 124,
+                                  COSIM_TABLE_OP_READ_DWORD) == &route);
+
+    route = make_read_route(0, 2, 2, 2);
+    CHECK(cosim_table_route_match(&map, &target, 0,
+                                  COSIM_TABLE_OP_READ_DWORD) == NULL);
+
+    route = make_read_route(0, 8, 6, 8);
+    CHECK(cosim_table_route_match(&map, &target, 4,
+                                  COSIM_TABLE_OP_READ_DWORD) == NULL);
+
+    route = make_read_route(0, 10, 4, 8);
+    CHECK(cosim_table_route_match(&map, &target, 8,
+                                  COSIM_TABLE_OP_READ_DWORD) == NULL);
+    return 0;
+}
+
 static int test_invalid_operations_fixture(void)
 {
     const char *path = fixture_path("table_routes_invalid_operations.ini");
@@ -292,7 +489,7 @@ static int test_invalid_operations_fixture(void)
 
 static int test_atomic_overlap_rejection(void)
 {
-    cosim_table_route_map_t map = {0};
+    cosim_table_route_map_t map = COSIM_TABLE_ROUTE_MAP_INIT;
     cosim_table_route_entry_t *saved_entries;
     uint64_t saved_hash;
     size_t saved_count;
@@ -339,7 +536,7 @@ static int test_maximum_index_and_overflow(void)
         "stride_bytes=16\n"
         "index_base=4294967294\n"
         "handler=overflow\n";
-    cosim_table_route_map_t map = {0};
+    cosim_table_route_map_t map = COSIM_TABLE_ROUTE_MAP_INIT;
     uint64_t first_index;
     uint32_t entry_count;
     char error[256] = {0};
@@ -401,8 +598,11 @@ static int test_structural_validation(void)
 
 int main(void)
 {
+    CHECK(test_temp_file_cleanup_paths() == 0);
     CHECK(test_valid_operations_and_fixed_width_entries() == 0);
+    CHECK(test_map_initialization_reload_and_free_contract() == 0);
     CHECK(test_matching_and_slicing() == 0);
+    CHECK(test_read_dword_stays_inside_one_entry() == 0);
     CHECK(test_invalid_operations_fixture() == 0);
     CHECK(test_atomic_overlap_rejection() == 0);
     CHECK(test_maximum_index_and_overflow() == 0);
