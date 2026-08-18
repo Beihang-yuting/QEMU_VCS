@@ -28,6 +28,8 @@ module test_cosim_table_service;
     localparam int TABLE_TEST_CODEC_FAILURE = 3;
     localparam int TABLE_TEST_COMPLETION_FAILURE = 4;
     localparam int TABLE_TEST_PENDING_WRITE_WAIT = 5;
+    localparam int TABLE_TEST_UNASSIGNED_WRITE = 6;
+    localparam int TABLE_TEST_UNASSIGNED_READ = 7;
 
     int unsigned failures;
 
@@ -127,6 +129,38 @@ module test_cosim_table_service;
         endfunction
     endclass
 
+    class service_unassigned_handler extends cosim_table_handler;
+        int unsigned write_calls;
+        int unsigned read_calls;
+
+        virtual function string get_name();
+            return "unassigned";
+        endfunction
+
+        virtual function bit supports_read();
+            return 1'b1;
+        endfunction
+
+        virtual task write_entry(
+            cosim_table_context ctx,
+            longint unsigned index,
+            byte unsigned raw_data[],
+            output cosim_table_result result
+        );
+            write_calls++;
+        endtask
+
+        virtual task read_dword(
+            cosim_table_context ctx,
+            longint unsigned index,
+            int unsigned byte_offset,
+            output bit [31:0] data,
+            output cosim_table_result result
+        );
+            read_calls++;
+        endtask
+    endclass
+
     task automatic check_write_call(
         input service_handler handler,
         input int unsigned slot,
@@ -157,6 +191,8 @@ module test_cosim_table_service;
         cosim_table_service codec_service;
         cosim_table_service completion_failure_service;
         cosim_table_service stop_service;
+        cosim_table_service unassigned_write_service;
+        cosim_table_service unassigned_read_service;
         service_handler handler;
         service_handler write_only_handler;
         service_handler read_required_handler;
@@ -165,6 +201,8 @@ module test_cosim_table_service;
         service_handler codec_handler;
         service_handler completion_failure_handler;
         service_handler stop_handler;
+        service_unassigned_handler unassigned_write_handler;
+        service_unassigned_handler unassigned_read_handler;
         service_custom_codec custom_codec;
         bit run_returned;
         bit waiter_returned;
@@ -326,6 +364,55 @@ module test_cosim_table_service;
         check(table_test_get_interrupt_count(0) == 1,
               "completion failure interrupts the terminal C client once");
         completion_failure_service.shutdown();
+
+        table_test_reset(0, 0);
+        table_test_set_scenario(0, TABLE_TEST_UNASSIGNED_WRITE);
+        unassigned_write_service = new(0);
+        unassigned_write_handler = new();
+        check(unassigned_write_service.register_handler(
+                  unassigned_write_handler, COSIM_TABLE_PROTECTION_NONE),
+              "unassigned-output write handler registers");
+        check(unassigned_write_service.initialize(
+                  "127.0.0.1", 10100, 0,
+                  "/absolute/unassigned-write.ini") == 0,
+              "unassigned-output write service initializes");
+        unassigned_write_service.run();
+        unassigned_write_service.wait_stopped();
+        check(unassigned_write_handler.write_calls == 1 &&
+              table_test_get_completion_count(0) == 1,
+              "unassigned write callback completes exactly once");
+        check(table_test_get_completion_status(0, 0) ==
+                  COSIM_TABLE_STATUS_EXEC_ERROR &&
+              table_test_get_completion_committed(0, 0) == 0 &&
+              table_test_get_completion_failed_index(0, 0) == 64'd2 &&
+              table_test_get_completion_handler_error(0, 0) == -3,
+              "unassigned write output returns deterministic EXEC_ERROR");
+        unassigned_write_service.shutdown();
+
+        table_test_reset(0, 0);
+        table_test_set_scenario(0, TABLE_TEST_UNASSIGNED_READ);
+        unassigned_read_service = new(0);
+        unassigned_read_handler = new();
+        check(unassigned_read_service.register_handler(
+                  unassigned_read_handler, COSIM_TABLE_PROTECTION_NONE),
+              "unassigned-output read handler registers");
+        check(unassigned_read_service.initialize(
+                  "127.0.0.1", 10100, 0,
+                  "/absolute/unassigned-read.ini") == 0,
+              "unassigned-output read service initializes");
+        unassigned_read_service.run();
+        unassigned_read_service.wait_stopped();
+        check(unassigned_read_handler.read_calls == 1 &&
+              table_test_get_completion_count(0) == 1,
+              "unassigned read callback completes exactly once");
+        check(table_test_get_completion_status(0, 0) ==
+                  COSIM_TABLE_STATUS_EXEC_ERROR &&
+              table_test_get_completion_committed(0, 0) == 0 &&
+              table_test_get_completion_failed_index(0, 0) == 64'd2 &&
+              table_test_get_completion_handler_error(0, 0) == -3 &&
+              table_test_get_completion_read_data(0, 0) == 0,
+              "unassigned read output returns deterministic EXEC_ERROR");
+        unassigned_read_service.shutdown();
 
         table_test_reset(3, 0);
         table_test_set_scenario(3, TABLE_TEST_PENDING_WRITE_WAIT);

@@ -55,6 +55,12 @@ typedef struct {
     int infinite;
 } table_deadline_t;
 
+/* Optional unit-test seam for forcing a single TCP frame payload to arrive in
+ * two writes.  Production binaries leave both weak symbols unresolved. */
+extern size_t cosim_table_test_payload_split(size_t payload_bytes)
+    __attribute__((weak));
+extern void cosim_table_test_payload_pause(void) __attribute__((weak));
+
 void cosim_table_transport_tcp_close(void *opaque);
 
 static int deadline_init(table_deadline_t *deadline, int timeout_ms)
@@ -247,6 +253,23 @@ static int recv_exact(int fd, void *buffer, size_t bytes,
         received += (size_t)result;
     }
     return 0;
+}
+
+static int send_payload(int fd, const void *payload, size_t payload_bytes,
+                        const table_deadline_t *deadline)
+{
+    size_t split = 0;
+
+    if (cosim_table_test_payload_split != NULL)
+        split = cosim_table_test_payload_split(payload_bytes);
+    if (split == 0 || split >= payload_bytes)
+        return send_exact(fd, payload, payload_bytes, deadline);
+    if (send_exact(fd, payload, split, deadline) != 0)
+        return -1;
+    if (cosim_table_test_payload_pause != NULL)
+        cosim_table_test_payload_pause();
+    return send_exact(fd, (const unsigned char *)payload + split,
+                      payload_bytes - split, deadline);
 }
 
 static int set_nonblocking(int fd)
@@ -901,7 +924,7 @@ int cosim_table_transport_tcp_send(void *opaque,
             (header_bytes == 0 ||
              send_exact(fd, header, header_bytes, &deadline) == 0) &&
             (payload_bytes == 0 ||
-             send_exact(fd, payload, payload_bytes, &deadline) == 0))
+             send_payload(fd, payload, payload_bytes, &deadline) == 0))
             result = 0;
         if (result != 0)
             saved_errno = publish_send_failure(backend, fd, errno);

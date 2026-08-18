@@ -53,6 +53,7 @@ enum {
     TABLE_VCS_TEST_HOOK_ACTIVATION_END_SENT = 2,
     TABLE_VCS_TEST_HOOK_CLEANUP_CLAIMED = 3,
     TABLE_VCS_TEST_HOOK_WRITE_WAITING_DATA = 4,
+    TABLE_VCS_TEST_HOOK_REQUEST_RECEIVED = 5,
 };
 
 typedef struct {
@@ -76,7 +77,7 @@ typedef struct {
     int rc;
     int block_event;
     int released;
-    unsigned int count[5];
+    unsigned int count[6];
 } hook_control_t;
 
 typedef struct {
@@ -103,7 +104,7 @@ static hook_control_t hook_control = {
     0,
     0,
     0,
-    { 0, 0, 0, 0, 0 },
+    { 0, 0, 0, 0, 0, 0 },
 };
 
 static allocation_control_t allocation_control = {
@@ -113,6 +114,53 @@ static allocation_control_t allocation_control = {
     0,
     0,
 };
+
+static struct {
+    pthread_mutex_t lock;
+    int enabled;
+    int used;
+} payload_split_control = {
+    PTHREAD_MUTEX_INITIALIZER,
+    0,
+    0,
+};
+
+size_t cosim_table_test_payload_split(size_t payload_bytes)
+{
+    size_t split = 0;
+
+    CHECK(pthread_mutex_lock(&payload_split_control.lock) == 0);
+    if (payload_split_control.enabled && !payload_split_control.used &&
+        payload_bytes == COSIM_TABLE_FRAME_DATA_BYTES) {
+        payload_split_control.used = 1;
+        split = 4096;
+    }
+    CHECK(pthread_mutex_unlock(&payload_split_control.lock) == 0);
+    return split;
+}
+
+void cosim_table_test_payload_pause(void)
+{
+    struct timespec pause = { 0, 75 * 1000 * 1000L };
+
+    CHECK(nanosleep(&pause, NULL) == 0);
+}
+
+static void payload_split_enable(void)
+{
+    CHECK(pthread_mutex_lock(&payload_split_control.lock) == 0);
+    payload_split_control.enabled = 1;
+    payload_split_control.used = 0;
+    CHECK(pthread_mutex_unlock(&payload_split_control.lock) == 0);
+}
+
+static void payload_split_disable(void)
+{
+    CHECK(pthread_mutex_lock(&payload_split_control.lock) == 0);
+    CHECK(payload_split_control.used == 1);
+    payload_split_control.enabled = 0;
+    CHECK(pthread_mutex_unlock(&payload_split_control.lock) == 0);
+}
 
 static struct timespec realtime_after_ms(long milliseconds);
 
@@ -249,6 +297,27 @@ static void hook_wait(int event)
     CHECK(pthread_mutex_unlock(&hook_control.lock) == 0);
 }
 
+static void hook_wait_count(int event, unsigned int expected)
+{
+    struct timespec deadline = realtime_after_ms(TEST_TIMEOUT_MS);
+
+    CHECK(pthread_mutex_lock(&hook_control.lock) == 0);
+    while (hook_control.count[event] < expected)
+        CHECK(pthread_cond_timedwait(&hook_control.condition,
+                                     &hook_control.lock, &deadline) == 0);
+    CHECK(pthread_mutex_unlock(&hook_control.lock) == 0);
+}
+
+static unsigned int hook_count(int event)
+{
+    unsigned int count;
+
+    CHECK(pthread_mutex_lock(&hook_control.lock) == 0);
+    count = hook_control.count[event];
+    CHECK(pthread_mutex_unlock(&hook_control.lock) == 0);
+    return count;
+}
+
 static void hook_release(void)
 {
     CHECK(pthread_mutex_lock(&hook_control.lock) == 0);
@@ -380,6 +449,32 @@ static void make_partial_route_file(char path[64])
                   "stride_bytes=10\n"
                   "index_base=7\n"
                   "handler=partial\n") > 0);
+    CHECK(fclose(output) == 0);
+}
+
+static void make_large_frame_route_file(char path[64])
+{
+    int fd;
+    FILE *output;
+
+    memcpy(path, "/tmp/table_vcs_large_XXXXXX",
+           sizeof("/tmp/table_vcs_large_XXXXXX"));
+    fd = mkstemp(path);
+    CHECK(fd >= 0);
+    output = fdopen(fd, "w");
+    CHECK(output != NULL);
+    CHECK(fprintf(output,
+                  "[route.large]\n"
+                  "rc=0\n"
+                  "device=0\n"
+                  "target=pf0\n"
+                  "bar=0\n"
+                  "start=0\n"
+                  "end=0x10000\n"
+                  "entry_bytes=1\n"
+                  "stride_bytes=1\n"
+                  "index_base=0\n"
+                  "handler=large\n") > 0);
     CHECK(fclose(output) == 0);
 }
 
@@ -726,7 +821,7 @@ static void *peer_main(void *opaque)
                                sizeof(header), payload, sizeof(payload),
                                200) == 1);
     } else if (peer->kind == PEER_IDLE_THEN_CLOSE) {
-        struct timespec pause = { 0, 200 * 1000 * 1000L };
+        struct timespec pause = { 2, 0 };
 
         CHECK(nanosleep(&pause, NULL) == 0);
         cosim_table_transport_interrupt(peer->transport);
@@ -1092,11 +1187,16 @@ static int poll_until_nonidle(int rc)
         result = table_vcs_poll_request_rc(rc);
         if (result != 0)
             return result;
+        {
+            struct timespec pause = { 0, 1000 * 1000L };
+
+            CHECK(nanosleep(&pause, NULL) == 0);
+        }
     }
     return 0;
 }
 
-static void test_fragment_wait_is_bounded_and_resumable(
+static void test_poll_stays_idle_while_worker_assembles_write(
     const char *route_path)
 {
     const uint8_t seed = 0x6d;
@@ -1134,7 +1234,7 @@ static void test_fragment_wait_is_bounded_and_resumable(
     cosim_table_transport_close(server);
 }
 
-static void test_cleanup_interrupts_blocked_poll(const char *route_path)
+static void test_cleanup_interrupts_blocked_worker(const char *route_path)
 {
     uint16_t port = reserve_available_port();
     cosim_table_transport_t *server = create_server(port, 0, 0);
@@ -1142,6 +1242,9 @@ static void test_cleanup_interrupts_blocked_poll(const char *route_path)
     poll_context_t poll_context;
     pthread_t peer_thread;
     pthread_t poll_thread;
+    struct timespec started;
+    struct timespec finished;
+    int64_t elapsed_ms;
 
     CHECK(server != NULL);
     memset(&peer, 0, sizeof(peer));
@@ -1160,7 +1263,12 @@ static void test_cleanup_interrupts_blocked_poll(const char *route_path)
     hook_enable(0, 0);
     CHECK(pthread_create(&poll_thread, NULL, poll_main, &poll_context) == 0);
     hook_wait(TABLE_VCS_TEST_HOOK_WRITE_WAITING_DATA);
+    CHECK(clock_gettime(CLOCK_MONOTONIC, &started) == 0);
     table_vcs_cleanup_rc(0);
+    CHECK(clock_gettime(CLOCK_MONOTONIC, &finished) == 0);
+    elapsed_ms = (int64_t)(finished.tv_sec - started.tv_sec) * 1000 +
+                 (finished.tv_nsec - started.tv_nsec) / 1000000;
+    CHECK(elapsed_ms < 2000);
     CHECK(pthread_join(poll_thread, NULL) == 0);
     CHECK(poll_context.result == -1);
     CHECK(pthread_join(peer_thread, NULL) == 0);
@@ -1174,6 +1282,10 @@ static void test_idle_poll_is_bounded_and_recoverable(const char *route_path)
     cosim_table_transport_t *server = create_server(port, 0, 0);
     peer_context_t peer;
     pthread_t peer_thread;
+    struct timespec started;
+    struct timespec finished;
+    int64_t elapsed_ms;
+    int poll_index;
 
     CHECK(server != NULL);
     memset(&peer, 0, sizeof(peer));
@@ -1186,7 +1298,13 @@ static void test_idle_poll_is_bounded_and_recoverable(const char *route_path)
     CHECK(table_vcs_init_rc(0, "127.0.0.1", port, 0,
                             TEST_TIMEOUT_MS) == 0);
     CHECK(table_vcs_activate_routes_rc(0) == 0);
-    CHECK(table_vcs_poll_request_rc(0) == 0);
+    CHECK(clock_gettime(CLOCK_MONOTONIC, &started) == 0);
+    for (poll_index = 0; poll_index < 1000; poll_index++)
+        CHECK(table_vcs_poll_request_rc(0) == 0);
+    CHECK(clock_gettime(CLOCK_MONOTONIC, &finished) == 0);
+    elapsed_ms = (int64_t)(finished.tv_sec - started.tv_sec) * 1000 +
+                 (finished.tv_nsec - started.tv_nsec) / 1000000;
+    CHECK(elapsed_ms < 250);
     CHECK(table_vcs_get_request_kind_rc(0) == TABLE_VCS_REQUEST_NONE);
     table_vcs_interrupt_rc(0);
     table_vcs_cleanup_rc(0);
@@ -1300,6 +1418,205 @@ static void test_partial_payload_word_is_zero_padded(void)
     table_vcs_cleanup_rc(0);
     cosim_table_transport_close(server);
     CHECK(unlink(route_path) == 0);
+}
+
+static void *large_frame_peer_main(void *opaque)
+{
+    peer_context_t *peer = opaque;
+    const uint64_t transaction_id = UINT64_C(0x64006400);
+    cosim_table_frame_hdr_t frame;
+    cosim_table_route_begin_t route_begin;
+    cosim_table_route_entry_t route;
+    cosim_table_route_end_t route_end;
+    cosim_table_write_begin_t write_begin;
+    cosim_table_write_data_t write_data;
+    cosim_table_write_end_t write_end;
+    cosim_table_completion_t completion;
+    uint8_t payload[COSIM_TABLE_FRAME_DATA_BYTES];
+    uint64_t route_transaction;
+    size_t i;
+
+    memset(&route_begin, 0, sizeof(route_begin));
+    CHECK(cosim_table_recv(peer->transport, &frame, &route_begin,
+                           sizeof(route_begin), NULL, 0,
+                           TEST_TIMEOUT_MS) == 0);
+    CHECK(cosim_table_le16_to_cpu(frame.type) == COSIM_TABLE_MSG_ROUTE_BEGIN);
+    CHECK(cosim_table_le32_to_cpu(route_begin.entry_count) == 1);
+    route_transaction = cosim_table_le64_to_cpu(frame.transaction_id);
+
+    memset(&route, 0, sizeof(route));
+    CHECK(cosim_table_recv(peer->transport, &frame, &route, sizeof(route),
+                           NULL, 0, TEST_TIMEOUT_MS) == 0);
+    check_frame(&frame, COSIM_TABLE_MSG_ROUTE_ENTRY, route_transaction);
+    CHECK(cosim_table_le32_to_cpu(route.route_id) == 0);
+    CHECK(cosim_table_le32_to_cpu(route.entry_bytes) == 1);
+    CHECK(strcmp((const char *)route.handler_name, "large") == 0);
+
+    memset(&route_end, 0, sizeof(route_end));
+    CHECK(cosim_table_recv(peer->transport, &frame, &route_end,
+                           sizeof(route_end), NULL, 0,
+                           TEST_TIMEOUT_MS) == 0);
+    check_frame(&frame, COSIM_TABLE_MSG_ROUTE_END, route_transaction);
+    CHECK(route_end.generation == route_begin.generation);
+
+    memset(&write_begin, 0, sizeof(write_begin));
+    cosim_table_target_set_identity(&write_begin.target, 0, 0, 0, 0x18,
+                                    cosim_table_le32_to_cpu(
+                                        route_begin.generation));
+    write_begin.target.target_type = COSIM_TABLE_TARGET_PF;
+    write_begin.target.bar_index = 0;
+    write_begin.route_id = cosim_table_cpu_to_le32(0);
+    write_begin.entry_index = cosim_table_cpu_to_le32(0);
+    write_begin.bar_offset = cosim_table_cpu_to_le64(0);
+    write_begin.payload_bytes =
+        cosim_table_cpu_to_le32(COSIM_TABLE_FRAME_DATA_BYTES);
+    frame = make_frame(COSIM_TABLE_MSG_WRITE_BEGIN, sizeof(write_begin), 0,
+                       transaction_id);
+    CHECK(cosim_table_send(peer->transport, &frame, &write_begin, NULL,
+                           TEST_TIMEOUT_MS) == 0);
+
+    memset(&write_data, 0, sizeof(write_data));
+    write_data.data_bytes =
+        cosim_table_cpu_to_le32(COSIM_TABLE_FRAME_DATA_BYTES);
+    for (i = 0; i < sizeof(payload); i++)
+        payload[i] = payload_byte(peer->seed, i);
+    frame = make_frame(COSIM_TABLE_MSG_WRITE_DATA, sizeof(write_data),
+                       COSIM_TABLE_FRAME_DATA_BYTES, transaction_id);
+    CHECK(cosim_table_send(peer->transport, &frame, &write_data, payload,
+                           TEST_TIMEOUT_MS) == 0);
+
+    memset(&write_end, 0, sizeof(write_end));
+    write_end.payload_bytes =
+        cosim_table_cpu_to_le32(COSIM_TABLE_FRAME_DATA_BYTES);
+    frame = make_frame(COSIM_TABLE_MSG_WRITE_END, sizeof(write_end), 0,
+                       transaction_id);
+    CHECK(cosim_table_send(peer->transport, &frame, &write_end, NULL,
+                           TEST_TIMEOUT_MS) == 0);
+
+    memset(&completion, 0, sizeof(completion));
+    CHECK(cosim_table_recv(peer->transport, &frame, &completion,
+                           sizeof(completion), NULL, 0,
+                           TEST_TIMEOUT_MS) == 0);
+    check_frame(&frame, COSIM_TABLE_MSG_COMPLETION, transaction_id);
+    CHECK(cosim_table_le32_to_cpu(completion.status) ==
+          COSIM_TABLE_ST_SUCCESS);
+    CHECK(cosim_table_le32_to_cpu(completion.failed_index) == UINT32_MAX);
+    CHECK(cosim_table_le32_to_cpu(completion.committed_count) ==
+          COSIM_TABLE_FRAME_DATA_BYTES);
+    return NULL;
+}
+
+static void test_large_frame_survives_delayed_partial_payload(void)
+{
+    const uint8_t seed = 0x3c;
+    const unsigned int last_word = COSIM_TABLE_FRAME_DATA_BYTES / 8 - 1;
+    char route_path[64];
+    uint16_t port = reserve_available_port();
+    cosim_table_transport_t *server = create_server(port, 0, 0);
+    peer_context_t peer;
+    pthread_t thread;
+
+    make_large_frame_route_file(route_path);
+    CHECK(server != NULL);
+    memset(&peer, 0, sizeof(peer));
+    peer.transport = server;
+    peer.seed = seed;
+    payload_split_enable();
+    CHECK(pthread_create(&thread, NULL, large_frame_peer_main, &peer) == 0);
+    CHECK(table_vcs_load_routes_rc(0, route_path) == 0);
+    CHECK(table_vcs_register_handler_rc(0, "large", 0) == 0);
+    CHECK(table_vcs_init_rc(0, "127.0.0.1", port, 0,
+                            TEST_TIMEOUT_MS) == 0);
+    CHECK(table_vcs_activate_routes_rc(0) == 0);
+    CHECK(poll_until_nonidle(0) == 1);
+    CHECK(table_vcs_get_request_payload_bytes_rc(0) ==
+          COSIM_TABLE_FRAME_DATA_BYTES);
+    CHECK(table_vcs_get_request_payload_u64_rc(0, 0) ==
+          payload_word(seed, 0));
+    CHECK(table_vcs_get_request_payload_u64_rc(0, last_word) ==
+          payload_word(seed, last_word));
+    CHECK(table_vcs_complete_rc(0, COSIM_TABLE_ST_SUCCESS, UINT32_MAX,
+                                COSIM_TABLE_FRAME_DATA_BYTES, 0, 0) == 0);
+    CHECK(pthread_join(thread, NULL) == 0);
+    payload_split_disable();
+    table_vcs_cleanup_rc(0);
+    cosim_table_transport_close(server);
+    CHECK(unlink(route_path) == 0);
+}
+
+static void receive_read_completion_value(cosim_table_transport_t *transport,
+                                          uint64_t transaction_id,
+                                          uint32_t read_data)
+{
+    cosim_table_completion_t completion;
+    cosim_table_frame_hdr_t frame;
+
+    memset(&completion, 0, sizeof(completion));
+    CHECK(cosim_table_recv(transport, &frame, &completion,
+                           sizeof(completion), NULL, 0,
+                           TEST_TIMEOUT_MS) == 0);
+    check_frame(&frame, COSIM_TABLE_MSG_COMPLETION, transaction_id);
+    CHECK(cosim_table_le32_to_cpu(completion.status) ==
+          COSIM_TABLE_ST_SUCCESS);
+    CHECK(cosim_table_le32_to_cpu(completion.failed_index) == UINT32_MAX);
+    CHECK(cosim_table_le32_to_cpu(completion.committed_count) == 0);
+    CHECK(cosim_table_le32_to_cpu(completion.returned_dword) == read_data);
+}
+
+static void *two_request_peer_main(void *opaque)
+{
+    peer_context_t *peer = opaque;
+
+    receive_route_generation(peer);
+    send_read_request(peer, UINT64_C(0xa100));
+    send_read_request(peer, UINT64_C(0xa101));
+    receive_read_completion_value(peer->transport, UINT64_C(0xa100),
+                                  UINT32_C(0x11223344));
+    receive_read_completion_value(peer->transport, UINT64_C(0xa101),
+                                  UINT32_C(0x55667788));
+    return NULL;
+}
+
+static void test_worker_does_not_receive_next_request_before_completion(
+    const char *route_path)
+{
+    uint16_t port = reserve_available_port();
+    cosim_table_transport_t *server = create_server(port, 0, 0);
+    peer_context_t peer;
+    pthread_t thread;
+    struct timespec pause = { 0, 75 * 1000 * 1000L };
+
+    CHECK(server != NULL);
+    memset(&peer, 0, sizeof(peer));
+    peer.transport = server;
+    peer.rc = 0;
+    hook_enable(0, 0);
+    CHECK(pthread_create(&thread, NULL, two_request_peer_main, &peer) == 0);
+    CHECK(table_vcs_load_routes_rc(0, route_path) == 0);
+    register_handlers(0, 1, 1);
+    CHECK(table_vcs_init_rc(0, "127.0.0.1", port, 0,
+                            TEST_TIMEOUT_MS) == 0);
+    CHECK(table_vcs_activate_routes_rc(0) == 0);
+
+    CHECK(poll_until_nonidle(0) == 1);
+    CHECK(table_vcs_get_request_transaction_id_rc(0) == UINT64_C(0xa100));
+    hook_wait_count(TABLE_VCS_TEST_HOOK_REQUEST_RECEIVED, 1);
+    CHECK(nanosleep(&pause, NULL) == 0);
+    CHECK(hook_count(TABLE_VCS_TEST_HOOK_REQUEST_RECEIVED) == 1);
+    CHECK(table_vcs_poll_request_rc(0) == -1);
+    CHECK(table_vcs_get_request_transaction_id_rc(0) == UINT64_C(0xa100));
+    CHECK(table_vcs_complete_rc(0, COSIM_TABLE_ST_SUCCESS, UINT32_MAX, 0, 0,
+                                UINT32_C(0x11223344)) == 0);
+
+    hook_wait_count(TABLE_VCS_TEST_HOOK_REQUEST_RECEIVED, 2);
+    CHECK(poll_until_nonidle(0) == 1);
+    CHECK(table_vcs_get_request_transaction_id_rc(0) == UINT64_C(0xa101));
+    CHECK(table_vcs_complete_rc(0, COSIM_TABLE_ST_SUCCESS, UINT32_MAX, 0, 0,
+                                UINT32_C(0x55667788)) == 0);
+    CHECK(pthread_join(thread, NULL) == 0);
+    hook_disable();
+    table_vcs_cleanup_rc(0);
+    cosim_table_transport_close(server);
 }
 
 static void *write_limit_peer_main(void *opaque)
@@ -1447,9 +1764,11 @@ int main(void)
     test_preflight_failure_publishes_no_route_frame(route_path);
     test_rejects_invalid_request_wire(route_path);
     test_idle_poll_is_bounded_and_recoverable(route_path);
-    test_fragment_wait_is_bounded_and_resumable(route_path);
-    test_cleanup_interrupts_blocked_poll(route_path);
+    test_poll_stays_idle_while_worker_assembles_write(route_path);
+    test_cleanup_interrupts_blocked_worker(route_path);
+    test_worker_does_not_receive_next_request_before_completion(route_path);
     test_partial_payload_word_is_zero_padded();
+    test_large_frame_survives_delayed_partial_payload();
     test_write_size_limit_precedes_allocation();
     CHECK(unlink(route_path) == 0);
     printf("test_table_vcs_core: PASS\n");

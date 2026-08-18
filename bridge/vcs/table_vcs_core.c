@@ -47,17 +47,19 @@ typedef struct {
     size_t handler_capacity;
     cosim_table_transport_t *transport;
     table_vcs_request_t request;
-    table_vcs_request_t pending_request;
-    uint64_t pending_received;
+    pthread_t worker;
+    pthread_cond_t request_changed;
     int io_timeout_ms;
     unsigned int active_io;
     int loaded;
     int initialized;
     int activated;
     int activating;
-    int polling;
     int completing;
     int outstanding;
+    int delivered;
+    int worker_started;
+    int stop_requested;
     int interrupted;
     int terminal;
     int cleaning;
@@ -65,11 +67,9 @@ typedef struct {
 
 static table_vcs_state_t table_states[COSIM_MAX_RCS];
 
-/* Each complete-frame receive is bounded so the SV scheduler regains control
- * between fragments.  The transport still treats a timeout after consuming a
- * partial frame as terminal; only a clean no-byte timeout is recoverable. */
-#define TABLE_VCS_POLL_TIMEOUT_MS 10
 static pthread_once_t table_states_once = PTHREAD_ONCE_INIT;
+
+static void *table_vcs_worker_main(void *opaque);
 
 /* Unit tests may interpose this weak symbol to stop at concurrency points. */
 extern void table_vcs_test_hook(int rc, int event) __attribute__((weak));
@@ -80,6 +80,7 @@ enum {
     TABLE_VCS_TEST_HOOK_ACTIVATION_END_SENT = 2,
     TABLE_VCS_TEST_HOOK_CLEANUP_CLAIMED = 3,
     TABLE_VCS_TEST_HOOK_WRITE_WAITING_DATA = 4,
+    TABLE_VCS_TEST_HOOK_REQUEST_RECEIVED = 5,
 };
 
 static void run_test_hook(int rc, int event)
@@ -116,6 +117,7 @@ static void initialize_states(void)
     for (rc = 0; rc < COSIM_MAX_RCS; rc++) {
         (void)pthread_mutex_init(&table_states[rc].lock, NULL);
         (void)pthread_cond_init(&table_states[rc].idle, NULL);
+        (void)pthread_cond_init(&table_states[rc].request_changed, NULL);
         table_states[rc].routes =
             (cosim_table_route_map_t)COSIM_TABLE_ROUTE_MAP_INIT;
     }
@@ -456,7 +458,19 @@ done:
             state->published_routes = subset;
             state->published_count = count;
             state->activated = 1;
-            subset = NULL;
+            state->stop_requested = 0;
+            state->delivered = 0;
+            if (pthread_create(&state->worker, NULL, table_vcs_worker_main,
+                               state) == 0) {
+                state->worker_started = 1;
+                subset = NULL;
+            } else {
+                state->published_routes = NULL;
+                state->published_count = 0;
+                state->activated = 0;
+                state->stop_requested = 1;
+                result = -1;
+            }
         } else {
             result = -1;
         }
@@ -485,8 +499,7 @@ static int receive_frame(cosim_table_transport_t *transport,
 {
     memset(header, 0, sizeof(*header));
     return cosim_table_recv(transport, frame, header, sizeof(*header),
-                            payload, COSIM_TABLE_FRAME_DATA_BYTES,
-                            TABLE_VCS_POLL_TIMEOUT_MS);
+                            payload, COSIM_TABLE_FRAME_DATA_BYTES, -1);
 }
 
 static int prepare_common_request(table_vcs_state_t *state, int rc,
@@ -549,8 +562,8 @@ static int prepare_write(table_vcs_state_t *state, int rc,
     return 0;
 }
 
-/* Returns one for a complete write, zero for a clean idle timeout while the
- * request remains resumable, and minus one for terminal/protocol failure. */
+/* Worker-only blocking assembly.  interrupt() is the only asynchronous exit
+ * while a complete frame or later write fragment is pending. */
 static int advance_write(cosim_table_transport_t *transport,
                          table_vcs_request_t *request,
                          uint64_t *received)
@@ -566,8 +579,6 @@ static int advance_write(cosim_table_transport_t *transport,
         int receive_result;
 
         receive_result = receive_frame(transport, &frame, &header, fragment);
-        if (receive_result == 1)
-            return 0;
         if (receive_result != 0 ||
             cosim_table_le64_to_cpu(frame.transaction_id) != transaction_id)
             return -1;
@@ -639,100 +650,123 @@ static void discard_request(table_vcs_request_t *request)
     memset(request, 0, sizeof(*request));
 }
 
+static void worker_mark_terminal(table_vcs_state_t *state)
+{
+    cosim_table_transport_t *transport;
+
+    (void)pthread_mutex_lock(&state->lock);
+    state->terminal = 1;
+    state->stop_requested = 1;
+    transport = state->transport;
+    (void)pthread_cond_broadcast(&state->request_changed);
+    (void)pthread_mutex_unlock(&state->lock);
+    cosim_table_transport_interrupt(transport);
+}
+
+static void *table_vcs_worker_main(void *opaque)
+{
+    table_vcs_state_t *state = opaque;
+    const int rc = (int)(state - table_states);
+    cosim_table_transport_t *transport;
+
+    for (;;) {
+        cosim_table_frame_hdr_t frame;
+        table_vcs_header_t header;
+        table_vcs_request_t request;
+        uint8_t payload[COSIM_TABLE_FRAME_DATA_BYTES];
+        uint64_t received = 0;
+        uint16_t kind;
+
+        memset(&request, 0, sizeof(request));
+        (void)pthread_mutex_lock(&state->lock);
+        if (state->stop_requested || state->cleaning || state->terminal) {
+            (void)pthread_mutex_unlock(&state->lock);
+            break;
+        }
+        transport = state->transport;
+        (void)pthread_mutex_unlock(&state->lock);
+
+        if (receive_frame(transport, &frame, &header, payload) != 0)
+            goto receive_failed;
+        run_test_hook(rc, TABLE_VCS_TEST_HOOK_REQUEST_RECEIVED);
+        kind = cosim_table_le16_to_cpu(frame.type);
+        if (kind == COSIM_TABLE_MSG_WRITE_BEGIN) {
+            if (prepare_write(state, rc, &frame, &header.write_begin,
+                              &request) != 0)
+                goto protocol_failed;
+            run_test_hook(rc, TABLE_VCS_TEST_HOOK_WRITE_WAITING_DATA);
+            if (advance_write(transport, &request, &received) != 1)
+                goto protocol_failed;
+        } else if (kind == COSIM_TABLE_MSG_READ_DWORD) {
+            if (assemble_read(state, rc, &frame, &header.read, &request) != 0)
+                goto protocol_failed;
+        } else {
+            goto protocol_failed;
+        }
+
+        (void)pthread_mutex_lock(&state->lock);
+        if (state->stop_requested || state->cleaning || state->terminal) {
+            (void)pthread_mutex_unlock(&state->lock);
+            discard_request(&request);
+            break;
+        }
+        if (state->outstanding) {
+            (void)pthread_mutex_unlock(&state->lock);
+            goto protocol_failed;
+        }
+        state->request = request;
+        memset(&request, 0, sizeof(request));
+        state->outstanding = 1;
+        state->delivered = 0;
+        (void)pthread_cond_broadcast(&state->request_changed);
+        while (state->outstanding && !state->stop_requested &&
+               !state->cleaning && !state->terminal)
+            (void)pthread_cond_wait(&state->request_changed, &state->lock);
+        if (state->stop_requested || state->cleaning || state->terminal) {
+            (void)pthread_mutex_unlock(&state->lock);
+            break;
+        }
+        (void)pthread_mutex_unlock(&state->lock);
+        continue;
+
+protocol_failed:
+        discard_request(&request);
+        worker_mark_terminal(state);
+        break;
+
+receive_failed:
+        discard_request(&request);
+        (void)pthread_mutex_lock(&state->lock);
+        if (!state->stop_requested && !state->cleaning)
+            state->terminal = 1;
+        state->stop_requested = 1;
+        (void)pthread_cond_broadcast(&state->request_changed);
+        (void)pthread_mutex_unlock(&state->lock);
+        break;
+    }
+    return NULL;
+}
+
 int table_vcs_poll_request_rc(int rc)
 {
     table_vcs_state_t *state = get_state(rc);
-    cosim_table_transport_t *transport;
-    cosim_table_frame_hdr_t frame;
-    table_vcs_header_t header;
-    table_vcs_request_t request;
-    uint8_t payload[COSIM_TABLE_FRAME_DATA_BYTES];
-    uint16_t kind;
-    int receive_result;
-    int has_pending;
-    int result = -1;
+    int result;
 
     if (state == NULL)
         return -1;
-    memset(&request, 0, sizeof(request));
     (void)pthread_mutex_lock(&state->lock);
-    if (!state->activated || state->terminal || state->cleaning ||
-        state->outstanding || state->polling || state->completing) {
-        (void)pthread_mutex_unlock(&state->lock);
-        return -1;
-    }
-    state->polling = 1;
-    state->active_io++;
-    transport = state->transport;
-    has_pending = state->pending_request.kind == TABLE_VCS_REQUEST_WRITE;
-    (void)pthread_mutex_unlock(&state->lock);
-
-    if (has_pending) {
-        result = advance_write(transport, &state->pending_request,
-                               &state->pending_received);
-        if (result < 0)
-            goto protocol;
-        if (result == 0)
-            goto done;
-        request = state->pending_request;
-        memset(&state->pending_request, 0, sizeof(state->pending_request));
-        state->pending_received = 0;
-        goto done;
-    }
-
-    receive_result = receive_frame(transport, &frame, &header, payload);
-    if (receive_result == 1) {
-        result = 0;
-        goto done;
-    }
-    if (receive_result != 0)
-        goto done;
-    kind = cosim_table_le16_to_cpu(frame.type);
-    if (kind == COSIM_TABLE_MSG_WRITE_BEGIN) {
-        if (prepare_write(state, rc, &frame, &header.write_begin,
-                          &state->pending_request) != 0)
-            goto protocol;
-        state->pending_received = 0;
-        run_test_hook(rc, TABLE_VCS_TEST_HOOK_WRITE_WAITING_DATA);
-        result = advance_write(transport, &state->pending_request,
-                               &state->pending_received);
-        if (result < 0)
-            goto protocol;
-        if (result == 0)
-            goto done;
-        request = state->pending_request;
-        memset(&state->pending_request, 0, sizeof(state->pending_request));
-        state->pending_received = 0;
-    } else if (kind == COSIM_TABLE_MSG_READ_DWORD) {
-        if (assemble_read(state, rc, &frame, &header.read, &request) != 0)
-            goto protocol;
-    } else {
-        goto protocol;
-    }
-    result = 1;
-    goto done;
-
-protocol:
-    cosim_table_transport_interrupt(transport);
-
-done:
-    (void)pthread_mutex_lock(&state->lock);
-    if (result == 1 && !state->cleaning && !state->terminal &&
-        !state->interrupted) {
-        state->request = request;
-        state->outstanding = 1;
-        memset(&request, 0, sizeof(request));
-    } else if (!(result == 0 && !state->cleaning && !state->terminal &&
-                 !state->interrupted)) {
-        state->terminal = 1;
+    if (!state->activated || state->cleaning || state->terminal ||
+        state->stop_requested) {
         result = -1;
-        discard_request(&state->pending_request);
-        state->pending_received = 0;
+    } else if (!state->outstanding) {
+        result = 0;
+    } else if (state->delivered || state->completing) {
+        result = -1;
+    } else {
+        state->delivered = 1;
+        result = 1;
     }
-    state->polling = 0;
-    end_io_locked(state);
     (void)pthread_mutex_unlock(&state->lock);
-    discard_request(&request);
     return result;
 }
 
@@ -779,8 +813,8 @@ int table_vcs_complete_rc(int rc, int status,
     if (state == NULL)
         return -1;
     (void)pthread_mutex_lock(&state->lock);
-    if (!state->outstanding || state->completing || state->cleaning ||
-        state->terminal ||
+    if (!state->outstanding || !state->delivered || state->completing ||
+        state->cleaning || state->terminal ||
         !completion_valid(&state->request, status, failed_index, committed,
                           handler_error, read_data)) {
         (void)pthread_mutex_unlock(&state->lock);
@@ -807,11 +841,15 @@ int table_vcs_complete_rc(int rc, int status,
                               timeout_ms);
 
     (void)pthread_mutex_lock(&state->lock);
-    if (result != 0)
+    if (result != 0) {
         state->terminal = 1;
+        state->stop_requested = 1;
+    }
     discard_request(&state->request);
     state->outstanding = 0;
+    state->delivered = 0;
     state->completing = 0;
+    (void)pthread_cond_broadcast(&state->request_changed);
     end_io_locked(state);
     (void)pthread_mutex_unlock(&state->lock);
     return result == 0 ? 0 : -1;
@@ -819,7 +857,7 @@ int table_vcs_complete_rc(int rc, int status,
 
 static int request_available(const table_vcs_state_t *state)
 {
-    return state->outstanding && !state->completing;
+    return state->outstanding && state->delivered && !state->completing;
 }
 
 int table_vcs_get_request_kind_rc(int rc)
@@ -1094,21 +1132,23 @@ done:
 void table_vcs_interrupt_rc(int rc)
 {
     table_vcs_state_t *state = get_state(rc);
+    cosim_table_transport_t *transport;
 
     if (state == NULL)
         return;
     (void)pthread_mutex_lock(&state->lock);
     state->interrupted = 1;
     state->terminal = 1;
-    if (state->transport != NULL)
-        cosim_table_transport_interrupt(state->transport);
+    state->stop_requested = 1;
+    transport = state->transport;
+    (void)pthread_cond_broadcast(&state->request_changed);
     (void)pthread_mutex_unlock(&state->lock);
+    cosim_table_transport_interrupt(transport);
 }
 
 static void reset_state_locked(table_vcs_state_t *state)
 {
     discard_request(&state->request);
-    discard_request(&state->pending_request);
     cosim_table_route_free(&state->routes);
     free(state->published_routes);
     free(state->handlers);
@@ -1120,14 +1160,15 @@ static void reset_state_locked(table_vcs_state_t *state)
     state->transport = NULL;
     state->io_timeout_ms = 0;
     state->active_io = 0;
-    state->pending_received = 0;
     state->loaded = 0;
     state->initialized = 0;
     state->activated = 0;
     state->activating = 0;
-    state->polling = 0;
     state->completing = 0;
     state->outstanding = 0;
+    state->delivered = 0;
+    state->worker_started = 0;
+    state->stop_requested = 0;
     state->interrupted = 0;
     state->terminal = 0;
     state->cleaning = 0;
@@ -1137,6 +1178,8 @@ void table_vcs_cleanup_rc(int rc)
 {
     table_vcs_state_t *state = get_state(rc);
     cosim_table_transport_t *transport;
+    pthread_t worker;
+    int join_worker;
 
     if (state == NULL)
         return;
@@ -1148,12 +1191,30 @@ void table_vcs_cleanup_rc(int rc)
     state->cleaning = 1;
     state->interrupted = 1;
     state->terminal = 1;
+    state->stop_requested = 1;
     transport = state->transport;
+    worker = state->worker;
+    join_worker = state->worker_started;
     run_test_hook(rc, TABLE_VCS_TEST_HOOK_CLEANUP_CLAIMED);
-    if (transport != NULL)
-        cosim_table_transport_interrupt(transport);
+    (void)pthread_cond_broadcast(&state->request_changed);
+    (void)pthread_mutex_unlock(&state->lock);
+
+    cosim_table_transport_interrupt(transport);
+    if (join_worker)
+        (void)pthread_join(worker, NULL);
+
+    (void)pthread_mutex_lock(&state->lock);
     while (state->active_io != 0)
         (void)pthread_cond_wait(&state->idle, &state->lock);
+    discard_request(&state->request);
+    cosim_table_route_free(&state->routes);
+    free(state->published_routes);
+    free(state->handlers);
+    state->published_routes = NULL;
+    state->published_count = 0;
+    state->handlers = NULL;
+    state->handler_count = 0;
+    state->handler_capacity = 0;
     state->transport = NULL;
     (void)pthread_mutex_unlock(&state->lock);
 
