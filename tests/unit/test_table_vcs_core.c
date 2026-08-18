@@ -46,6 +46,7 @@ typedef enum {
     PEER_IDLE_THEN_CLOSE,
     PEER_DELAYED_WRITE,
     PEER_ROUTES_ACCEPT_CLOSE,
+    PEER_CLEANUP_FROM_WORKER,
 } peer_kind_t;
 
 enum {
@@ -77,6 +78,10 @@ typedef struct {
     int rc;
     int block_event;
     int released;
+    int cleanup_on_request;
+    int cleanup_returned;
+    int hold_after_cleanup;
+    int release_after_cleanup;
     unsigned int count[6];
 } hook_control_t;
 
@@ -97,9 +102,25 @@ typedef struct {
     int rc;
 } cleanup_context_t;
 
+typedef struct {
+    int rc;
+    pthread_mutex_t lock;
+    pthread_cond_t condition;
+    int returned;
+} observed_cleanup_context_t;
+
+/* Test-only entry point intentionally omitted from the public transport API. */
+extern int cosim_table_transport_test_inject_tcp_payload_split(
+    cosim_table_transport_t *transport, size_t payload_bytes, size_t split,
+    unsigned int pause_ms);
+
 static hook_control_t hook_control = {
     PTHREAD_MUTEX_INITIALIZER,
     PTHREAD_COND_INITIALIZER,
+    0,
+    0,
+    0,
+    0,
     0,
     0,
     0,
@@ -114,53 +135,6 @@ static allocation_control_t allocation_control = {
     0,
     0,
 };
-
-static struct {
-    pthread_mutex_t lock;
-    int enabled;
-    int used;
-} payload_split_control = {
-    PTHREAD_MUTEX_INITIALIZER,
-    0,
-    0,
-};
-
-size_t cosim_table_test_payload_split(size_t payload_bytes)
-{
-    size_t split = 0;
-
-    CHECK(pthread_mutex_lock(&payload_split_control.lock) == 0);
-    if (payload_split_control.enabled && !payload_split_control.used &&
-        payload_bytes == COSIM_TABLE_FRAME_DATA_BYTES) {
-        payload_split_control.used = 1;
-        split = 4096;
-    }
-    CHECK(pthread_mutex_unlock(&payload_split_control.lock) == 0);
-    return split;
-}
-
-void cosim_table_test_payload_pause(void)
-{
-    struct timespec pause = { 0, 75 * 1000 * 1000L };
-
-    CHECK(nanosleep(&pause, NULL) == 0);
-}
-
-static void payload_split_enable(void)
-{
-    CHECK(pthread_mutex_lock(&payload_split_control.lock) == 0);
-    payload_split_control.enabled = 1;
-    payload_split_control.used = 0;
-    CHECK(pthread_mutex_unlock(&payload_split_control.lock) == 0);
-}
-
-static void payload_split_disable(void)
-{
-    CHECK(pthread_mutex_lock(&payload_split_control.lock) == 0);
-    CHECK(payload_split_control.used == 1);
-    payload_split_control.enabled = 0;
-    CHECK(pthread_mutex_unlock(&payload_split_control.lock) == 0);
-}
 
 static struct timespec realtime_after_ms(long milliseconds);
 
@@ -261,6 +235,8 @@ static struct timespec realtime_after_ms(long milliseconds)
 /* Strong test definition resolves the production core's optional weak hook. */
 void table_vcs_test_hook(int rc, int event)
 {
+    int cleanup_on_request = 0;
+
     CHECK(pthread_mutex_lock(&hook_control.lock) == 0);
     if (hook_control.enabled && hook_control.rc == rc && event > 0 &&
         (size_t)event < sizeof(hook_control.count) /
@@ -271,8 +247,22 @@ void table_vcs_test_hook(int rc, int event)
                hook_control.count[event] == 1 && !hook_control.released)
             CHECK(pthread_cond_wait(&hook_control.condition,
                                     &hook_control.lock) == 0);
+        cleanup_on_request = hook_control.cleanup_on_request &&
+                             event == TABLE_VCS_TEST_HOOK_REQUEST_RECEIVED;
     }
     CHECK(pthread_mutex_unlock(&hook_control.lock) == 0);
+
+    if (cleanup_on_request) {
+        table_vcs_cleanup_rc(rc);
+        CHECK(pthread_mutex_lock(&hook_control.lock) == 0);
+        hook_control.cleanup_returned = 1;
+        CHECK(pthread_cond_broadcast(&hook_control.condition) == 0);
+        while (hook_control.enabled && hook_control.hold_after_cleanup &&
+               !hook_control.release_after_cleanup)
+            CHECK(pthread_cond_wait(&hook_control.condition,
+                                    &hook_control.lock) == 0);
+        CHECK(pthread_mutex_unlock(&hook_control.lock) == 0);
+    }
 }
 
 static void hook_enable(int rc, int block_event)
@@ -283,6 +273,38 @@ static void hook_enable(int rc, int block_event)
     hook_control.rc = rc;
     hook_control.block_event = block_event;
     hook_control.released = 0;
+    hook_control.cleanup_on_request = 0;
+    hook_control.cleanup_returned = 0;
+    hook_control.hold_after_cleanup = 0;
+    hook_control.release_after_cleanup = 0;
+    CHECK(pthread_mutex_unlock(&hook_control.lock) == 0);
+}
+
+static void hook_enable_cleanup_from_worker(int rc)
+{
+    hook_enable(rc, 0);
+    CHECK(pthread_mutex_lock(&hook_control.lock) == 0);
+    hook_control.cleanup_on_request = 1;
+    hook_control.hold_after_cleanup = 1;
+    CHECK(pthread_mutex_unlock(&hook_control.lock) == 0);
+}
+
+static void hook_wait_cleanup_returned(void)
+{
+    struct timespec deadline = realtime_after_ms(TEST_TIMEOUT_MS);
+
+    CHECK(pthread_mutex_lock(&hook_control.lock) == 0);
+    while (!hook_control.cleanup_returned)
+        CHECK(pthread_cond_timedwait(&hook_control.condition,
+                                     &hook_control.lock, &deadline) == 0);
+    CHECK(pthread_mutex_unlock(&hook_control.lock) == 0);
+}
+
+static void hook_release_after_cleanup(void)
+{
+    CHECK(pthread_mutex_lock(&hook_control.lock) == 0);
+    hook_control.release_after_cleanup = 1;
+    CHECK(pthread_cond_broadcast(&hook_control.condition) == 0);
     CHECK(pthread_mutex_unlock(&hook_control.lock) == 0);
 }
 
@@ -331,6 +353,7 @@ static void hook_disable(void)
     CHECK(pthread_mutex_lock(&hook_control.lock) == 0);
     hook_control.enabled = 0;
     hook_control.released = 1;
+    hook_control.release_after_cleanup = 1;
     CHECK(pthread_cond_broadcast(&hook_control.condition) == 0);
     CHECK(pthread_mutex_unlock(&hook_control.lock) == 0);
 }
@@ -839,6 +862,16 @@ static void *peer_main(void *opaque)
         CHECK(cosim_table_recv(peer->transport, &frame, header,
                                sizeof(header), payload, sizeof(payload),
                                -1) == -1);
+    } else if (peer->kind == PEER_CLEANUP_FROM_WORKER) {
+        const uint64_t transaction_id = UINT64_C(0xc200);
+        cosim_table_frame_hdr_t frame;
+        unsigned char header[sizeof(cosim_table_route_entry_t)];
+        unsigned char payload[COSIM_TABLE_FRAME_DATA_BYTES];
+
+        send_read_request(peer, transaction_id);
+        CHECK(cosim_table_recv(peer->transport, &frame, header,
+                               sizeof(header), payload, sizeof(payload),
+                               -1) == -1);
     } else {
         send_invalid_request(peer);
     }
@@ -851,6 +884,39 @@ static void *cleanup_main(void *opaque)
 
     table_vcs_cleanup_rc(cleanup->rc);
     return NULL;
+}
+
+static void *observed_cleanup_main(void *opaque)
+{
+    observed_cleanup_context_t *cleanup = opaque;
+
+    table_vcs_cleanup_rc(cleanup->rc);
+    CHECK(pthread_mutex_lock(&cleanup->lock) == 0);
+    cleanup->returned = 1;
+    CHECK(pthread_cond_broadcast(&cleanup->condition) == 0);
+    CHECK(pthread_mutex_unlock(&cleanup->lock) == 0);
+    return NULL;
+}
+
+static int observed_cleanup_returned(observed_cleanup_context_t *cleanup)
+{
+    int returned;
+
+    CHECK(pthread_mutex_lock(&cleanup->lock) == 0);
+    returned = cleanup->returned;
+    CHECK(pthread_mutex_unlock(&cleanup->lock) == 0);
+    return returned;
+}
+
+static void observed_cleanup_wait(observed_cleanup_context_t *cleanup)
+{
+    struct timespec deadline = realtime_after_ms(TEST_TIMEOUT_MS);
+
+    CHECK(pthread_mutex_lock(&cleanup->lock) == 0);
+    while (!cleanup->returned)
+        CHECK(pthread_cond_timedwait(&cleanup->condition, &cleanup->lock,
+                                     &deadline) == 0);
+    CHECK(pthread_mutex_unlock(&cleanup->lock) == 0);
 }
 
 static void *activate_main(void *opaque)
@@ -1276,6 +1342,50 @@ static void test_cleanup_interrupts_blocked_worker(const char *route_path)
     cosim_table_transport_close(server);
 }
 
+static void test_worker_cleanup_defers_finalization(const char *route_path)
+{
+    uint16_t port = reserve_available_port();
+    cosim_table_transport_t *server = create_server(port, 0, 0);
+    peer_context_t peer;
+    observed_cleanup_context_t cleanup;
+    pthread_t peer_thread;
+    pthread_t cleanup_thread;
+    struct timespec pause = { 0, 75 * 1000 * 1000L };
+
+    CHECK(server != NULL);
+    memset(&peer, 0, sizeof(peer));
+    peer.transport = server;
+    peer.kind = PEER_CLEANUP_FROM_WORKER;
+    peer.rc = 0;
+    CHECK(pthread_mutex_init(&cleanup.lock, NULL) == 0);
+    CHECK(pthread_cond_init(&cleanup.condition, NULL) == 0);
+    cleanup.rc = 0;
+    cleanup.returned = 0;
+
+    hook_enable_cleanup_from_worker(0);
+    CHECK(pthread_create(&peer_thread, NULL, peer_main, &peer) == 0);
+    CHECK(table_vcs_load_routes_rc(0, route_path) == 0);
+    register_handlers(0, 1, 1);
+    CHECK(table_vcs_init_rc(0, "127.0.0.1", port, 0,
+                            TEST_TIMEOUT_MS) == 0);
+    CHECK(table_vcs_activate_routes_rc(0) == 0);
+    hook_wait_cleanup_returned();
+
+    CHECK(pthread_create(&cleanup_thread, NULL, observed_cleanup_main,
+                         &cleanup) == 0);
+    CHECK(nanosleep(&pause, NULL) == 0);
+    CHECK(!observed_cleanup_returned(&cleanup));
+    hook_release_after_cleanup();
+    observed_cleanup_wait(&cleanup);
+    CHECK(pthread_join(cleanup_thread, NULL) == 0);
+    CHECK(pthread_join(peer_thread, NULL) == 0);
+    table_vcs_cleanup_rc(0);
+    hook_disable();
+    CHECK(pthread_cond_destroy(&cleanup.condition) == 0);
+    CHECK(pthread_mutex_destroy(&cleanup.lock) == 0);
+    cosim_table_transport_close(server);
+}
+
 static void test_idle_poll_is_bounded_and_recoverable(const char *route_path)
 {
     uint16_t port = reserve_available_port();
@@ -1518,16 +1628,19 @@ static void test_large_frame_survives_delayed_partial_payload(void)
 
     make_large_frame_route_file(route_path);
     CHECK(server != NULL);
+    CHECK(cosim_table_transport_test_inject_tcp_payload_split(
+              server, COSIM_TABLE_FRAME_DATA_BYTES, 4096, 75) == 0);
     memset(&peer, 0, sizeof(peer));
     peer.transport = server;
     peer.seed = seed;
-    payload_split_enable();
     CHECK(pthread_create(&thread, NULL, large_frame_peer_main, &peer) == 0);
     CHECK(table_vcs_load_routes_rc(0, route_path) == 0);
     CHECK(table_vcs_register_handler_rc(0, "large", 0) == 0);
     CHECK(table_vcs_init_rc(0, "127.0.0.1", port, 0,
                             TEST_TIMEOUT_MS) == 0);
     CHECK(table_vcs_activate_routes_rc(0) == 0);
+    CHECK(cosim_table_transport_test_inject_tcp_payload_split(
+              server, COSIM_TABLE_FRAME_DATA_BYTES, 4096, 75) == -1);
     CHECK(poll_until_nonidle(0) == 1);
     CHECK(table_vcs_get_request_payload_bytes_rc(0) ==
           COSIM_TABLE_FRAME_DATA_BYTES);
@@ -1538,7 +1651,6 @@ static void test_large_frame_survives_delayed_partial_payload(void)
     CHECK(table_vcs_complete_rc(0, COSIM_TABLE_ST_SUCCESS, UINT32_MAX,
                                 COSIM_TABLE_FRAME_DATA_BYTES, 0, 0) == 0);
     CHECK(pthread_join(thread, NULL) == 0);
-    payload_split_disable();
     table_vcs_cleanup_rc(0);
     cosim_table_transport_close(server);
     CHECK(unlink(route_path) == 0);
@@ -1766,6 +1878,7 @@ int main(void)
     test_idle_poll_is_bounded_and_recoverable(route_path);
     test_poll_stays_idle_while_worker_assembles_write(route_path);
     test_cleanup_interrupts_blocked_worker(route_path);
+    test_worker_cleanup_defers_finalization(route_path);
     test_worker_does_not_receive_next_request_before_completion(route_path);
     test_partial_payload_word_is_zero_padded();
     test_large_frame_survives_delayed_partial_payload();

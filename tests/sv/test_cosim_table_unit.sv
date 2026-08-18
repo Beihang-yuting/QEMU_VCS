@@ -46,6 +46,7 @@ module test_cosim_table_unit;
             result.committed_count = 1;
             result.handler_error = 0;
             result.read_data = '0;
+            cosim_table_result_mark_valid(result);
         endtask
     endclass
 
@@ -250,9 +251,12 @@ module test_cosim_table_unit;
         check(result.failed_index[63:32] == 32'h0000_0000 &&
               result.failed_index[31:0] == 32'hffff_ffff,
               "successful result uses the wire-compatible failed-index sentinel");
+        check(result.valid_cookie === COSIM_TABLE_RESULT_VALID_COOKIE,
+              "complete write result carries the validity cookie");
         lower_handler.read_dword(ctx, 64'd55, 0, read_data, result);
         check(result.status == COSIM_TABLE_STATUS_UNSUPPORTED &&
-              result.failed_index == 64'd55,
+              result.failed_index == 64'd55 &&
+              result.valid_cookie === COSIM_TABLE_RESULT_VALID_COOKIE,
               "default unsupported read reports the requested index");
 
         check(registry.get_default_protection("VIO_NOTIFY", protection),

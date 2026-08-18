@@ -49,6 +49,7 @@ typedef struct {
 
 localparam longint unsigned COSIM_TABLE_FAILED_INDEX_NONE =
     64'h0000_0000_ffff_ffff;
+localparam int unsigned COSIM_TABLE_RESULT_VALID_COOKIE = 32'h4354_5253;
 
 typedef struct {
     cosim_table_status_e status;
@@ -56,6 +57,20 @@ typedef struct {
     int unsigned committed_count;
     int handler_error;
     bit [31:0] read_data;
+    // SV-only completion marker; this field is never transferred on the wire.
+    int unsigned valid_cookie;
 } cosim_table_result;
+
+function automatic void cosim_table_result_mark_valid(
+    ref cosim_table_result result
+);
+    result.valid_cookie = COSIM_TABLE_RESULT_VALID_COOKIE;
+endfunction
+
+function automatic bit cosim_table_result_is_valid(
+    input cosim_table_result result
+);
+    return result.valid_cookie === COSIM_TABLE_RESULT_VALID_COOKIE;
+endfunction
 
 `endif

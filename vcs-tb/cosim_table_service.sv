@@ -304,6 +304,29 @@ class cosim_table_service;
             error_counters[key]++;
     endfunction
 
+    protected function bit write_success_valid(
+        input cosim_table_result result
+    );
+        return result.status === COSIM_TABLE_STATUS_SUCCESS &&
+               cosim_table_result_is_valid(result) &&
+               result.failed_index === COSIM_TABLE_FAILED_INDEX_NONE &&
+               result.committed_count === 1 &&
+               result.handler_error === 0 &&
+               result.read_data === 32'b0;
+    endfunction
+
+    protected function bit read_success_valid(
+        input cosim_table_result result,
+        input bit [31:0] data
+    );
+        return result.status === COSIM_TABLE_STATUS_SUCCESS &&
+               cosim_table_result_is_valid(result) &&
+               result.failed_index === COSIM_TABLE_FAILED_INDEX_NONE &&
+               result.committed_count === 0 &&
+               result.handler_error === 0 &&
+               result.read_data === data;
+    endfunction
+
     protected task dispatch_write(
         input cosim_table_context ctx,
         output cosim_table_result completion
@@ -382,20 +405,34 @@ class cosim_table_service;
             handler.write_entry(entry_ctx, index, raw_data, handler_result);
             entry_counters[key]++;
             byte_counters[key] += raw_data.size();
+            if (!cosim_table_result_is_valid(handler_result)) begin
+                handler_result.status = COSIM_TABLE_STATUS_EXEC_ERROR;
+                handler_result.failed_index = index;
+                handler_result.committed_count = 0;
+                handler_result.handler_error = -3;
+                handler_result.read_data = '0;
+                completion.status = COSIM_TABLE_STATUS_EXEC_ERROR;
+                completion.failed_index = index;
+                completion.committed_count = committed;
+                completion.handler_error = -3;
+                log_handler_result(entry_ctx, index, handler_result,
+                                   committed);
+                return;
+            end
             if (handler_result.status !== COSIM_TABLE_STATUS_SUCCESS) begin
                 completion.status = COSIM_TABLE_STATUS_EXEC_ERROR;
                 completion.failed_index = index;
                 completion.committed_count = committed;
                 completion.handler_error =
-                    $isunknown(handler_result.handler_error)
+                    ($isunknown(handler_result.status) ||
+                     $isunknown(handler_result.handler_error))
                         ? -3 : handler_result.handler_error;
                 handler_result.failed_index = index;
                 log_handler_result(entry_ctx, index, handler_result,
                                    committed);
                 return;
             end
-            if (handler_result.failed_index !==
-                    COSIM_TABLE_FAILED_INDEX_NONE) begin
+            if (!write_success_valid(handler_result)) begin
                 handler_result.status = COSIM_TABLE_STATUS_EXEC_ERROR;
                 handler_result.failed_index = index;
                 handler_result.committed_count = 0;
@@ -456,12 +493,19 @@ class cosim_table_service;
         handler.read_dword(ctx, ctx.first_index, ctx.byte_offset, read_data,
                            handler_result);
         read_counters[key]++;
-        if (handler_result.status !== COSIM_TABLE_STATUS_SUCCESS) begin
+        if (!cosim_table_result_is_valid(handler_result)) begin
+            handler_result.status = COSIM_TABLE_STATUS_EXEC_ERROR;
+            handler_result.failed_index = ctx.first_index;
+            handler_result.committed_count = 0;
+            handler_result.handler_error = -3;
+            handler_result.read_data = '0;
+            completion.handler_error = -3;
+        end else if (handler_result.status !== COSIM_TABLE_STATUS_SUCCESS) begin
             completion.handler_error =
-                $isunknown(handler_result.handler_error)
+                ($isunknown(handler_result.status) ||
+                 $isunknown(handler_result.handler_error))
                     ? -3 : handler_result.handler_error;
-        end else if (handler_result.failed_index !==
-                         COSIM_TABLE_FAILED_INDEX_NONE) begin
+        end else if (!read_success_valid(handler_result, read_data)) begin
             handler_result.status = COSIM_TABLE_STATUS_EXEC_ERROR;
             handler_result.failed_index = ctx.first_index;
             handler_result.committed_count = 0;

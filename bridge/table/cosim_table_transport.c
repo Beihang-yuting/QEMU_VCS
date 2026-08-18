@@ -30,6 +30,8 @@ int cosim_table_transport_tcp_recv(void *backend,
                                    int timeout_ms);
 void cosim_table_transport_tcp_interrupt(void *backend);
 void cosim_table_transport_tcp_close(void *backend);
+int cosim_table_transport_tcp_test_inject_payload_split(
+    void *backend, size_t payload_bytes, size_t split, unsigned int pause_ms);
 
 cosim_table_transport_t *cosim_table_transport_create(
     const cosim_table_transport_cfg_t *cfg)
@@ -94,4 +96,18 @@ void cosim_table_transport_close(cosim_table_transport_t *transport)
     if (transport->close != NULL)
         transport->close(transport->backend);
     free(transport);
+}
+
+int cosim_table_transport_test_inject_tcp_payload_split(
+    cosim_table_transport_t *transport, size_t payload_bytes, size_t split,
+    unsigned int pause_ms)
+{
+    if (transport == NULL ||
+        transport->send != cosim_table_transport_tcp_send ||
+        transport->recv != cosim_table_transport_tcp_recv) {
+        errno = EINVAL;
+        return -1;
+    }
+    return cosim_table_transport_tcp_test_inject_payload_split(
+        transport->backend, payload_bytes, split, pause_ms);
 }

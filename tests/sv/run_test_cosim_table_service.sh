@@ -52,6 +52,12 @@ grep -q 'route=86.*handler=unassigned.*completion_status=5.*committed=0.*failed_
     "$simulation_log"
 grep -q 'route=87.*handler=unassigned.*completion_status=5.*committed=0.*failed_index=0x0000000000000002.*accepted=1 entries=0 bytes=0 success=0 reads=1 errors=1' \
     "$simulation_log"
+grep -q 'route=88.*handler=incomplete_write.*completion_status=5.*committed=0.*failed_index=0x0000000000000002.*accepted=1 entries=1 bytes=16 success=0 reads=0 errors=1' \
+    "$simulation_log"
+grep -q 'route=89.*handler=incomplete_read.*completion_status=5.*committed=0.*failed_index=0x0000000000000002.*accepted=1 entries=0 bytes=0 success=0 reads=1 errors=1' \
+    "$simulation_log"
+grep -q 'route=90.*handler=mismatch_read.*completion_status=5.*committed=0.*failed_index=0x0000000000000002.*accepted=1 entries=0 bytes=0 success=0 reads=1 errors=1' \
+    "$simulation_log"
 if grep -q 'raw_bytes=00 01 02 03 04 05 06 07 08' "$simulation_log"; then
     echo "FAIL: HIGH raw-byte dump exceeded +COSIM_TABLE_DUMP_LIMIT=8" >&2
     exit 1
@@ -109,7 +115,7 @@ void table_test_set_scenario(int rc, int scenario)
     s = &states[rc];
     s->scenario = scenario;
     if ((scenario >= 1 && scenario <= 3) ||
-        scenario == 6 || scenario == 7)
+        (scenario >= 6 && scenario <= 10))
         s->request_count = 1;
     else if (scenario == 4)
         s->request_count = 2;
@@ -181,7 +187,8 @@ int table_vcs_poll_request_rc(int rc)
 
 int table_vcs_get_request_kind_rc(int rc)
 {
-    if (states[rc].scenario == 7)
+    if (states[rc].scenario == 7 || states[rc].scenario == 9 ||
+        states[rc].scenario == 10)
         return 2;
     if (states[rc].scenario != 0)
         return 1;
@@ -196,6 +203,12 @@ const char *table_vcs_get_request_handler_rc(int rc)
         return "codec_table";
     if (states[rc].scenario == 6 || states[rc].scenario == 7)
         return "unassigned";
+    if (states[rc].scenario == 8)
+        return "incomplete_write";
+    if (states[rc].scenario == 9)
+        return "incomplete_read";
+    if (states[rc].scenario == 10)
+        return "mismatch_read";
     return "table0";
 }
 
@@ -235,7 +248,8 @@ unsigned table_vcs_get_request_entry_count_rc(int rc)
 unsigned table_vcs_get_request_entry_bytes_rc(int rc) { (void)rc; return 16; }
 unsigned table_vcs_get_request_payload_bytes_rc(int rc)
 {
-    if (states[rc].scenario == 7)
+    if (states[rc].scenario == 7 || states[rc].scenario == 9 ||
+        states[rc].scenario == 10)
         return 0U;
     if (states[rc].scenario == 1)
         return 47U;

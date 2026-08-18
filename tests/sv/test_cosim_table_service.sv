@@ -30,6 +30,9 @@ module test_cosim_table_service;
     localparam int TABLE_TEST_PENDING_WRITE_WAIT = 5;
     localparam int TABLE_TEST_UNASSIGNED_WRITE = 6;
     localparam int TABLE_TEST_UNASSIGNED_READ = 7;
+    localparam int TABLE_TEST_INCOMPLETE_WRITE_SUCCESS = 8;
+    localparam int TABLE_TEST_INCOMPLETE_READ_SUCCESS = 9;
+    localparam int TABLE_TEST_READ_DATA_MISMATCH = 10;
 
     int unsigned failures;
 
@@ -95,6 +98,7 @@ module test_cosim_table_service;
             end else begin
                 result.status = COSIM_TABLE_STATUS_SUCCESS;
             end
+            cosim_table_result_mark_valid(result);
         endtask
 
         virtual task read_dword(
@@ -115,6 +119,7 @@ module test_cosim_table_service;
             result.committed_count = 0;
             result.handler_error = 0;
             result.read_data = data;
+            cosim_table_result_mark_valid(result);
         endtask
     endclass
 
@@ -161,6 +166,57 @@ module test_cosim_table_service;
         endtask
     endclass
 
+    class service_inconsistent_handler extends cosim_table_handler;
+        string name;
+        int mode;
+        int unsigned write_calls;
+        int unsigned read_calls;
+
+        function new(string name, int mode);
+            this.name = name;
+            this.mode = mode;
+        endfunction
+
+        virtual function string get_name();
+            return name;
+        endfunction
+
+        virtual function bit supports_read();
+            return 1'b1;
+        endfunction
+
+        virtual task write_entry(
+            cosim_table_context ctx,
+            longint unsigned index,
+            byte unsigned raw_data[],
+            output cosim_table_result result
+        );
+            write_calls++;
+            result.status = COSIM_TABLE_STATUS_SUCCESS;
+            result.failed_index = COSIM_TABLE_FAILED_INDEX_NONE;
+        endtask
+
+        virtual task read_dword(
+            cosim_table_context ctx,
+            longint unsigned index,
+            int unsigned byte_offset,
+            output bit [31:0] data,
+            output cosim_table_result result
+        );
+            read_calls++;
+            data = mode == TABLE_TEST_READ_DATA_MISMATCH
+                ? 32'h1234_5678 : 32'b0;
+            result.status = COSIM_TABLE_STATUS_SUCCESS;
+            result.failed_index = COSIM_TABLE_FAILED_INDEX_NONE;
+            if (mode == TABLE_TEST_READ_DATA_MISMATCH) begin
+                result.committed_count = 0;
+                result.handler_error = 0;
+                result.read_data = 32'h8765_4321;
+                cosim_table_result_mark_valid(result);
+            end
+        endtask
+    endclass
+
     task automatic check_write_call(
         input service_handler handler,
         input int unsigned slot,
@@ -193,6 +249,9 @@ module test_cosim_table_service;
         cosim_table_service stop_service;
         cosim_table_service unassigned_write_service;
         cosim_table_service unassigned_read_service;
+        cosim_table_service incomplete_write_service;
+        cosim_table_service incomplete_read_service;
+        cosim_table_service mismatch_read_service;
         service_handler handler;
         service_handler write_only_handler;
         service_handler read_required_handler;
@@ -203,6 +262,9 @@ module test_cosim_table_service;
         service_handler stop_handler;
         service_unassigned_handler unassigned_write_handler;
         service_unassigned_handler unassigned_read_handler;
+        service_inconsistent_handler incomplete_write_handler;
+        service_inconsistent_handler incomplete_read_handler;
+        service_inconsistent_handler mismatch_read_handler;
         service_custom_codec custom_codec;
         bit run_returned;
         bit waiter_returned;
@@ -413,6 +475,83 @@ module test_cosim_table_service;
               table_test_get_completion_read_data(0, 0) == 0,
               "unassigned read output returns deterministic EXEC_ERROR");
         unassigned_read_service.shutdown();
+
+        table_test_reset(0, 0);
+        table_test_set_scenario(0, TABLE_TEST_INCOMPLETE_WRITE_SUCCESS);
+        incomplete_write_service = new(0);
+        incomplete_write_handler = new("incomplete_write",
+                                       TABLE_TEST_INCOMPLETE_WRITE_SUCCESS);
+        check(incomplete_write_service.register_handler(
+                  incomplete_write_handler, COSIM_TABLE_PROTECTION_NONE),
+              "incomplete-success write handler registers");
+        check(incomplete_write_service.initialize(
+                  "127.0.0.1", 10100, 0,
+                  "/absolute/incomplete-write.ini") == 0,
+              "incomplete-success write service initializes");
+        incomplete_write_service.run();
+        incomplete_write_service.wait_stopped();
+        check(incomplete_write_handler.write_calls == 1 &&
+              table_test_get_completion_count(0) == 1,
+              "incomplete-success write completes exactly once");
+        check(table_test_get_completion_status(0, 0) ==
+                  COSIM_TABLE_STATUS_EXEC_ERROR &&
+              table_test_get_completion_committed(0, 0) == 0 &&
+              table_test_get_completion_failed_index(0, 0) == 64'd2 &&
+              table_test_get_completion_handler_error(0, 0) == -3,
+              "incomplete-success write is rejected without commit");
+        incomplete_write_service.shutdown();
+
+        table_test_reset(0, 0);
+        table_test_set_scenario(0, TABLE_TEST_INCOMPLETE_READ_SUCCESS);
+        incomplete_read_service = new(0);
+        incomplete_read_handler = new("incomplete_read",
+                                      TABLE_TEST_INCOMPLETE_READ_SUCCESS);
+        check(incomplete_read_service.register_handler(
+                  incomplete_read_handler, COSIM_TABLE_PROTECTION_NONE),
+              "incomplete-success read handler registers");
+        check(incomplete_read_service.initialize(
+                  "127.0.0.1", 10100, 0,
+                  "/absolute/incomplete-read.ini") == 0,
+              "incomplete-success read service initializes");
+        incomplete_read_service.run();
+        incomplete_read_service.wait_stopped();
+        check(incomplete_read_handler.read_calls == 1 &&
+              table_test_get_completion_count(0) == 1,
+              "incomplete-success read completes exactly once");
+        check(table_test_get_completion_status(0, 0) ==
+                  COSIM_TABLE_STATUS_EXEC_ERROR &&
+              table_test_get_completion_committed(0, 0) == 0 &&
+              table_test_get_completion_failed_index(0, 0) == 64'd2 &&
+              table_test_get_completion_handler_error(0, 0) == -3 &&
+              table_test_get_completion_read_data(0, 0) == 0,
+              "incomplete-success read is rejected deterministically");
+        incomplete_read_service.shutdown();
+
+        table_test_reset(0, 0);
+        table_test_set_scenario(0, TABLE_TEST_READ_DATA_MISMATCH);
+        mismatch_read_service = new(0);
+        mismatch_read_handler = new("mismatch_read",
+                                    TABLE_TEST_READ_DATA_MISMATCH);
+        check(mismatch_read_service.register_handler(
+                  mismatch_read_handler, COSIM_TABLE_PROTECTION_NONE),
+              "mismatched read-data handler registers");
+        check(mismatch_read_service.initialize(
+                  "127.0.0.1", 10100, 0,
+                  "/absolute/mismatch-read.ini") == 0,
+              "mismatched read-data service initializes");
+        mismatch_read_service.run();
+        mismatch_read_service.wait_stopped();
+        check(mismatch_read_handler.read_calls == 1 &&
+              table_test_get_completion_count(0) == 1,
+              "mismatched read-data request completes exactly once");
+        check(table_test_get_completion_status(0, 0) ==
+                  COSIM_TABLE_STATUS_EXEC_ERROR &&
+              table_test_get_completion_committed(0, 0) == 0 &&
+              table_test_get_completion_failed_index(0, 0) == 64'd2 &&
+              table_test_get_completion_handler_error(0, 0) == -3 &&
+              table_test_get_completion_read_data(0, 0) == 0,
+              "read data/result mismatch is rejected deterministically");
+        mismatch_read_service.shutdown();
 
         table_test_reset(3, 0);
         table_test_set_scenario(3, TABLE_TEST_PENDING_WRITE_WAIT);

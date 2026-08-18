@@ -26,6 +26,7 @@ virtual class cosim_table_handler;
         result.committed_count = 0;
         result.handler_error = 0;
         result.read_data = '0;
+        cosim_table_result_mark_valid(result);
     endtask
 
     virtual function bit supports_read();

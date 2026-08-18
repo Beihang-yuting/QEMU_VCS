@@ -1188,6 +1188,17 @@ void table_vcs_cleanup_rc(int rc)
         (void)pthread_mutex_unlock(&state->lock);
         return;
     }
+    if (state->worker_started &&
+        pthread_equal(state->worker, pthread_self())) {
+        state->interrupted = 1;
+        state->terminal = 1;
+        state->stop_requested = 1;
+        transport = state->transport;
+        (void)pthread_cond_broadcast(&state->request_changed);
+        (void)pthread_mutex_unlock(&state->lock);
+        cosim_table_transport_interrupt(transport);
+        return;
+    }
     state->cleaning = 1;
     state->interrupted = 1;
     state->terminal = 1;

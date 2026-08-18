@@ -45,6 +45,10 @@ typedef struct {
     uint16_t rc_id;
     uint32_t instance_id;
     unsigned int active_operations;
+    size_t test_payload_bytes;
+    size_t test_payload_split;
+    unsigned int test_payload_pause_ms;
+    int test_payload_armed;
     pthread_mutex_t state_lock;
     pthread_mutex_t send_lock;
     pthread_cond_t idle;
@@ -54,12 +58,6 @@ typedef struct {
     struct timespec expires;
     int infinite;
 } table_deadline_t;
-
-/* Optional unit-test seam for forcing a single TCP frame payload to arrive in
- * two writes.  Production binaries leave both weak symbols unresolved. */
-extern size_t cosim_table_test_payload_split(size_t payload_bytes)
-    __attribute__((weak));
-extern void cosim_table_test_payload_pause(void) __attribute__((weak));
 
 void cosim_table_transport_tcp_close(void *opaque);
 
@@ -255,21 +253,73 @@ static int recv_exact(int fd, void *buffer, size_t bytes,
     return 0;
 }
 
-static int send_payload(int fd, const void *payload, size_t payload_bytes,
+static void pause_milliseconds(unsigned int milliseconds)
+{
+    struct timespec remaining;
+
+    remaining.tv_sec = milliseconds / 1000u;
+    remaining.tv_nsec = (long)(milliseconds % 1000u) * 1000000L;
+    while (nanosleep(&remaining, &remaining) != 0 && errno == EINTR)
+        ;
+}
+
+static void take_test_payload_split(table_tcp_backend_t *backend,
+                                    size_t payload_bytes, size_t *split,
+                                    unsigned int *pause_ms)
+{
+    *split = 0;
+    *pause_ms = 0;
+    (void)pthread_mutex_lock(&backend->state_lock);
+    if (backend->test_payload_armed &&
+        backend->test_payload_bytes == payload_bytes) {
+        *split = backend->test_payload_split;
+        *pause_ms = backend->test_payload_pause_ms;
+        backend->test_payload_armed = 0;
+    }
+    (void)pthread_mutex_unlock(&backend->state_lock);
+}
+
+static int send_payload(table_tcp_backend_t *backend, int fd,
+                        const void *payload, size_t payload_bytes,
                         const table_deadline_t *deadline)
 {
-    size_t split = 0;
+    size_t split;
+    unsigned int pause_ms;
 
-    if (cosim_table_test_payload_split != NULL)
-        split = cosim_table_test_payload_split(payload_bytes);
+    take_test_payload_split(backend, payload_bytes, &split, &pause_ms);
     if (split == 0 || split >= payload_bytes)
         return send_exact(fd, payload, payload_bytes, deadline);
     if (send_exact(fd, payload, split, deadline) != 0)
         return -1;
-    if (cosim_table_test_payload_pause != NULL)
-        cosim_table_test_payload_pause();
+    pause_milliseconds(pause_ms);
     return send_exact(fd, (const unsigned char *)payload + split,
                       payload_bytes - split, deadline);
+}
+
+int cosim_table_transport_tcp_test_inject_payload_split(
+    void *opaque, size_t payload_bytes, size_t split, unsigned int pause_ms)
+{
+    table_tcp_backend_t *backend = opaque;
+    int result = -1;
+
+    if (backend == NULL || payload_bytes < 2 || split == 0 ||
+        split >= payload_bytes || pause_ms == 0 || pause_ms > 60000u) {
+        errno = EINVAL;
+        return -1;
+    }
+    (void)pthread_mutex_lock(&backend->state_lock);
+    if (!backend->closing && !backend->fatal && !backend->connecting &&
+        backend->active_operations == 0 && backend->connection_fd < 0) {
+        backend->test_payload_bytes = payload_bytes;
+        backend->test_payload_split = split;
+        backend->test_payload_pause_ms = pause_ms;
+        backend->test_payload_armed = 1;
+        result = 0;
+    } else {
+        errno = EBUSY;
+    }
+    (void)pthread_mutex_unlock(&backend->state_lock);
+    return result;
 }
 
 static int set_nonblocking(int fd)
@@ -924,7 +974,8 @@ int cosim_table_transport_tcp_send(void *opaque,
             (header_bytes == 0 ||
              send_exact(fd, header, header_bytes, &deadline) == 0) &&
             (payload_bytes == 0 ||
-             send_payload(fd, payload, payload_bytes, &deadline) == 0))
+             send_payload(backend, fd, payload, payload_bytes, &deadline) ==
+                 0))
             result = 0;
         if (result != 0)
             saved_errno = publish_send_failure(backend, fd, errno);
