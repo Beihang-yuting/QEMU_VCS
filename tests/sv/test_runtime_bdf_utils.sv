@@ -25,6 +25,9 @@ module test_runtime_bdf_utils;
         int dispatch_count;
         bit [31:0] scalar_data;
         bit [31:0] dispatched_data[2];
+        bit table_ready;
+        bit realized_after_poll;
+        bit table_runtime_started;
 
         base = pcie_pf_base_bdf(16'h0200);
         expect_bdf("02:00.0 base", base, 16'h0200);
@@ -101,12 +104,25 @@ module test_runtime_bdf_utils;
         poll_calls = 0;
         dispatch_count = 0;
         scalar_data = 32'h1111_aaaa;
+        table_ready = 0;
         poll_result = 0;
         poll_calls++;
+        // One TCP phase2 drain may consume REALIZED and TLP_READY together:
+        // the pre-poll observation is false, the post-poll observation is
+        // true, and ret==0 still owns a scalar TLP for request_loop.
+        realized_after_poll = 1;
+        table_ready = cosim_realization_poll_ready_after_poll(
+            poll_result, realized_after_poll);
         prepolled_tlp_valid =
             cosim_realization_poll_captured_tlp(poll_result);
-        if (!prepolled_tlp_valid)
-            $fatal(1, "realization poll ret==0 must retain the scalar TLP");
+        table_runtime_started = table_ready;
+        if (!table_runtime_started || !prepolled_tlp_valid)
+            $fatal(1, "same poll must start realized table runtime and retain its TLP");
+        if (!cosim_realization_poll_ready_after_poll(1, 1) ||
+            cosim_realization_poll_ready_after_poll(0, 0) ||
+            cosim_realization_poll_ready_after_poll(1, 0) ||
+            cosim_realization_poll_ready_after_poll(-1, 1))
+            $fatal(1, "post-poll realization policy mishandled ready/empty/error results");
 
         if (prepolled_tlp_valid) begin
             poll_result = 0;

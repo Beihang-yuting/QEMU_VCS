@@ -408,15 +408,19 @@ class cosim_xrc_driver extends pcie_tl_rc_driver;
                         rc_index))
                     break;
                 end
+                table_ready = cosim_runtime_policy_pkg::
+                    cosim_realization_poll_ready_after_poll(
+                        table_poll_result,
+                        bridge_vcs_is_realized_rc(rc_index));
                 if (cosim_runtime_policy_pkg::
                     cosim_realization_poll_captured_tlp(table_poll_result)) begin
                     prepolled_tlp_valid = 1;
-                    `uvm_error(get_name(), $sformatf(
-                        "RC%0d received Guest traffic before REALIZED",
-                        rc_index))
+                    if (!table_ready)
+                        `uvm_error(get_name(), $sformatf(
+                            "RC%0d received Guest traffic before REALIZED",
+                            rc_index))
                     break;
                 end
-                table_ready = bridge_vcs_is_realized_rc(rc_index);
                 if (!table_ready)
                     #(polling_interval_ns * 1ns);
             end

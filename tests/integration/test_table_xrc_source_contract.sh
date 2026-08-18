@@ -119,6 +119,16 @@ if poll_bound is None or int(poll_bound.group(1)) > 100:
     fail("realization polling must not stall the main bridge for an excessive interval")
 if re.search(r"bit\s+prepolled_tlp_valid\s*=\s*0\s*;", xrc_driver) is None:
     fail("cosim_xrc_driver needs per-instance pre-polled TLP state")
+refresh = re.search(
+    r"table_ready\s*=\s*cosim_runtime_policy_pkg::\s*"
+    r"cosim_realization_poll_ready_after_poll\s*\(\s*"
+    r"table_poll_result\s*,\s*bridge_vcs_is_realized_rc\s*\(\s*rc_index\s*\)\s*"
+    r"\)\s*;",
+    run_phase,
+    flags=re.DOTALL,
+)
+if refresh is None:
+    fail("every non-error realization poll must refresh REALIZED before handling a TLP")
 capture = re.search(
     r"if\s*\(\s*cosim_runtime_policy_pkg::\s*"
     r"cosim_realization_poll_captured_tlp\s*\(\s*table_poll_result\s*\)\s*\)"
@@ -133,6 +143,13 @@ capture_set = capture_body.find("prepolled_tlp_valid = 1")
 capture_break = capture_body.find("break")
 if capture_set < 0 or capture_break < 0 or capture_set >= capture_break:
     fail("realization ret==0 must save the pre-polled TLP before leaving the wait")
+if refresh.start() >= capture.start():
+    fail("REALIZED must be refreshed before a same-drain TLP is saved")
+ready_guard = capture_body.find("if (!table_ready)")
+before_ready_error = capture_body.find("received Guest traffic before REALIZED")
+if (ready_guard < 0 or before_ready_error < 0 or
+        not ready_guard < before_ready_error < capture_break):
+    fail("same-drain TLP must only report before-REALIZED after the refreshed check")
 if "bridge_vcs_get_poll_" in run_phase:
     fail("realization polling must leave scalar getters untouched for request_loop")
 

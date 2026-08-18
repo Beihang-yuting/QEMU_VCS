@@ -38,6 +38,13 @@ package cosim_runtime_policy_pkg;
         return poll_result == 0;
     endfunction
 
+    function automatic bit cosim_realization_poll_ready_after_poll(
+        input int poll_result,
+        input bit realized_after_poll
+    );
+        return poll_result >= 0 && realized_after_poll;
+    endfunction
+
 endpackage : cosim_runtime_policy_pkg
 
 `endif
