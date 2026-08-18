@@ -247,5 +247,76 @@ if discover.count("target_bdf") != 3:
 realize = function_body("cosim_pcie_rc_realize")
 require(realize, "cosim_current_bdf(pci_dev)", "cosim_pcie_rc_realize")
 
+# The table adapter must publish one read-only PF0 snapshot namespace keyed by
+# the configured RC instance.  It may project the authoritative PF BAR
+# contexts, but it must not grow a second PF/VF topology array beside g_rc_pfs.
+if '#include "table_target.h"' not in header:
+    fail("CosimPCIeRC must use the QEMU-independent table target snapshot type")
+if not re.search(
+    r"bool\s+cosim_pcie_rc_get_table_target\s*\(\s*uint32_t\s+instance_id\s*,"
+    r"\s*cosim_table_target_snapshot_t\s*\*\s*snapshot\s*\)\s*;",
+    header,
+    flags=re.S,
+):
+    fail("cosim_pcie_rc.h must export the read-only instance-keyed snapshot API")
+
+pf_arrays = re.findall(
+    r"static\s+CosimPCIeRC\s*\*\s*[A-Za-z_][A-Za-z0-9_]*\s*\["
+    r"[^\]]*(?:PF|PFS)[^\]]*\]",
+    source,
+)
+if len(pf_arrays) != 1 or "g_rc_pfs" not in pf_arrays[0]:
+    fail("g_rc_pfs must remain the only PF/VF topology pointer array")
+if not re.search(
+    r"static\s+CosimPCIeRC\s*\*\s*g_table_target_registry\s*;", source
+):
+    fail("table snapshots must use one PF0 linked registry, not another topology array")
+
+getter = function_body("cosim_pcie_rc_get_table_target")
+require(getter, "instance_id", "cosim_pcie_rc_get_table_target")
+require(getter, "instance_id > UINT16_MAX", "cosim_pcie_rc_get_table_target")
+require(getter, "entry->instance_id == instance_id",
+        "cosim_pcie_rc_get_table_target")
+require(getter, "*snapshot", "cosim_pcie_rc_get_table_target")
+require(getter, "table_target_snapshot", "cosim_pcie_rc_get_table_target")
+
+publish = function_body("cosim_table_target_publish")
+require(publish, "s->pf_index != 0", "cosim_table_target_publish")
+require(publish, "s->instance_id > UINT16_MAX", "cosim_table_target_publish")
+require(publish, "s->instance_id", "cosim_table_target_publish")
+require(publish, "snapshot.rc_id = (uint16_t)s->instance_id",
+        "cosim_table_target_publish")
+require(publish, "snapshot.device_instance = 0",
+        "cosim_table_target_publish")
+require(publish, "existing->instance_id == s->instance_id",
+        "cosim_table_target_publish")
+domain = function_body("cosim_current_pci_domain")
+require(domain, "pci_root_bus_path(pci_dev)", "cosim_current_pci_domain")
+require(publish, "cosim_current_pci_domain(pci_dev)",
+        "cosim_table_target_publish")
+require(publish, "cosim_current_bdf(pci_dev)", "cosim_table_target_publish")
+require(publish, "physical_bar", "cosim_table_target_publish")
+require(publish, "s->bar_ctx[physical_bar].dev != s", "cosim_table_target_publish")
+require(publish, "memory_region_size(&s->bars[physical_bar])",
+        "cosim_table_target_publish")
+require(publish, "bar_sizes[physical_bar]",
+        "cosim_table_target_publish")
+
+require(realize, "cosim_table_target_publish(s, pci_dev);",
+        "cosim_pcie_rc_realize")
+reset = function_body("cosim_pcie_rc_reset")
+require(reset, "cosim_table_target_publish(s, pci_dev);", "cosim_pcie_rc_reset")
+
+device_exit = function_body("cosim_pcie_rc_exit")
+require(device_exit, "cosim_table_target_remove(s);", "cosim_pcie_rc_exit")
+if device_exit.find("cosim_table_target_remove(s);") > device_exit.find(
+    "bridge_destroy(ctx);"
+):
+    fail("PF0 table snapshot must be removed before its bridge is destroyed")
+
+class_init = function_body("cosim_pcie_rc_class_init")
+require(class_init, "dc->legacy_reset = cosim_pcie_rc_reset;",
+        "cosim_pcie_rc_class_init")
+
 print("[qemu-request-routing] PASS")
 PY

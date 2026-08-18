@@ -10,6 +10,7 @@
 #include "hw/pci/msi.h"
 #include "qom/object.h"
 #include "hw/net/cosim_topology.h"
+#include "table_target.h"
 
 /* Virtio PCI ID (modern virtio-net) */
 #define COSIM_PCI_VENDOR_ID    0x1AF4
@@ -72,6 +73,12 @@ struct CosimPCIeRC {
     char *remote_host;     /* TCP: VCS server address */
     uint32_t port_base;    /* TCP: port base (default 9100) */
     uint32_t instance_id;  /* TCP: instance ID (default 0) */
+
+    /* Read-only PF0 table target publication.  The global registry links only
+     * primary PFs and is keyed by the full 32-bit instance_id. */
+    cosim_table_target_snapshot_t table_target_snapshot;
+    struct CosimPCIeRC *table_target_next;
+    bool table_target_registered;
 
     /* MMIO 读完成超时(ms): >0 时 BAR MMIO 读等 VCS completion 超时即返回
      * 0xFFFFFFFF(设备视为无响应), guest 不再死等 -> 能启动到登录。0=禁用(永久阻塞,
@@ -147,5 +154,8 @@ struct CosimPCIeRC {
     void    *vf_as;            /* AddressSpace[num_vf_iommu] */
     int      num_vf_iommu;     /* active per-VF IOMMU AddressSpaces */
 };
+
+bool cosim_pcie_rc_get_table_target(
+    uint32_t instance_id, cosim_table_target_snapshot_t *snapshot);
 
 #endif /* COSIM_PCIE_RC_H */

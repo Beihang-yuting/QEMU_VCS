@@ -39,6 +39,20 @@ static uint16_t cosim_current_bdf(PCIDevice *dev)
     return cosim_pcie_bdf((uint8_t)pci_bus_num(pci_get_bus(dev)), dev->devfn);
 }
 
+static uint16_t cosim_current_pci_domain(PCIDevice *pci_dev)
+{
+    const char *root_path = pci_root_bus_path(pci_dev);
+    unsigned int domain;
+    unsigned int root_bus;
+
+    if (root_path == NULL ||
+        sscanf(root_path, "%x:%x", &domain, &root_bus) != 2 ||
+        domain > UINT16_MAX) {
+        return 0;
+    }
+    return (uint16_t)domain;
+}
+
 /* A VCS/DUT round trip can consume seconds of host time while the vCPU is
  * blocked in a device callback. The guest executes no instructions during
  * that interval, but adaptive iCount would otherwise compare itself against
@@ -317,6 +331,113 @@ DECLARE_INSTANCE_CHECKER(CosimRcVF, COSIM_RC_VF, TYPE_COSIM_RC_VF)
  * right PF and to resolve DMA requester BDFs across PFs. */
 #define COSIM_RC_MAX_PF COSIM_MAX_PFS
 static CosimPCIeRC *g_rc_pfs[COSIM_RC_MAX_PF];
+
+/* PF0-only table snapshot registry.  It is a list, rather than another PF/VF
+ * topology array: instance_id is a sparse 32-bit transport identity.  QEMU
+ * device lifecycle and consumers run under the BQL. */
+static CosimPCIeRC *g_table_target_registry;
+static uint32_t g_table_target_generation;
+
+static uint32_t cosim_table_target_next_generation(void)
+{
+    ++g_table_target_generation;
+    if (g_table_target_generation == 0) {
+        ++g_table_target_generation;
+    }
+    return g_table_target_generation;
+}
+
+static void cosim_table_target_unlink(CosimPCIeRC *s)
+{
+    CosimPCIeRC **link = &g_table_target_registry;
+
+    while (*link != NULL && *link != s) {
+        link = &(*link)->table_target_next;
+    }
+    if (*link == s) {
+        *link = s->table_target_next;
+    }
+    s->table_target_next = NULL;
+    s->table_target_registered = false;
+}
+
+static void cosim_table_target_remove(CosimPCIeRC *s)
+{
+    if (s->pf_index != 0 || !s->table_target_registered) {
+        return;
+    }
+    cosim_table_target_unlink(s);
+    s->table_target_snapshot.generation =
+        cosim_table_target_next_generation();
+}
+
+static void cosim_table_target_publish(CosimPCIeRC *s, PCIDevice *pci_dev)
+{
+    cosim_table_target_snapshot_t snapshot = {0};
+    CosimPCIeRC *existing;
+    int physical_bar;
+
+    if (s->pf_index != 0 || s->instance_id > UINT16_MAX) {
+        cosim_table_target_remove(s);
+        return;
+    }
+
+    if (s->table_target_registered) {
+        cosim_table_target_unlink(s);
+    }
+    existing = g_table_target_registry;
+    while (existing != NULL) {
+        CosimPCIeRC *next = existing->table_target_next;
+
+        if (existing->instance_id == s->instance_id) {
+            cosim_table_target_unlink(existing);
+            existing->table_target_snapshot.generation =
+                cosim_table_target_next_generation();
+            break;
+        }
+        existing = next;
+    }
+
+    snapshot.rc_id = (uint16_t)s->instance_id;
+    snapshot.device_instance = 0;
+    snapshot.pci_domain = cosim_current_pci_domain(pci_dev);
+    snapshot.target_bdf = cosim_current_bdf(pci_dev);
+    snapshot.generation = cosim_table_target_next_generation();
+    for (physical_bar = 0; physical_bar < COSIM_MAX_BARS; ++physical_bar) {
+        if (s->bar_ctx[physical_bar].dev != s) {
+            continue;
+        }
+        snapshot.bar_sizes[physical_bar] =
+            memory_region_size(&s->bars[physical_bar]);
+    }
+
+    s->table_target_snapshot = snapshot;
+    if (!cosim_table_target_snapshot_valid(&snapshot)) {
+        return;
+    }
+    s->table_target_next = g_table_target_registry;
+    g_table_target_registry = s;
+    s->table_target_registered = true;
+}
+
+bool cosim_pcie_rc_get_table_target(
+    uint32_t instance_id, cosim_table_target_snapshot_t *snapshot)
+{
+    CosimPCIeRC *entry;
+
+    if (snapshot == NULL || instance_id > UINT16_MAX) {
+        return false;
+    }
+    for (entry = g_table_target_registry; entry != NULL;
+         entry = entry->table_target_next) {
+        if (entry->instance_id == instance_id &&
+            cosim_table_target_snapshot_valid(&entry->table_target_snapshot)) {
+            *snapshot = entry->table_target_snapshot;
+            return true;
+        }
+    }
+    return false;
+}
 
 /* ---- Per-VF DMA isolation IOMMU (opt-in vf_iommu=on) --------------------
  * Each VF gets an AddressSpace whose IOMMU translate() is identity within the
@@ -1703,11 +1824,28 @@ static void cosim_pcie_rc_realize(PCIDevice *pci_dev, Error **errp)
         sync_msg_t rmsg = { .type = SYNC_MSG_REALIZED, .payload = 0 };
         ctx->transport->send_sync(ctx->transport, &rmsg);
     }
+
+    /* Publish only after PF0 and every requested sibling realized
+     * successfully.  BAR sizes come solely from the registered owner regions. */
+    cosim_table_target_publish(s, pci_dev);
+}
+
+static void cosim_pcie_rc_reset(DeviceState *dev)
+{
+    PCIDevice *pci_dev = PCI_DEVICE(dev);
+    CosimPCIeRC *s = COSIM_PCIE_RC(pci_dev);
+
+    /* The DUT and bridge own their reset behavior.  Only invalidate old table
+     * targets and republish the live PF0 identity with a new generation. */
+    if (s->table_target_registered) {
+        cosim_table_target_publish(s, pci_dev);
+    }
 }
 
 static void cosim_pcie_rc_exit(PCIDevice *pci_dev)
 {
     CosimPCIeRC *s = COSIM_PCIE_RC(pci_dev);
+    cosim_table_target_remove(s);
     cosim_vf_teardown(s, false);  /* device exit: transport tearing down, no ATS inval */
     if (s->pf_index < COSIM_RC_MAX_PF && g_rc_pfs[s->pf_index] == s)
         g_rc_pfs[s->pf_index] = NULL;
@@ -1784,6 +1922,7 @@ static void cosim_pcie_rc_class_init(ObjectClass *klass, void *data)
     k->exit = cosim_pcie_rc_exit;
     k->config_read = cosim_config_read;
     k->config_write = cosim_config_write;
+    dc->legacy_reset = cosim_pcie_rc_reset;
     k->vendor_id = COSIM_PCI_VENDOR_ID;
     k->device_id = COSIM_PCI_DEVICE_ID;
     k->revision = COSIM_PCI_REVISION;

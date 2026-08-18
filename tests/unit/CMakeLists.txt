@@ -31,6 +31,14 @@ add_executable(test_table_protocol test_table_protocol.c)
 target_include_directories(test_table_protocol PRIVATE ${CMAKE_SOURCE_DIR}/bridge/table)
 add_test(NAME test_table_protocol COMMAND test_table_protocol)
 
+add_executable(test_table_target test_table_target.c)
+target_include_directories(test_table_target PRIVATE
+    ${CMAKE_SOURCE_DIR}/bridge/qemu
+    ${CMAKE_SOURCE_DIR}/bridge/table
+)
+target_link_libraries(test_table_target cosim_bridge_common)
+add_test(NAME test_table_target COMMAND test_table_target)
+
 add_executable(test_table_route test_table_route.c)
 target_include_directories(test_table_route PRIVATE ${CMAKE_SOURCE_DIR}/bridge/table)
 target_compile_definitions(test_table_route PRIVATE
