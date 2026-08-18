@@ -13,6 +13,7 @@ repo = Path(sys.argv[1])
 xrc_pkg_path = repo / "vcs-tb/cosim_xrc_pkg.sv"
 xrc_driver_path = repo / "vcs-tb/cosim_xrc_driver.sv"
 table_pkg_path = repo / "vcs-tb/cosim_table_pkg.sv"
+runtime_policy_path = repo / "vcs-tb/cosim_runtime_policy_pkg.sv"
 
 
 def fail(message: str) -> None:
@@ -38,17 +39,28 @@ def block(source: str, declaration: str, terminator: str) -> str:
 xrc_pkg = xrc_pkg_path.read_text(encoding="utf-8")
 xrc_driver = xrc_driver_path.read_text(encoding="utf-8")
 table_pkg = table_pkg_path.read_text(encoding="utf-8")
+runtime_policy = runtime_policy_path.read_text(encoding="utf-8")
 
 include_pos = xrc_pkg.find('`include "cosim_table_pkg.sv"')
+policy_include_pos = xrc_pkg.find('`include "cosim_runtime_policy_pkg.sv"')
 package_pos = xrc_pkg.find("package cosim_xrc_pkg;")
 if include_pos < 0 or package_pos < 0 or include_pos >= package_pos:
     fail("cosim_table_pkg.sv must be included before cosim_xrc_pkg declaration")
+if policy_include_pos < 0 or policy_include_pos >= package_pos:
+    fail("cosim_runtime_policy_pkg.sv must be included before cosim_xrc_pkg declaration")
 if "import cosim_table_pkg::*;" not in xrc_pkg:
     fail("cosim_xrc_pkg must import the table package")
 if '`include "cosim_xrc_test.sv"' in xrc_pkg or (repo / "vcs-tb/cosim_xrc_test.sv").exists():
     fail("the removed repository-owned cosim_xrc_test/top must not be restored")
 if '`include "cosim_table_runtime.sv"' not in table_pkg:
     fail("cosim_table_pkg must export the runtime facade")
+if not re.search(
+        r'`ifndef\s+COSIM_RUNTIME_POLICY_PKG_SV\s+'
+        r'`define\s+COSIM_RUNTIME_POLICY_PKG_SV',
+        runtime_policy):
+    fail("cosim_runtime_policy_pkg must have a reusable include guard")
+if not re.search(r'`endif\s*$', runtime_policy):
+    fail("cosim_runtime_policy_pkg include guard is not closed")
 
 maybe_enable = block(
     xrc_pkg,

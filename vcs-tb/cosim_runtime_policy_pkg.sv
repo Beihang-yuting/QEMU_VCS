@@ -1,6 +1,9 @@
 //-----------------------------------------------------------------------------
 // Pure launch-policy helpers shared by the cosim driver and standalone tests.
 //-----------------------------------------------------------------------------
+`ifndef COSIM_RUNTIME_POLICY_PKG_SV
+`define COSIM_RUNTIME_POLICY_PKG_SV
+
 package cosim_runtime_policy_pkg;
 
     function automatic bit cosim_effective_config_bypass(
@@ -30,3 +33,5 @@ package cosim_runtime_policy_pkg;
     endfunction
 
 endpackage : cosim_runtime_policy_pkg
+
+`endif

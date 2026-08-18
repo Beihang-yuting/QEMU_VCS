@@ -6,6 +6,7 @@
  *
  * Compile AFTER: axis_pkg, pcie_tl_pkg, xilinx_pcie_adapter_pkg, cosim_bridge_pkg.
  */
+`include "cosim_runtime_policy_pkg.sv"
 `include "cosim_xrc_utils_pkg.sv"
 `include "cosim_table_pkg.sv"
 

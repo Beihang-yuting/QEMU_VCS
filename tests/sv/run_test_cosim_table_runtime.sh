@@ -13,6 +13,9 @@ fi
 dpi_source="$out_dir/cosim_table_runtime_dpi.c"
 sed -n '/^COSIM_TABLE_RUNTIME_DPI_C_BEGIN$/,/^COSIM_TABLE_RUNTIME_DPI_C_END$/p' "$0" |
     sed '1d;$d' >"$dpi_source"
+gate_source="$out_dir/cosim_two_file_gate.sv"
+sed -n '/^COSIM_TWO_FILE_GATE_SV_BEGIN$/,/^COSIM_TWO_FILE_GATE_SV_END$/p' "$0" |
+    sed '1d;$d' >"$gate_source"
 compile_log="$out_dir/compile.log"
 disabled_log="$out_dir/disabled.log"
 active_log="$out_dir/active.log"
@@ -37,9 +40,31 @@ grep -q '^COSIM_TABLE_RUNTIME: ALL PASS$' "$disabled_log"
 grep -q '^TABLE_DPI_CALLS=0$' "$disabled_log"
 grep -q '^COSIM_TABLE_RUNTIME: ALL PASS$' "$active_log"
 
-# Compile the retained target-native integration filelist. It supplies the
-# user's prerequisite VIP packages, while the cosim kit itself remains the two
-# documented inputs: bridge_vcs.sv and cosim_xrc_pkg.sv.
+# Build a support-only filelist from the retained target-native dependencies.
+# Every existing cosim source and repository test/top is removed; the two
+# documented kit inputs are then appended explicitly.
+support_filelist="$out_dir/two-file-support.f"
+awk '
+    /^[[:space:]]*(bridge\/vcs|vcs-tb)\/.*\.sv[[:space:]]*$/ { next }
+    /^[[:space:]]*pcie_tl_vip\/tests\/.*\.sv[[:space:]]*$/ { next }
+    { print }
+' "$project_dir/pcie_tl_vip/sim/filelist_cosim.f" >"$support_filelist"
+printf '%s\n' \
+    'bridge/vcs/bridge_vcs.sv' \
+    'vcs-tb/cosim_xrc_pkg.sv' >>"$support_filelist"
+
+mapfile -t two_file_cosim_sources < <(
+    grep -E '^[[:space:]]*(bridge/vcs|vcs-tb)/.*\.sv[[:space:]]*$' \
+        "$support_filelist"
+)
+if (( ${#two_file_cosim_sources[@]} != 2 )) ||
+   [[ "${two_file_cosim_sources[0]}" != 'bridge/vcs/bridge_vcs.sv' ]] ||
+   [[ "${two_file_cosim_sources[1]}" != 'vcs-tb/cosim_xrc_pkg.sv' ]]; then
+    echo "FAIL: two-file contract contains hidden cosim sources" >&2
+    printf '  %s\n' "${two_file_cosim_sources[@]}" >&2
+    exit 1
+fi
+
 bridge_archive="$out_dir/libcosim_bridge_runtime_test.a"
 bridge_obj_dir="$out_dir/bridge-objects"
 mkdir -p "$bridge_obj_dir"
@@ -67,17 +92,16 @@ gate_compile_log="$out_dir/gate-compile.log"
 (
     cd "$project_dir"
     vcs -full64 -sverilog -ntb_opts uvm-1.2 -timescale=1ns/1ps \
-        -Mdir="$out_dir/gate-csrc" -top pcie_tl_tb_top \
-        -o "$out_dir/simv_gate" -f pcie_tl_vip/sim/filelist_cosim.f \
-        "$dpi_source" \
+        -Mdir="$out_dir/gate-csrc" -top cosim_two_file_gate_top \
+        -o "$out_dir/simv_gate" -f "$support_filelist" \
+        "$gate_source" "$dpi_source" \
         -LDFLAGS "-Wl,--whole-archive $bridge_archive -Wl,--no-whole-archive -lrt -lpthread" \
         2>&1 | tee "$gate_compile_log"
 )
 
 gate_log="$out_dir/gate.log"
 set +e
-"$out_dir/simv_gate" -exitstatus +UVM_TESTNAME=pcie_tl_cosim_test \
-    +COSIM_TABLE_ENABLE=1 >"$gate_log" 2>&1
+"$out_dir/simv_gate" -exitstatus +COSIM_TABLE_ENABLE=1 >"$gate_log" 2>&1
 gate_status=$?
 set -e
 if (( gate_status == 0 )); then
@@ -87,6 +111,20 @@ if (( gate_status == 0 )); then
 fi
 grep -q 'COSIM_TABLE_ENABLE=1 requires an exact +COSIM argument' "$gate_log"
 grep -q '^TABLE_DPI_CALLS=0$' "$gate_log"
+
+# The retained repository filelist still lists the policy package explicitly.
+# Its include guard must make that legacy compile order coexist with the
+# self-contained two-file contract above.
+full_compile_log="$out_dir/full-filelist-compile.log"
+(
+    cd "$project_dir"
+    vcs -full64 -sverilog -ntb_opts uvm-1.2 -timescale=1ns/1ps \
+        -Mdir="$out_dir/full-csrc" -top pcie_tl_tb_top \
+        -o "$out_dir/simv_full_filelist" \
+        -f pcie_tl_vip/sim/filelist_cosim.f "$dpi_source" \
+        -LDFLAGS "-Wl,--whole-archive $bridge_archive -Wl,--no-whole-archive -lrt -lpthread" \
+        2>&1 | tee "$full_compile_log"
+)
 
 echo "COSIM_TABLE_RUNTIME_RUNNER: ALL PASS"
 exit 0
@@ -314,3 +352,28 @@ int vcs_vq_get_tx_count(void) { return 0; }
 int vcs_vq_get_rx_count(void) { return 0; }
 COSIM_TABLE_RUNTIME_DPI_C_END
 COSIM_TABLE_RUNTIME_DPI_C_DOUBLE
+
+: <<'COSIM_TWO_FILE_GATE_SV_DOUBLE'
+COSIM_TWO_FILE_GATE_SV_BEGIN
+`include "uvm_macros.svh"
+
+class cosim_two_file_gate_test extends uvm_pkg::uvm_test;
+    `uvm_component_utils(cosim_two_file_gate_test)
+
+    function new(string name = "cosim_two_file_gate_test",
+                 uvm_pkg::uvm_component parent = null);
+        super.new(name, parent);
+    endfunction
+
+    virtual function void build_phase(uvm_pkg::uvm_phase phase);
+        super.build_phase(phase);
+        cosim_xrc_pkg::cosim_maybe_enable();
+    endfunction
+endclass
+
+module cosim_two_file_gate_top;
+    initial
+        uvm_pkg::run_test("cosim_two_file_gate_test");
+endmodule
+COSIM_TWO_FILE_GATE_SV_END
+COSIM_TWO_FILE_GATE_SV_DOUBLE
