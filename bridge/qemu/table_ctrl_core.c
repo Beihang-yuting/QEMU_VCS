@@ -51,7 +51,8 @@ int cosim_table_map_logical_bar(const uint64_t bar_sizes[6],
     unsigned int physical;
     uint8_t logical = 0;
 
-    if (bar_sizes == NULL || pci_region == NULL || aperture_bytes == NULL)
+    if (bar_sizes == NULL || pci_region == NULL || aperture_bytes == NULL ||
+        logical_bar > 1)
         return -1;
     for (physical = 0; physical < 6; physical++) {
         if (bar_sizes[physical] == 0)

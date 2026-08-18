@@ -422,8 +422,8 @@ static cosim_table_status_t receive_completion(
         return COSIM_TABLE_ST_TIMEOUT;
     }
     if (receive_result != 0) {
-        completion_reset(completion, COSIM_TABLE_ST_TARGET_GONE);
-        return COSIM_TABLE_ST_TARGET_GONE;
+        completion_reset(completion, COSIM_TABLE_ST_PROTOCOL);
+        return COSIM_TABLE_ST_PROTOCOL;
     }
     if (cosim_table_le16_to_cpu(frame.type) != COSIM_TABLE_MSG_COMPLETION ||
         cosim_table_le64_to_cpu(frame.transaction_id) != transaction_id ||

@@ -308,6 +308,338 @@ static void mock_vcs_main(uint16_t port)
     cosim_table_transport_close(transport);
 }
 
+#define RAW_HANDSHAKE_MAGIC UINT32_C(0x48544243)
+#define RAW_HANDSHAKE_VERSION 1u
+
+typedef struct __attribute__((packed)) {
+    cosim_u32 magic;
+    cosim_u16 version;
+    cosim_u16 rc_id;
+    cosim_u32 instance_id;
+    cosim_u32 reserved;
+} raw_handshake_t;
+
+typedef enum {
+    WIRE_WRONG_TRANSACTION,
+    WIRE_WRONG_TYPE,
+    WIRE_WRONG_HEADER_LENGTH,
+    WIRE_WRONG_PAYLOAD_LENGTH,
+    WIRE_UNKNOWN_STATUS,
+    WIRE_REMOTE_SLOT_BUSY,
+    WIRE_SUCCESS_BAD_COUNT,
+    WIRE_EXEC_VALID_ONE_COMMIT,
+    WIRE_EXEC_BAD_COMMITTED,
+    WIRE_EXEC_BAD_FAILED_INDEX,
+} wire_case_t;
+
+typedef struct {
+    wire_case_t kind;
+    cosim_table_status_t expected;
+    int is_write;
+} wire_case_spec_t;
+
+static void raw_send_exact(int fd, const void *buffer, size_t bytes)
+{
+    const uint8_t *cursor = buffer;
+    size_t sent = 0;
+
+    while (sent < bytes) {
+        ssize_t result = send(fd, cursor + sent, bytes - sent, MSG_NOSIGNAL);
+
+        if (result < 0 && errno == EINTR)
+            continue;
+        CHECK(result > 0);
+        sent += (size_t)result;
+    }
+}
+
+static void raw_recv_exact(int fd, void *buffer, size_t bytes)
+{
+    uint8_t *cursor = buffer;
+    size_t received = 0;
+
+    while (received < bytes) {
+        ssize_t result = recv(fd, cursor + received, bytes - received, 0);
+
+        if (result < 0 && errno == EINTR)
+            continue;
+        CHECK(result > 0);
+        received += (size_t)result;
+    }
+}
+
+static int raw_connect(uint16_t port)
+{
+    struct sockaddr_in address;
+    uint64_t deadline = monotonic_ms() + TEST_TIMEOUT_MS;
+
+    memset(&address, 0, sizeof(address));
+    address.sin_family = AF_INET;
+    address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    address.sin_port = htons(port);
+    while (monotonic_ms() < deadline) {
+        int fd = socket(AF_INET, SOCK_STREAM, 0);
+
+        CHECK(fd >= 0);
+        if (connect(fd, (struct sockaddr *)&address, sizeof(address)) == 0)
+            return fd;
+        CHECK(errno == ECONNREFUSED || errno == EINTR);
+        CHECK(close(fd) == 0);
+        (void)poll(NULL, 0, 5);
+    }
+    CHECK(0 && "raw peer connect exceeded deadline");
+    return -1;
+}
+
+static void raw_handshake(int fd)
+{
+    raw_handshake_t outbound;
+    raw_handshake_t inbound;
+
+    memset(&outbound, 0, sizeof(outbound));
+    outbound.magic = cosim_table_cpu_to_le32(RAW_HANDSHAKE_MAGIC);
+    outbound.version = cosim_table_cpu_to_le16(RAW_HANDSHAKE_VERSION);
+    outbound.rc_id = cosim_table_cpu_to_le16(TEST_RC_ID);
+    outbound.instance_id = cosim_table_cpu_to_le32(TEST_INSTANCE_ID);
+    raw_send_exact(fd, &outbound, sizeof(outbound));
+    raw_recv_exact(fd, &inbound, sizeof(inbound));
+    CHECK(memcmp(&outbound, &inbound, sizeof(outbound)) == 0);
+}
+
+static void raw_send_frame(int fd, const cosim_table_frame_hdr_t *frame,
+                           const void *header, size_t header_bytes,
+                           const void *payload, size_t payload_bytes)
+{
+    raw_send_exact(fd, frame, sizeof(*frame));
+    if (header_bytes != 0)
+        raw_send_exact(fd, header, header_bytes);
+    if (payload_bytes != 0)
+        raw_send_exact(fd, payload, payload_bytes);
+}
+
+static void raw_publish_small_route(int fd)
+{
+    const uint64_t transaction_id = 99;
+    cosim_table_route_begin_t begin;
+    cosim_table_route_entry_t route;
+    cosim_table_route_end_t end;
+    cosim_table_frame_hdr_t frame;
+
+    memset(&begin, 0, sizeof(begin));
+    begin.generation = cosim_table_cpu_to_le32(1);
+    begin.entry_count = cosim_table_cpu_to_le32(1);
+    frame = frame_header(COSIM_TABLE_MSG_ROUTE_BEGIN, sizeof(begin), 0,
+                         transaction_id);
+    raw_send_frame(fd, &frame, &begin, sizeof(begin), NULL, 0);
+
+    memset(&route, 0, sizeof(route));
+    route.route_id = cosim_table_cpu_to_le32(7);
+    route.target.rc_id = cosim_table_cpu_to_le16(TEST_RC_ID);
+    route.target.target_type = COSIM_TABLE_TARGET_PF;
+    route.target.pf_index = 0;
+    route.target.bar_index = 0;
+    route.operation_mask = cosim_table_cpu_to_le32(
+        COSIM_TABLE_OP_WRITE | COSIM_TABLE_OP_READ_DWORD);
+    route.start_offset = cosim_table_cpu_to_le64(UINT64_C(0x1000));
+    route.end_offset = cosim_table_cpu_to_le64(UINT64_C(0x1040));
+    route.entry_bytes = cosim_table_cpu_to_le32(16);
+    route.stride_bytes = cosim_table_cpu_to_le32(16);
+    route.index_base = cosim_table_cpu_to_le32(10);
+    memcpy(route.handler_name, "wire_case", sizeof("wire_case"));
+    frame = frame_header(COSIM_TABLE_MSG_ROUTE_ENTRY, sizeof(route), 0,
+                         transaction_id);
+    raw_send_frame(fd, &frame, &route, sizeof(route), NULL, 0);
+
+    memset(&end, 0, sizeof(end));
+    end.generation = begin.generation;
+    frame = frame_header(COSIM_TABLE_MSG_ROUTE_END, sizeof(end), 0,
+                         transaction_id);
+    raw_send_frame(fd, &frame, &end, sizeof(end), NULL, 0);
+}
+
+static void raw_drain_request(int fd, int is_write)
+{
+    cosim_table_frame_hdr_t frame;
+    uint8_t header[sizeof(cosim_table_write_begin_t)];
+    uint8_t payload[COSIM_TABLE_FRAME_DATA_BYTES];
+    uint16_t type;
+    uint32_t header_bytes;
+    uint32_t payload_bytes;
+
+    do {
+        raw_recv_exact(fd, &frame, sizeof(frame));
+        header_bytes = cosim_table_le32_to_cpu(frame.header_bytes);
+        payload_bytes = cosim_table_le32_to_cpu(frame.payload_bytes);
+        CHECK(header_bytes <= sizeof(header));
+        CHECK(payload_bytes <= sizeof(payload));
+        raw_recv_exact(fd, header, header_bytes);
+        raw_recv_exact(fd, payload, payload_bytes);
+        type = cosim_table_le16_to_cpu(frame.type);
+        if (!is_write)
+            CHECK(type == COSIM_TABLE_MSG_READ_DWORD);
+    } while (is_write && type != COSIM_TABLE_MSG_WRITE_END);
+}
+
+static void raw_completion_peer(uint16_t port, wire_case_t kind,
+                                int is_write)
+{
+    cosim_table_completion_t completion;
+    cosim_table_route_end_t wrong_type;
+    cosim_table_frame_hdr_t frame;
+    int fd = raw_connect(port);
+
+    raw_handshake(fd);
+    raw_publish_small_route(fd);
+    raw_drain_request(fd, is_write);
+
+    memset(&completion, 0, sizeof(completion));
+    completion.status = cosim_table_cpu_to_le32(COSIM_TABLE_ST_SUCCESS);
+    completion.failed_index = cosim_table_cpu_to_le32(UINT32_MAX);
+    completion.committed_count = cosim_table_cpu_to_le32(is_write ? 3 : 0);
+    if (!is_write)
+        completion.returned_dword = cosim_table_cpu_to_le32(0x12345678u);
+
+    if (kind == WIRE_WRONG_TYPE) {
+        memset(&wrong_type, 0, sizeof(wrong_type));
+        wrong_type.generation = cosim_table_cpu_to_le32(1);
+        frame = frame_header(COSIM_TABLE_MSG_ROUTE_END, sizeof(wrong_type),
+                             0, 1);
+        raw_send_frame(fd, &frame, &wrong_type, sizeof(wrong_type), NULL, 0);
+    } else if (kind == WIRE_WRONG_HEADER_LENGTH) {
+        frame = frame_header(COSIM_TABLE_MSG_COMPLETION,
+                             sizeof(completion) - 1, 0, 1);
+        raw_send_frame(fd, &frame, NULL, 0, NULL, 0);
+    } else if (kind == WIRE_WRONG_PAYLOAD_LENGTH) {
+        frame = frame_header(COSIM_TABLE_MSG_COMPLETION,
+                             sizeof(completion), 1, 1);
+        raw_send_frame(fd, &frame, NULL, 0, NULL, 0);
+    } else {
+        uint64_t transaction_id = kind == WIRE_WRONG_TRANSACTION ? 2 : 1;
+
+        if (kind == WIRE_UNKNOWN_STATUS)
+            completion.status = cosim_table_cpu_to_le32(99);
+        else if (kind == WIRE_REMOTE_SLOT_BUSY)
+            completion.status =
+                cosim_table_cpu_to_le32(COSIM_TABLE_ST_SLOT_BUSY);
+        else if (kind == WIRE_SUCCESS_BAD_COUNT)
+            completion.committed_count = cosim_table_cpu_to_le32(2);
+        else if (kind == WIRE_EXEC_VALID_ONE_COMMIT) {
+            completion.status =
+                cosim_table_cpu_to_le32(COSIM_TABLE_ST_EXEC_ERROR);
+            completion.committed_count = cosim_table_cpu_to_le32(1);
+            completion.failed_index = cosim_table_cpu_to_le32(11);
+            completion.handler_error = cosim_table_cpu_to_le32(5);
+        } else if (kind == WIRE_EXEC_BAD_COMMITTED) {
+            completion.status =
+                cosim_table_cpu_to_le32(COSIM_TABLE_ST_EXEC_ERROR);
+            completion.committed_count = cosim_table_cpu_to_le32(3);
+            completion.failed_index = cosim_table_cpu_to_le32(13);
+        } else if (kind == WIRE_EXEC_BAD_FAILED_INDEX) {
+            completion.status =
+                cosim_table_cpu_to_le32(COSIM_TABLE_ST_EXEC_ERROR);
+            completion.committed_count = cosim_table_cpu_to_le32(1);
+            completion.failed_index = cosim_table_cpu_to_le32(12);
+        }
+        frame = frame_header(COSIM_TABLE_MSG_COMPLETION, sizeof(completion),
+                             0, transaction_id);
+        raw_send_frame(fd, &frame, &completion, sizeof(completion), NULL, 0);
+    }
+    (void)poll(NULL, 0, 20);
+    CHECK(close(fd) == 0);
+}
+
+static void run_wire_case(const wire_case_spec_t *spec)
+{
+    const uint16_t port = reserve_available_port();
+    cosim_table_transport_cfg_t cfg;
+    cosim_table_transport_t *transport;
+    cosim_table_client_t *client;
+    cosim_table_target_t target;
+    cosim_table_completion_t completion;
+    cosim_table_status_t status;
+    pid_t child;
+
+    memset(&cfg, 0, sizeof(cfg));
+    cfg.listen_addr = "127.0.0.1";
+    cfg.table_port_base = port - TEST_INSTANCE_ID;
+    cfg.instance_id = TEST_INSTANCE_ID;
+    cfg.rc_id = TEST_RC_ID;
+    cfg.is_server = 1;
+    cfg.connect_timeout_ms = TEST_TIMEOUT_MS;
+    transport = cosim_table_transport_create(&cfg);
+    CHECK(transport != NULL);
+    child = fork();
+    CHECK(child >= 0);
+    if (child == 0) {
+        raw_completion_peer(port, spec->kind, spec->is_write);
+        _exit(0);
+    }
+
+    client = cosim_table_client_create(transport, TEST_RC_ID);
+    CHECK(client != NULL);
+    CHECK(cosim_table_client_wait_routes(client, TEST_TIMEOUT_MS) == 0);
+    memset(&target, 0, sizeof(target));
+    target.rc_id = cosim_table_cpu_to_le16(TEST_RC_ID);
+    target.target_type = COSIM_TABLE_TARGET_PF;
+    target.pf_index = 0;
+    target.bar_index = 0;
+    if (spec->is_write) {
+        cosim_table_write_begin_t request;
+        uint8_t payload[48];
+
+        memset(&request, 0, sizeof(request));
+        request.target = target;
+        request.bar_offset = cosim_table_cpu_to_le64(UINT64_C(0x1000));
+        request.payload_bytes = cosim_table_cpu_to_le32(sizeof(payload));
+        memset(payload, 0x5a, sizeof(payload));
+        status = cosim_table_client_write(client, &request, payload,
+                                          &completion, TEST_TIMEOUT_MS);
+    } else {
+        cosim_table_read_dword_t request;
+
+        memset(&request, 0, sizeof(request));
+        request.target = target;
+        request.bar_offset = cosim_table_cpu_to_le64(UINT64_C(0x1004));
+        status = cosim_table_client_read_dword(client, &request, &completion,
+                                               TEST_TIMEOUT_MS);
+    }
+    if (status != spec->expected) {
+        fprintf(stderr, "wire case %d returned %d, expected %d\n",
+                (int)spec->kind, (int)status, (int)spec->expected);
+    }
+    CHECK(status == spec->expected);
+    CHECK(completion.status == (cosim_u32)spec->expected);
+    if (spec->kind == WIRE_EXEC_VALID_ONE_COMMIT) {
+        CHECK(completion.committed_count == 1);
+        CHECK(completion.failed_index == 11);
+        CHECK(completion.handler_error == 5);
+    }
+    CHECK(!cosim_table_status_may_frontdoor(status));
+    cosim_table_client_destroy(client);
+    cosim_table_transport_close(transport);
+    wait_child_ok(child, TEST_TIMEOUT_MS);
+}
+
+static void test_wire_completion_validation_matrix(void)
+{
+    static const wire_case_spec_t cases[] = {
+        { WIRE_WRONG_TRANSACTION, COSIM_TABLE_ST_PROTOCOL, 0 },
+        { WIRE_WRONG_TYPE, COSIM_TABLE_ST_PROTOCOL, 0 },
+        { WIRE_WRONG_HEADER_LENGTH, COSIM_TABLE_ST_PROTOCOL, 0 },
+        { WIRE_WRONG_PAYLOAD_LENGTH, COSIM_TABLE_ST_PROTOCOL, 0 },
+        { WIRE_UNKNOWN_STATUS, COSIM_TABLE_ST_PROTOCOL, 0 },
+        { WIRE_REMOTE_SLOT_BUSY, COSIM_TABLE_ST_PROTOCOL, 0 },
+        { WIRE_SUCCESS_BAD_COUNT, COSIM_TABLE_ST_PROTOCOL, 1 },
+        { WIRE_EXEC_VALID_ONE_COMMIT, COSIM_TABLE_ST_EXEC_ERROR, 1 },
+        { WIRE_EXEC_BAD_COMMITTED, COSIM_TABLE_ST_PROTOCOL, 1 },
+        { WIRE_EXEC_BAD_FAILED_INDEX, COSIM_TABLE_ST_PROTOCOL, 1 },
+    };
+    size_t i;
+
+    for (i = 0; i < sizeof(cases) / sizeof(cases[0]); i++)
+        run_wire_case(&cases[i]);
+}
+
 static void test_semantic_roundtrip(void)
 {
     const uint16_t port = reserve_available_port();
@@ -430,6 +762,7 @@ static void test_semantic_roundtrip(void)
 int main(void)
 {
     test_semantic_roundtrip();
+    test_wire_completion_validation_matrix();
     puts("table semantic roundtrip: PASS");
     return 0;
 }

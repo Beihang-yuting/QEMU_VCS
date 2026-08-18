@@ -30,6 +30,8 @@ typedef struct {
     cosim_table_status_t rpc_status;
     cosim_table_completion_t rpc_completion;
     int active;
+    int active_calls;
+    int deactivate_after_first_check;
     int route_present;
     int dma_reads;
     int dma_writes;
@@ -39,7 +41,9 @@ typedef struct {
     int complete_count;
     int reenter;
     int read_called;
+    int write_called;
     uint8_t expected_operation;
+    uint64_t expected_offset;
     cosim_table_status_t reenter_status;
     cosim_table_write_begin_t observed_request;
     cosim_table_read_dword_t observed_read;
@@ -120,6 +124,11 @@ static int fake_target_active(void *opaque,
 
     CHECK(cosim_table_le16_to_cpu(target->rc_id) == 1);
     CHECK(cosim_table_le16_to_cpu(target->device_instance) == 2);
+    fake->active_calls++;
+    if (fake->deactivate_after_first_check && fake->active_calls == 1) {
+        fake->active = 0;
+        return 1;
+    }
     return fake->active;
 }
 
@@ -132,7 +141,7 @@ static const cosim_table_route_entry_t *fake_match(
     CHECK(target->target_type == COSIM_TABLE_TARGET_PF);
     CHECK(target->pf_index == 0);
     CHECK(target->bar_index == 0);
-    CHECK(offset == UINT64_C(0x120));
+    CHECK(offset == fake->expected_offset);
     CHECK(operation == fake->expected_operation);
     return fake->route_present ? &fake->route : NULL;
 }
@@ -145,6 +154,7 @@ static cosim_table_status_t fake_write(
     fake_context_t *fake = opaque;
 
     CHECK(timeout_ms == TEST_TIMEOUT_MS);
+    fake->write_called++;
     fake->observed_request = *request;
     memcpy(fake->observed_payload, payload, sizeof(fake->observed_payload));
     *completion = fake->rpc_completion;
@@ -176,6 +186,7 @@ static void setup(fake_context_t *fake, cosim_table_ctrl_core_t *core)
     fake->active = 1;
     fake->route_present = 1;
     fake->expected_operation = COSIM_TABLE_OP_WRITE;
+    fake->expected_offset = UINT64_C(0x120);
     fake->rpc_status = COSIM_TABLE_ST_SUCCESS;
     fake->rpc_completion.status = COSIM_TABLE_ST_SUCCESS;
     fake->rpc_completion.failed_index = UINT32_MAX;
@@ -278,6 +289,114 @@ static void test_payload_bounds_complete_protocol(void)
 
     setup(&fake, &core);
     fake_header(&fake)->payload_offset = cosim_table_cpu_to_le32(500);
+    CHECK(cosim_table_ctrl_process_slot(&core, test_slot_address,
+                                        TEST_SLOT_BYTES, TEST_TIMEOUT_MS) ==
+          COSIM_TABLE_ST_PROTOCOL);
+    check_completion(&fake, COSIM_TABLE_ST_PROTOCOL, UINT32_MAX, 0);
+}
+
+static void test_slot_address_size_overflow_and_owner_states(void)
+{
+    const uint32_t owner_states[] = {
+        COSIM_TABLE_SLOT_FREE,
+        COSIM_TABLE_SLOT_BUSY,
+        COSIM_TABLE_SLOT_COMPLETE,
+    };
+    const cosim_table_status_t owner_statuses[] = {
+        COSIM_TABLE_ST_PROTOCOL,
+        COSIM_TABLE_ST_SLOT_BUSY,
+        COSIM_TABLE_ST_PROTOCOL,
+    };
+    fake_context_t fake;
+    cosim_table_ctrl_core_t core;
+    size_t i;
+
+    setup(&fake, &core);
+    CHECK(cosim_table_ctrl_process_slot(&core, test_slot_address + 1,
+                                        TEST_SLOT_BYTES, TEST_TIMEOUT_MS) ==
+          COSIM_TABLE_ST_PROTOCOL);
+    CHECK(fake.dma_reads == 0 && fake.complete_count == 0);
+
+    setup(&fake, &core);
+    CHECK(cosim_table_ctrl_process_slot(&core, test_slot_address,
+                                        sizeof(cosim_table_slot_hdr_t) - 1,
+                                        TEST_TIMEOUT_MS) ==
+          COSIM_TABLE_ST_PROTOCOL);
+    CHECK(fake.dma_reads == 0 && fake.complete_count == 0);
+
+    setup(&fake, &core);
+    CHECK(cosim_table_ctrl_process_slot(&core, UINT64_MAX - 7,
+                                        TEST_SLOT_BYTES, TEST_TIMEOUT_MS) ==
+          COSIM_TABLE_ST_PROTOCOL);
+    CHECK(fake.dma_reads == 0 && fake.complete_count == 0);
+
+    for (i = 0; i < sizeof(owner_states) / sizeof(owner_states[0]); i++) {
+        setup(&fake, &core);
+        fake_header(&fake)->state = cosim_table_cpu_to_le32(owner_states[i]);
+        CHECK(cosim_table_ctrl_process_slot(&core, test_slot_address,
+                                            TEST_SLOT_BYTES,
+                                            TEST_TIMEOUT_MS) ==
+              owner_statuses[i]);
+        CHECK(fake.complete_count == 0);
+    }
+}
+
+static void test_invalid_offset_index_count_and_payload_combinations(void)
+{
+    fake_context_t fake;
+    cosim_table_ctrl_core_t core;
+
+    setup(&fake, &core);
+    fake.expected_offset = UINT64_C(0x121);
+    fake_header(&fake)->bar_offset = cosim_table_cpu_to_le64(fake.expected_offset);
+    CHECK(cosim_table_ctrl_process_slot(&core, test_slot_address,
+                                        TEST_SLOT_BYTES, TEST_TIMEOUT_MS) ==
+          COSIM_TABLE_ST_UNSUPPORTED);
+    check_completion(&fake, COSIM_TABLE_ST_UNSUPPORTED, UINT32_MAX, 0);
+
+    setup(&fake, &core);
+    fake_header(&fake)->payload_bytes = cosim_table_cpu_to_le32(47);
+    CHECK(cosim_table_ctrl_process_slot(&core, test_slot_address,
+                                        TEST_SLOT_BYTES, TEST_TIMEOUT_MS) ==
+          COSIM_TABLE_ST_UNSUPPORTED);
+    check_completion(&fake, COSIM_TABLE_ST_UNSUPPORTED, UINT32_MAX, 0);
+
+    setup(&fake, &core);
+    fake.expected_offset = UINT64_C(0x110);
+    fake_header(&fake)->bar_offset = cosim_table_cpu_to_le64(fake.expected_offset);
+    fake_header(&fake)->payload_bytes = cosim_table_cpu_to_le32(16);
+    fake.route.index_base = cosim_table_cpu_to_le32(UINT32_MAX);
+    CHECK(cosim_table_ctrl_process_slot(&core, test_slot_address,
+                                        TEST_SLOT_BYTES, TEST_TIMEOUT_MS) ==
+          COSIM_TABLE_ST_UNSUPPORTED);
+    check_completion(&fake, COSIM_TABLE_ST_UNSUPPORTED, UINT32_MAX, 0);
+
+    setup(&fake, &core);
+    fake.expected_offset = UINT64_C(0x1f0);
+    fake_header(&fake)->bar_offset = cosim_table_cpu_to_le64(fake.expected_offset);
+    fake_header(&fake)->payload_bytes = cosim_table_cpu_to_le32(32);
+    CHECK(cosim_table_ctrl_process_slot(&core, test_slot_address,
+                                        TEST_SLOT_BYTES, TEST_TIMEOUT_MS) ==
+          COSIM_TABLE_ST_UNSUPPORTED);
+    check_completion(&fake, COSIM_TABLE_ST_UNSUPPORTED, UINT32_MAX, 0);
+
+    setup(&fake, &core);
+    fake.expected_offset = UINT64_MAX - 100;
+    fake_header(&fake)->bar_offset = cosim_table_cpu_to_le64(fake.expected_offset);
+    fake_header(&fake)->payload_bytes = cosim_table_cpu_to_le32(2);
+    fake.route.start_offset = cosim_table_cpu_to_le64(fake.expected_offset);
+    fake.route.end_offset = cosim_table_cpu_to_le64(UINT64_MAX);
+    fake.route.entry_bytes = cosim_table_cpu_to_le32(1);
+    fake.route.stride_bytes = cosim_table_cpu_to_le32(UINT32_MAX);
+    fake.route.index_base = 0;
+    CHECK(cosim_table_ctrl_process_slot(&core, test_slot_address,
+                                        TEST_SLOT_BYTES, TEST_TIMEOUT_MS) ==
+          COSIM_TABLE_ST_UNSUPPORTED);
+    check_completion(&fake, COSIM_TABLE_ST_UNSUPPORTED, UINT32_MAX, 0);
+
+    setup(&fake, &core);
+    fake_header(&fake)->payload_offset =
+        cosim_table_cpu_to_le32(sizeof(cosim_table_slot_hdr_t) + 1);
     CHECK(cosim_table_ctrl_process_slot(&core, test_slot_address,
                                         TEST_SLOT_BYTES, TEST_TIMEOUT_MS) ==
           COSIM_TABLE_ST_PROTOCOL);
@@ -431,17 +550,20 @@ static void test_read_slot_returns_one_dword(void)
           UINT32_C(0x44332211));
 }
 
-static void test_generation_change_returns_target_gone(void)
+static void test_generation_change_after_payload_read_returns_target_gone(void)
 {
     fake_context_t fake;
     cosim_table_ctrl_core_t core;
 
     setup(&fake, &core);
-    fake.active = 0;
+    fake.deactivate_after_first_check = 1;
     CHECK(cosim_table_ctrl_process_slot(&core, test_slot_address,
                                         TEST_SLOT_BYTES, TEST_TIMEOUT_MS) ==
           COSIM_TABLE_ST_TARGET_GONE);
     check_completion(&fake, COSIM_TABLE_ST_TARGET_GONE, UINT32_MAX, 0);
+    CHECK(fake.active_calls == 2);
+    CHECK(fake.write_called == 0);
+    CHECK(!cosim_table_status_may_frontdoor(COSIM_TABLE_ST_TARGET_GONE));
 }
 
 static void test_only_proven_no_commit_statuses_allow_replay(void)
@@ -462,7 +584,7 @@ static void test_only_proven_no_commit_statuses_allow_replay(void)
 static void test_logical_bar_read_decode_and_extract(void)
 {
     const uint64_t sizes[6] = { UINT64_C(0x1000), 0, UINT64_C(0x2000),
-                                0, 0, 0 };
+                                0, UINT64_C(0x3000), 0 };
     cosim_table_target_t target;
     uint64_t aligned;
     uint64_t aperture;
@@ -507,6 +629,8 @@ int main(void)
     test_not_ready_claims_and_completes_slot();
     test_malformed_reserved_bytes_complete_protocol();
     test_payload_bounds_complete_protocol();
+    test_slot_address_size_overflow_and_owner_states();
+    test_invalid_offset_index_count_and_payload_combinations();
     test_local_slot_contention_is_safe();
     test_no_route_completes_without_rpc();
     test_three_entry_success_uses_route_geometry();
@@ -515,7 +639,7 @@ int main(void)
     test_remote_slot_busy_is_hard_protocol_error();
     test_malformed_success_completion_is_protocol();
     test_read_slot_returns_one_dword();
-    test_generation_change_returns_target_gone();
+    test_generation_change_after_payload_read_returns_target_gone();
     test_only_proven_no_commit_statuses_allow_replay();
     test_logical_bar_read_decode_and_extract();
     puts("table controller core tests: PASS");
