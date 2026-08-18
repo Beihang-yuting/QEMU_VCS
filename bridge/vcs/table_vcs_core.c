@@ -52,6 +52,7 @@ typedef struct {
     int loaded;
     int initialized;
     int activated;
+    int activating;
     int polling;
     int completing;
     int outstanding;
@@ -62,6 +63,44 @@ typedef struct {
 
 static table_vcs_state_t table_states[COSIM_MAX_RCS];
 static pthread_once_t table_states_once = PTHREAD_ONCE_INIT;
+
+/* Unit tests may interpose this weak symbol to stop at concurrency points. */
+extern void table_vcs_test_hook(int rc, int event) __attribute__((weak));
+extern void *table_vcs_test_alloc(size_t bytes) __attribute__((weak));
+
+enum {
+    TABLE_VCS_TEST_HOOK_ACTIVATION_CLAIMED = 1,
+    TABLE_VCS_TEST_HOOK_ACTIVATION_END_SENT = 2,
+    TABLE_VCS_TEST_HOOK_CLEANUP_CLAIMED = 3,
+    TABLE_VCS_TEST_HOOK_WRITE_WAITING_DATA = 4,
+};
+
+static void run_test_hook(int rc, int event)
+{
+    if (table_vcs_test_hook != NULL)
+        table_vcs_test_hook(rc, event);
+}
+
+static void *allocate_payload(size_t bytes)
+{
+    return table_vcs_test_alloc != NULL
+        ? table_vcs_test_alloc(bytes) : malloc(bytes);
+}
+
+static void *allocate_route_subset(size_t count)
+{
+    if (!cosim_table_route_count_supported((uint64_t)count) ||
+        count > SIZE_MAX / sizeof(cosim_table_route_entry_t))
+        return NULL;
+    return allocate_payload(count * sizeof(cosim_table_route_entry_t));
+}
+
+#ifdef TABLE_VCS_TESTING
+void *table_vcs_test_allocate_route_subset(size_t count)
+{
+    return allocate_route_subset(count);
+}
+#endif
 
 static void initialize_states(void)
 {
@@ -188,9 +227,7 @@ static int preflight_routes(table_vcs_state_t *state, int rc,
             rc)
             count++;
     }
-    if (count == 0 || count > SIZE_MAX / sizeof(*subset))
-        return -1;
-    subset = malloc(count * sizeof(*subset));
+    subset = allocate_route_subset(count);
     if (subset == NULL)
         return -1;
 
@@ -239,6 +276,7 @@ int table_vcs_load_routes_rc(int rc, const char *absolute_path)
 
     (void)pthread_mutex_lock(&state->lock);
     if (state->loaded || state->initialized || state->activated ||
+        state->activating ||
         state->cleaning) {
         result = -1;
     } else {
@@ -271,6 +309,7 @@ int table_vcs_register_handler_rc(int rc, const char *name,
 
     (void)pthread_mutex_lock(&state->lock);
     if (!state->loaded || state->initialized || state->activated ||
+        state->activating ||
         state->cleaning)
         goto done;
     for (i = 0; i < state->handler_count; i++) {
@@ -320,6 +359,7 @@ int table_vcs_init_rc(int rc, const char *remote_host,
 
     (void)pthread_mutex_lock(&state->lock);
     if (!state->loaded || state->initialized || state->activated ||
+        state->activating ||
         state->cleaning) {
         (void)pthread_mutex_unlock(&state->lock);
         return -1;
@@ -362,7 +402,8 @@ int table_vcs_activate_routes_rc(int rc)
     if (state == NULL)
         return -1;
     (void)pthread_mutex_lock(&state->lock);
-    if (!state->initialized || state->activated || state->terminal ||
+    if (!state->initialized || state->activated || state->activating ||
+        state->terminal ||
         state->cleaning || preflight_routes(state, rc, &subset, &count) != 0) {
         (void)pthread_mutex_unlock(&state->lock);
         return -1;
@@ -372,8 +413,11 @@ int table_vcs_activate_routes_rc(int rc)
     generation = route_generation(hash);
     transport = state->transport;
     timeout_ms = state->io_timeout_ms;
+    state->activating = 1;
     state->active_io++;
     (void)pthread_mutex_unlock(&state->lock);
+
+    run_test_hook(rc, TABLE_VCS_TEST_HOOK_ACTIVATION_CLAIMED);
 
     memset(&begin, 0, sizeof(begin));
     begin.generation = cosim_table_cpu_to_le32(generation);
@@ -395,18 +439,24 @@ int table_vcs_activate_routes_rc(int rc)
                        transaction_id);
     if (cosim_table_send(transport, &frame, &end, NULL, timeout_ms) != 0)
         goto done;
+    run_test_hook(rc, TABLE_VCS_TEST_HOOK_ACTIVATION_END_SENT);
     result = 0;
 
 done:
     (void)pthread_mutex_lock(&state->lock);
-    if (result == 0 && !state->cleaning && !state->terminal) {
-        state->published_routes = subset;
-        state->published_count = count;
-        state->activated = 1;
-        subset = NULL;
-    } else if (result != 0) {
-        state->terminal = 1;
+    if (result == 0) {
+        if (!state->cleaning && !state->terminal && !state->interrupted) {
+            state->published_routes = subset;
+            state->published_count = count;
+            state->activated = 1;
+            subset = NULL;
+        } else {
+            result = -1;
+        }
     }
+    if (result != 0)
+        state->terminal = 1;
+    state->activating = 0;
     end_io_locked(state);
     (void)pthread_mutex_unlock(&state->lock);
     free(subset);
@@ -476,7 +526,7 @@ static int assemble_write(table_vcs_state_t *state, int rc,
             state, rc, cosim_table_le32_to_cpu(begin->route_id),
             &begin->target, cosim_table_le64_to_cpu(begin->bar_offset),
             COSIM_TABLE_OP_WRITE, request) != 0 ||
-        payload_bytes == 0 ||
+        !cosim_table_write_bytes_supported(payload_bytes) ||
         cosim_table_route_slice(request->route, request->bar_offset,
                                 payload_bytes, &first_index,
                                 &entry_count) != 0 ||
@@ -486,9 +536,11 @@ static int assemble_write(table_vcs_state_t *state, int rc,
     request->first_index = first_index;
     request->entry_count = entry_count;
     request->payload_bytes = payload_bytes;
-    request->payload = malloc(payload_bytes);
+    request->payload = allocate_payload(payload_bytes);
     if (request->payload == NULL)
         return -1;
+
+    run_test_hook(rc, TABLE_VCS_TEST_HOOK_WRITE_WAITING_DATA);
 
     while (received < payload_bytes) {
         cosim_table_frame_hdr_t frame;
@@ -1019,6 +1071,7 @@ static void reset_state_locked(table_vcs_state_t *state)
     state->loaded = 0;
     state->initialized = 0;
     state->activated = 0;
+    state->activating = 0;
     state->polling = 0;
     state->completing = 0;
     state->outstanding = 0;
@@ -1043,6 +1096,7 @@ void table_vcs_cleanup_rc(int rc)
     state->interrupted = 1;
     state->terminal = 1;
     transport = state->transport;
+    run_test_hook(rc, TABLE_VCS_TEST_HOOK_CLEANUP_CLAIMED);
     if (transport != NULL)
         cosim_table_transport_interrupt(transport);
     while (state->active_io != 0)

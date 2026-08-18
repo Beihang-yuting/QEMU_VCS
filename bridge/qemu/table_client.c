@@ -9,8 +9,6 @@
 #include <string.h>
 #include <time.h>
 
-#define TABLE_CLIENT_MAX_ROUTES 65536u
-
 struct cosim_table_client {
     cosim_table_transport_t *transport;
     uint16_t rc_id;
@@ -422,8 +420,8 @@ int cosim_table_client_wait_routes(cosim_table_client_t *client,
     transaction_id = cosim_table_le64_to_cpu(frame.transaction_id);
     generation = cosim_table_le32_to_cpu(begin.generation);
     count = cosim_table_le32_to_cpu(begin.entry_count);
-    if (transaction_id == 0 || generation == 0 || count == 0 ||
-        count > TABLE_CLIENT_MAX_ROUTES)
+    if (transaction_id == 0 || generation == 0 ||
+        !cosim_table_route_count_supported(count))
         goto done;
     entries = calloc(count, sizeof(*entries));
     if (entries == NULL)
@@ -646,7 +644,7 @@ cosim_table_status_t cosim_table_client_write(
         completion_reset(completion, status);
         goto done;
     }
-    if (payload_bytes == 0 ||
+    if (!cosim_table_write_bytes_supported(payload_bytes) ||
         cosim_table_route_slice(route, offset, payload_bytes, &first_index,
                                 &entry_count) != 0 ||
         first_index > UINT32_MAX) {

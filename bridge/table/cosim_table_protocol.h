@@ -135,6 +135,19 @@ static inline cosim_u64 cosim_table_le64_to_cpu(cosim_u64 value)
 #define COSIM_TABLE_HANDLER_NAME_BYTES 64u
 #define COSIM_TABLE_FRAME_DATA_BYTES (64u * 1024u)
 #define COSIM_TABLE_DEFAULT_PORT_BASE 10100u
+/* Cross-endpoint resource ceilings; both route peers must enforce these. */
+#define COSIM_TABLE_MAX_ROUTES 65536u
+#define COSIM_TABLE_MAX_WRITE_BYTES (64u * 1024u * 1024u)
+
+static inline int cosim_table_route_count_supported(cosim_u64 count)
+{
+    return count != 0 && count <= COSIM_TABLE_MAX_ROUTES;
+}
+
+static inline int cosim_table_write_bytes_supported(cosim_u64 bytes)
+{
+    return bytes != 0 && bytes <= COSIM_TABLE_MAX_WRITE_BYTES;
+}
 
 typedef enum {
     COSIM_TABLE_MSG_HELLO = 1,

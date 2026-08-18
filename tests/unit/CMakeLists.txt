@@ -65,8 +65,21 @@ target_compile_definitions(test_table_vcs_core PRIVATE
 target_link_libraries(test_table_vcs_core
     cosim_bridge_vcs cosim_bridge_common pthread
 )
+set_target_properties(test_table_vcs_core PROPERTIES ENABLE_EXPORTS ON)
 add_test(NAME test_table_vcs_core COMMAND test_table_vcs_core)
 set_tests_properties(test_table_vcs_core PROPERTIES TIMEOUT 20)
+
+add_executable(test_table_vcs_alloc
+    test_table_vcs_alloc.c
+    ${CMAKE_SOURCE_DIR}/bridge/vcs/table_vcs_core.c
+)
+target_include_directories(test_table_vcs_alloc PRIVATE
+    ${CMAKE_SOURCE_DIR}/bridge/table
+    ${CMAKE_SOURCE_DIR}/bridge/vcs
+)
+target_compile_definitions(test_table_vcs_alloc PRIVATE TABLE_VCS_TESTING=1)
+target_link_libraries(test_table_vcs_alloc cosim_bridge_common pthread)
+add_test(NAME test_table_vcs_alloc COMMAND test_table_vcs_alloc)
 
 add_executable(test_bridge_wait_hooks test_bridge_wait_hooks.c)
 target_link_libraries(test_bridge_wait_hooks cosim_bridge pthread)
