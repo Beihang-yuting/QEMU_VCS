@@ -292,4 +292,43 @@ package cosim_bridge_pkg;
                                                          input int unsigned operands[4],
                                                          output int unsigned old_out[2]);
 
+    /* ---- Semantic table sideband (independent per-RC TCP client) ---- */
+    import "DPI-C" function int table_vcs_init_rc(
+        input int rc, input string remote_host, input int table_port_base,
+        input int instance_id, input int connect_timeout_ms);
+    import "DPI-C" function int table_vcs_load_routes_rc(
+        input int rc, input string absolute_path);
+    import "DPI-C" function int table_vcs_register_handler_rc(
+        input int rc, input string name, input int supports_read);
+    import "DPI-C" function int table_vcs_activate_routes_rc(input int rc);
+    import "DPI-C" function int table_vcs_poll_request_rc(input int rc);
+    import "DPI-C" function int table_vcs_get_request_kind_rc(input int rc);
+    import "DPI-C" function string table_vcs_get_request_handler_rc(input int rc);
+    import "DPI-C" function int table_vcs_get_request_rc_id_rc(input int rc);
+    import "DPI-C" function int table_vcs_get_request_device_instance_rc(input int rc);
+    import "DPI-C" function int table_vcs_get_request_pci_domain_rc(input int rc);
+    import "DPI-C" function int table_vcs_get_request_target_bdf_rc(input int rc);
+    import "DPI-C" function int table_vcs_get_request_target_type_rc(input int rc);
+    import "DPI-C" function int table_vcs_get_request_pf_index_rc(input int rc);
+    import "DPI-C" function int table_vcs_get_request_vf_index_rc(input int rc);
+    import "DPI-C" function int table_vcs_get_request_bar_index_rc(input int rc);
+    import "DPI-C" function int unsigned table_vcs_get_request_generation_rc(input int rc);
+    import "DPI-C" function int unsigned table_vcs_get_request_route_id_rc(input int rc);
+    import "DPI-C" function longint unsigned table_vcs_get_request_first_index_rc(input int rc);
+    import "DPI-C" function longint unsigned table_vcs_get_request_bar_offset_rc(input int rc);
+    import "DPI-C" function int unsigned table_vcs_get_request_entry_count_rc(input int rc);
+    import "DPI-C" function int unsigned table_vcs_get_request_entry_bytes_rc(input int rc);
+    import "DPI-C" function int unsigned table_vcs_get_request_payload_bytes_rc(input int rc);
+    import "DPI-C" function int unsigned table_vcs_get_request_byte_offset_rc(input int rc);
+    import "DPI-C" function int unsigned table_vcs_get_request_flags_rc(input int rc);
+    import "DPI-C" function longint unsigned table_vcs_get_request_transaction_id_rc(input int rc);
+    import "DPI-C" function longint unsigned table_vcs_get_request_payload_u64_rc(
+        input int rc, input int unsigned word);
+    import "DPI-C" function int table_vcs_complete_rc(
+        input int rc, input int status, input longint unsigned failed_index,
+        input int unsigned committed, input int handler_error,
+        input int unsigned read_data);
+    import "DPI-C" function void table_vcs_interrupt_rc(input int rc);
+    import "DPI-C" function void table_vcs_cleanup_rc(input int rc);
+
 endpackage

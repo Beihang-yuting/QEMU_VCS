@@ -122,6 +122,10 @@ add_test(NAME test_cosim_table_unit
          COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/../sv/run_test_cosim_table_unit.sh)
 set_tests_properties(test_cosim_table_unit PROPERTIES TIMEOUT 120)
 
+add_test(NAME test_cosim_table_service
+         COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/../sv/run_test_cosim_table_service.sh)
+set_tests_properties(test_cosim_table_service PROPERTIES TIMEOUT 120)
+
 add_test(NAME test_cosim_tag_map_order
          COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/test_cosim_tag_map_order.sh)
 set_tests_properties(test_cosim_tag_map_order PROPERTIES TIMEOUT 10)

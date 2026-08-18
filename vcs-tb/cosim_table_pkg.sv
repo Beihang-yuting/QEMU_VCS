@@ -6,6 +6,7 @@ package cosim_table_pkg;
     `include "cosim_table_codec.sv"
     `include "cosim_table_handler.sv"
     `include "cosim_table_registry.sv"
+    `include "cosim_table_service.sv"
 endpackage
 
 `endif
