@@ -102,6 +102,18 @@ add_test(NAME test_qemu_request_routing_source
          COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/test_qemu_request_routing_source.sh)
 set_tests_properties(test_qemu_request_routing_source PROPERTIES TIMEOUT 10)
 
+add_test(NAME test_qemu_table_target_header_closure
+         COMMAND bash
+                 ${CMAKE_CURRENT_SOURCE_DIR}/test_qemu_table_target_build_closure.sh
+                 headers)
+set_tests_properties(test_qemu_table_target_header_closure PROPERTIES TIMEOUT 20)
+
+add_test(NAME test_qemu_table_target_link_closure
+         COMMAND bash
+                 ${CMAKE_CURRENT_SOURCE_DIR}/test_qemu_table_target_build_closure.sh
+                 link $<TARGET_FILE:cosim_bridge>)
+set_tests_properties(test_qemu_table_target_link_closure PROPERTIES TIMEOUT 20)
+
 add_test(NAME test_cq_bar_routing_source
          COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/test_cq_bar_routing_source.sh)
 set_tests_properties(test_cq_bar_routing_source PROPERTIES TIMEOUT 10)

@@ -25,6 +25,7 @@ add_library(cosim_bridge SHARED
     qemu/bridge_qemu.c
     qemu/sock_sync.c
     qemu/irq_poller.c
+    qemu/table_target.c
 )
 target_include_directories(cosim_bridge PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/common

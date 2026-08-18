@@ -58,7 +58,8 @@ qemu_rc_depends_on_mmio_header() {
 populate_qemu_injection_project_fixture() {
     local project_fixture=$1
 
-    mkdir -p "$project_fixture/qemu-plugin" "$project_fixture/bridge/common"
+    mkdir -p "$project_fixture/qemu-plugin" "$project_fixture/bridge/common" \
+        "$project_fixture/bridge/qemu" "$project_fixture/bridge/table"
     cp "$project_dir/qemu-plugin/cosim_pcie_rc.c" \
         "$project_fixture/qemu-plugin/cosim_pcie_rc.c"
     cp "$project_dir/qemu-plugin/cosim_pcie_rc.h" \
@@ -71,6 +72,10 @@ populate_qemu_injection_project_fixture() {
     fi
     cp "$project_dir/bridge/common/cosim_topology.h" \
         "$project_fixture/bridge/common/cosim_topology.h"
+    cp "$project_dir/bridge/qemu/table_target.h" \
+        "$project_fixture/bridge/qemu/table_target.h"
+    cp "$project_dir/bridge/table/cosim_table_protocol.h" \
+        "$project_fixture/bridge/table/cosim_table_protocol.h"
 }
 
 qemu_device_executes_mmio_sync() {

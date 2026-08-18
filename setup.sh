@@ -2075,6 +2075,8 @@ if [ "$NEED_QEMU" = true ]; then
 
         # 共享头文件（topology 等）
         cp "${PROJECT_DIR}/bridge/common/cosim_topology.h" "${QEMU_DIR}/include/hw/net/"
+        cp "${PROJECT_DIR}/bridge/qemu/table_target.h" "${QEMU_DIR}/include/hw/net/"
+        cp "${PROJECT_DIR}/bridge/table/cosim_table_protocol.h" "${QEMU_DIR}/include/hw/net/"
 
         MESON_FILE="${QEMU_DIR}/hw/net/meson.build"
         if ! grep -q "cosim_pcie_rc" "$MESON_FILE"; then
@@ -2202,7 +2204,7 @@ if [ "$NEED_QEMU" = true ]; then
                     --cc="$QEMU_CC" \
                     --target-list=x86_64-softmmu \
                     $QEMU_EXTRA_OPTS \
-                    --extra-cflags="-I${PROJECT_DIR}/bridge/common -I${PROJECT_DIR}/bridge/qemu" \
+                    --extra-cflags="-I${PROJECT_DIR}/bridge/common -I${PROJECT_DIR}/bridge/qemu -I${PROJECT_DIR}/bridge/table" \
                     --extra-ldflags="-L${BRIDGE_LIB_DIR} -lcosim_bridge -Wl,-rpath,${BRIDGE_LIB_DIR}"
             else
                 info "QEMU 已配置，跳过 configure"
