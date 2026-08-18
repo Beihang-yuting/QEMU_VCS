@@ -47,6 +47,8 @@ typedef struct {
     size_t handler_capacity;
     cosim_table_transport_t *transport;
     table_vcs_request_t request;
+    table_vcs_request_t pending_request;
+    uint64_t pending_received;
     int io_timeout_ms;
     unsigned int active_io;
     int loaded;
@@ -62,6 +64,11 @@ typedef struct {
 } table_vcs_state_t;
 
 static table_vcs_state_t table_states[COSIM_MAX_RCS];
+
+/* Each complete-frame receive is bounded so the SV scheduler regains control
+ * between fragments.  The transport still treats a timeout after consuming a
+ * partial frame as terminal; only a clean no-byte timeout is recoverable. */
+#define TABLE_VCS_POLL_TIMEOUT_MS 10
 static pthread_once_t table_states_once = PTHREAD_ONCE_INIT;
 
 /* Unit tests may interpose this weak symbol to stop at concurrency points. */
@@ -478,7 +485,8 @@ static int receive_frame(cosim_table_transport_t *transport,
 {
     memset(header, 0, sizeof(*header));
     return cosim_table_recv(transport, frame, header, sizeof(*header),
-                            payload, COSIM_TABLE_FRAME_DATA_BYTES, -1);
+                            payload, COSIM_TABLE_FRAME_DATA_BYTES,
+                            TABLE_VCS_POLL_TIMEOUT_MS);
 }
 
 static int prepare_common_request(table_vcs_state_t *state, int rc,
@@ -506,18 +514,16 @@ static int prepare_common_request(table_vcs_state_t *state, int rc,
     return 0;
 }
 
-static int assemble_write(table_vcs_state_t *state, int rc,
-                          cosim_table_transport_t *transport,
-                          const cosim_table_frame_hdr_t *first_frame,
-                          const cosim_table_write_begin_t *begin,
-                          table_vcs_request_t *request)
+static int prepare_write(table_vcs_state_t *state, int rc,
+                         const cosim_table_frame_hdr_t *first_frame,
+                         const cosim_table_write_begin_t *begin,
+                         table_vcs_request_t *request)
 {
     const uint64_t transaction_id =
         cosim_table_le64_to_cpu(first_frame->transaction_id);
     uint64_t first_index;
     uint32_t entry_count;
     uint32_t payload_bytes = cosim_table_le32_to_cpu(begin->payload_bytes);
-    uint64_t received = 0;
 
     request->kind = TABLE_VCS_REQUEST_WRITE;
     request->transaction_id = transaction_id;
@@ -540,47 +546,57 @@ static int assemble_write(table_vcs_state_t *state, int rc,
     if (request->payload == NULL)
         return -1;
 
-    run_test_hook(rc, TABLE_VCS_TEST_HOOK_WRITE_WAITING_DATA);
+    return 0;
+}
 
-    while (received < payload_bytes) {
+/* Returns one for a complete write, zero for a clean idle timeout while the
+ * request remains resumable, and minus one for terminal/protocol failure. */
+static int advance_write(cosim_table_transport_t *transport,
+                         table_vcs_request_t *request,
+                         uint64_t *received)
+{
+    const uint64_t transaction_id = request->transaction_id;
+
+    for (;;) {
         cosim_table_frame_hdr_t frame;
         table_vcs_header_t header;
         uint8_t fragment[COSIM_TABLE_FRAME_DATA_BYTES];
         uint32_t frame_bytes;
         uint32_t data_bytes;
+        int receive_result;
 
-        if (receive_frame(transport, &frame, &header, fragment) != 0 ||
-            cosim_table_le16_to_cpu(frame.type) !=
-                COSIM_TABLE_MSG_WRITE_DATA ||
+        receive_result = receive_frame(transport, &frame, &header, fragment);
+        if (receive_result == 1)
+            return 0;
+        if (receive_result != 0 ||
             cosim_table_le64_to_cpu(frame.transaction_id) != transaction_id)
+            return -1;
+
+        if (*received == request->payload_bytes) {
+            if (cosim_table_le16_to_cpu(frame.type) !=
+                    COSIM_TABLE_MSG_WRITE_END ||
+                cosim_table_le32_to_cpu(header.write_end.payload_bytes) !=
+                    request->payload_bytes ||
+                header.write_end.reserved != 0)
+                return -1;
+            return 1;
+        }
+
+        if (cosim_table_le16_to_cpu(frame.type) !=
+            COSIM_TABLE_MSG_WRITE_DATA)
             return -1;
         frame_bytes = cosim_table_le32_to_cpu(frame.payload_bytes);
         data_bytes = cosim_table_le32_to_cpu(header.write_data.data_bytes);
         if (header.write_data.reserved != 0 || frame_bytes == 0 ||
             data_bytes != frame_bytes ||
             cosim_table_le64_to_cpu(header.write_data.data_offset) !=
-                received ||
-            received > payload_bytes || frame_bytes > payload_bytes - received)
+                *received ||
+            *received > request->payload_bytes ||
+            frame_bytes > request->payload_bytes - *received)
             return -1;
-        memcpy(request->payload + (size_t)received, fragment, frame_bytes);
-        received += frame_bytes;
+        memcpy(request->payload + (size_t)*received, fragment, frame_bytes);
+        *received += frame_bytes;
     }
-
-    {
-        cosim_table_frame_hdr_t frame;
-        table_vcs_header_t header;
-        uint8_t unused_payload[COSIM_TABLE_FRAME_DATA_BYTES];
-
-        if (receive_frame(transport, &frame, &header, unused_payload) != 0 ||
-            cosim_table_le16_to_cpu(frame.type) !=
-                COSIM_TABLE_MSG_WRITE_END ||
-            cosim_table_le64_to_cpu(frame.transaction_id) != transaction_id ||
-            cosim_table_le32_to_cpu(header.write_end.payload_bytes) !=
-                payload_bytes ||
-            header.write_end.reserved != 0)
-            return -1;
-    }
-    return 0;
 }
 
 static int assemble_read(table_vcs_state_t *state, int rc,
@@ -632,6 +648,8 @@ int table_vcs_poll_request_rc(int rc)
     table_vcs_request_t request;
     uint8_t payload[COSIM_TABLE_FRAME_DATA_BYTES];
     uint16_t kind;
+    int receive_result;
+    int has_pending;
     int result = -1;
 
     if (state == NULL)
@@ -646,15 +664,45 @@ int table_vcs_poll_request_rc(int rc)
     state->polling = 1;
     state->active_io++;
     transport = state->transport;
+    has_pending = state->pending_request.kind == TABLE_VCS_REQUEST_WRITE;
     (void)pthread_mutex_unlock(&state->lock);
 
-    if (receive_frame(transport, &frame, &header, payload) != 0)
+    if (has_pending) {
+        result = advance_write(transport, &state->pending_request,
+                               &state->pending_received);
+        if (result < 0)
+            goto protocol;
+        if (result == 0)
+            goto done;
+        request = state->pending_request;
+        memset(&state->pending_request, 0, sizeof(state->pending_request));
+        state->pending_received = 0;
+        goto done;
+    }
+
+    receive_result = receive_frame(transport, &frame, &header, payload);
+    if (receive_result == 1) {
+        result = 0;
+        goto done;
+    }
+    if (receive_result != 0)
         goto done;
     kind = cosim_table_le16_to_cpu(frame.type);
     if (kind == COSIM_TABLE_MSG_WRITE_BEGIN) {
-        if (assemble_write(state, rc, transport, &frame,
-                           &header.write_begin, &request) != 0)
+        if (prepare_write(state, rc, &frame, &header.write_begin,
+                          &state->pending_request) != 0)
             goto protocol;
+        state->pending_received = 0;
+        run_test_hook(rc, TABLE_VCS_TEST_HOOK_WRITE_WAITING_DATA);
+        result = advance_write(transport, &state->pending_request,
+                               &state->pending_received);
+        if (result < 0)
+            goto protocol;
+        if (result == 0)
+            goto done;
+        request = state->pending_request;
+        memset(&state->pending_request, 0, sizeof(state->pending_request));
+        state->pending_received = 0;
     } else if (kind == COSIM_TABLE_MSG_READ_DWORD) {
         if (assemble_read(state, rc, &frame, &header.read, &request) != 0)
             goto protocol;
@@ -674,9 +722,12 @@ done:
         state->request = request;
         state->outstanding = 1;
         memset(&request, 0, sizeof(request));
-    } else {
+    } else if (!(result == 0 && !state->cleaning && !state->terminal &&
+                 !state->interrupted)) {
         state->terminal = 1;
         result = -1;
+        discard_request(&state->pending_request);
+        state->pending_received = 0;
     }
     state->polling = 0;
     end_io_locked(state);
@@ -1057,6 +1108,7 @@ void table_vcs_interrupt_rc(int rc)
 static void reset_state_locked(table_vcs_state_t *state)
 {
     discard_request(&state->request);
+    discard_request(&state->pending_request);
     cosim_table_route_free(&state->routes);
     free(state->published_routes);
     free(state->handlers);
@@ -1068,6 +1120,7 @@ static void reset_state_locked(table_vcs_state_t *state)
     state->transport = NULL;
     state->io_timeout_ms = 0;
     state->active_io = 0;
+    state->pending_received = 0;
     state->loaded = 0;
     state->initialized = 0;
     state->activated = 0;

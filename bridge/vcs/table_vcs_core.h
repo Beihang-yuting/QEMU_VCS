@@ -16,8 +16,10 @@ extern "C" {
 /*
  * Lifecycle order for each RC is load, register, init, activate, poll/complete,
  * then interrupt/cleanup.  Poll returns one only after a whole request has
- * been assembled, and returns -1 for invalid state, interruption, or protocol
- * failure.  Exactly one successful complete call consumes that request.
+ * been assembled, returns zero after a clean bounded idle poll (preserving a
+ * validated write that is waiting for later DATA/END frames), and returns -1
+ * for invalid state, interruption, or protocol failure.  The caller retries
+ * after zero.  Exactly one successful complete call consumes that request.
  */
 int table_vcs_init_rc(int rc, const char *remote_host,
                       int table_port_base, int instance_id,

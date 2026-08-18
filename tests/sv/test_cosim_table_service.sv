@@ -5,6 +5,8 @@ module test_cosim_table_service;
 
     import "DPI-C" function void table_test_reset(input int rc,
                                                     input int requires_read);
+    import "DPI-C" function void table_test_set_scenario(input int rc,
+                                                          input int scenario);
     import "DPI-C" function int table_test_get_completion_count(input int rc);
     import "DPI-C" function int table_test_get_completion_status(input int rc,
                                                                   input int slot);
@@ -18,6 +20,14 @@ module test_cosim_table_service;
         input int rc, input int slot);
     import "DPI-C" function int table_test_get_cleanup_count(input int rc);
     import "DPI-C" function int table_test_get_order_errors(input int rc);
+    import "DPI-C" function int table_test_get_poll_count(input int rc);
+    import "DPI-C" function int table_test_get_interrupt_count(input int rc);
+
+    localparam int TABLE_TEST_GEOMETRY_ERROR = 1;
+    localparam int TABLE_TEST_MISSING_HANDLER = 2;
+    localparam int TABLE_TEST_CODEC_FAILURE = 3;
+    localparam int TABLE_TEST_COMPLETION_FAILURE = 4;
+    localparam int TABLE_TEST_PENDING_WRITE_WAIT = 5;
 
     int unsigned failures;
 
@@ -106,6 +116,17 @@ module test_cosim_table_service;
         endtask
     endclass
 
+    class service_custom_codec extends cosim_table_codec_base;
+        virtual function void protect_entry(
+            input byte unsigned raw_data[],
+            input cosim_table_protection_e protection,
+            output bit protection_bits[]
+        );
+            protection_bits = new[1];
+            protection_bits[0] = raw_data.size() != 0 && raw_data[0][0];
+        endfunction
+    endclass
+
     task automatic check_write_call(
         input service_handler handler,
         input int unsigned slot,
@@ -131,9 +152,24 @@ module test_cosim_table_service;
         cosim_table_service service;
         cosim_table_service write_only_service;
         cosim_table_service read_required_service;
+        cosim_table_service geometry_service;
+        cosim_table_service missing_service;
+        cosim_table_service codec_service;
+        cosim_table_service completion_failure_service;
+        cosim_table_service stop_service;
         service_handler handler;
         service_handler write_only_handler;
         service_handler read_required_handler;
+        service_handler geometry_handler;
+        service_handler missing_handler;
+        service_handler codec_handler;
+        service_handler completion_failure_handler;
+        service_handler stop_handler;
+        service_custom_codec custom_codec;
+        bit run_returned;
+        bit waiter_returned;
+        int unsigned delta_watchdog;
+        time stop_start_time;
 
         failures = 0;
 
@@ -213,6 +249,133 @@ module test_cosim_table_service;
         read_required_service.shutdown();
         check(table_test_get_cleanup_count(2) == 1,
               "failed activation cleans C state exactly once");
+
+        table_test_reset(0, 0);
+        table_test_set_scenario(0, TABLE_TEST_GEOMETRY_ERROR);
+        geometry_service = new(0);
+        geometry_handler = new("table0", 1'b0);
+        check(geometry_service.register_handler(
+                  geometry_handler, COSIM_TABLE_PROTECTION_NONE),
+              "geometry-error handler registers");
+        check(geometry_service.initialize("127.0.0.1", 10100, 0,
+                                          "/absolute/geometry.ini") == 0,
+              "geometry-error service initializes");
+        geometry_service.run();
+        geometry_service.wait_stopped();
+        check(table_test_get_completion_count(0) == 1 &&
+              table_test_get_completion_status(0, 0) ==
+                  COSIM_TABLE_STATUS_PROTOCOL,
+              "invalid geometry completes once with PROTOCOL");
+        geometry_service.shutdown();
+
+        table_test_reset(0, 0);
+        table_test_set_scenario(0, TABLE_TEST_MISSING_HANDLER);
+        missing_service = new(0);
+        missing_handler = new("table0", 1'b0);
+        check(missing_service.register_handler(
+                  missing_handler, COSIM_TABLE_PROTECTION_NONE),
+              "known handler registers for missing-handler request");
+        check(missing_service.initialize("127.0.0.1", 10100, 0,
+                                         "/absolute/missing.ini") == 0,
+              "missing-handler service initializes");
+        missing_service.run();
+        missing_service.wait_stopped();
+        check(table_test_get_completion_count(0) == 1 &&
+              table_test_get_completion_status(0, 0) ==
+                  COSIM_TABLE_STATUS_EXEC_ERROR,
+              "missing handler completes once with EXEC_ERROR");
+        missing_service.shutdown();
+
+        table_test_reset(0, 0);
+        table_test_set_scenario(0, TABLE_TEST_CODEC_FAILURE);
+        codec_service = new(0);
+        codec_handler = new("codec_table", 1'b0);
+        custom_codec = new();
+        codec_handler.set_codec(custom_codec);
+        check(codec_service.register_handler(
+                  codec_handler, COSIM_TABLE_PROTECTION_CUSTOM),
+              "custom-codec handler registers before codec failure");
+        check(codec_service.initialize("127.0.0.1", 10100, 0,
+                                       "/absolute/codec.ini") == 0,
+              "codec-failure service initializes with a valid codec");
+        codec_handler.set_codec(null);
+        codec_service.run();
+        codec_service.wait_stopped();
+        check(table_test_get_completion_count(0) == 1 &&
+              table_test_get_completion_status(0, 0) ==
+                  COSIM_TABLE_STATUS_EXEC_ERROR,
+              "codec resolution failure completes once with EXEC_ERROR");
+        codec_service.shutdown();
+
+        table_test_reset(0, 0);
+        table_test_set_scenario(0, TABLE_TEST_COMPLETION_FAILURE);
+        completion_failure_service = new(0);
+        completion_failure_handler = new("table0", 1'b0);
+        check(completion_failure_service.register_handler(
+                  completion_failure_handler, COSIM_TABLE_PROTECTION_NONE),
+              "completion-failure handler registers");
+        check(completion_failure_service.initialize(
+                  "127.0.0.1", 10100, 0,
+                  "/absolute/completion-failure.ini") == 0,
+              "completion-failure service initializes");
+        completion_failure_service.run();
+        completion_failure_service.wait_stopped();
+        check(table_test_get_poll_count(0) == 1 &&
+              table_test_get_completion_count(0) == 1,
+              "completion failure stops before polling the next request");
+        check(table_test_get_interrupt_count(0) == 1,
+              "completion failure interrupts the terminal C client once");
+        completion_failure_service.shutdown();
+
+        table_test_reset(3, 0);
+        table_test_set_scenario(3, TABLE_TEST_PENDING_WRITE_WAIT);
+        stop_service = new(3);
+        stop_handler = new("table0", 1'b0);
+        check(stop_service.register_handler(
+                  stop_handler, COSIM_TABLE_PROTECTION_NONE),
+              "pending-write handler registers");
+        check(stop_service.initialize("127.0.0.1", 10100, 3,
+                                      "/absolute/idle.ini") == 0,
+              "pending-write service initializes");
+        run_returned = 1'b0;
+        waiter_returned = 1'b0;
+        delta_watchdog = 0;
+        stop_start_time = $time;
+        fork
+            begin
+                stop_service.run();
+                run_returned = 1'b1;
+            end
+            begin
+                while (table_test_get_poll_count(3) == 0 &&
+                       delta_watchdog < 1000) begin
+                    delta_watchdog++;
+                    #0;
+                end
+                check(table_test_get_poll_count(3) != 0,
+                      "run reaches the pending-fragment poll sync point");
+                fork
+                    begin
+                        stop_service.wait_stopped();
+                        waiter_returned = 1'b1;
+                    end
+                join_none
+                #0;
+                check(!waiter_returned,
+                      "wait_stopped does not return while run is active");
+                stop_service.request_stop();
+                stop_service.request_stop();
+                stop_service.wait_stopped();
+                #0;
+                check(waiter_returned && run_returned,
+                      "interrupt releases run and every stopped waiter");
+                check($time > stop_start_time,
+                      "pending polling yields simulation time without delta livelock");
+                check(table_test_get_interrupt_count(3) == 1,
+                      "repeated request_stop interrupts exactly once");
+            end
+        join
+        stop_service.shutdown();
 
         if (failures != 0)
             $fatal(1, "COSIM_TABLE_SERVICE: %0d checks failed", failures);

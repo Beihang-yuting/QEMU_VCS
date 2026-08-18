@@ -40,6 +40,14 @@ grep -q 'committed=1' "$simulation_log"
 grep -q 'failed_index=0x0000000000000003' "$simulation_log"
 grep -q 'accepted=3 entries=5 bytes=80 success=2 reads=1 errors=1' \
     "$simulation_log"
+grep -q 'route=81.*handler=table0.*completion_status=9.*accepted=1 entries=0 bytes=0 success=0 reads=0 errors=1' \
+    "$simulation_log"
+grep -q 'route=82.*handler=missing.*completion_status=5.*accepted=1 entries=0 bytes=0 success=0 reads=0 errors=1' \
+    "$simulation_log"
+grep -q 'route=83.*handler=codec_table.*completion_status=5.*accepted=1 entries=0 bytes=0 success=0 reads=0 errors=1' \
+    "$simulation_log"
+grep -q 'route=84.*completion_status=0 completion_rc=-1.*accepted=1 entries=1 bytes=16 success=0 reads=0 errors=1' \
+    "$simulation_log"
 if grep -q 'raw_bytes=00 01 02 03 04 05 06 07 08' "$simulation_log"; then
     echo "FAIL: HIGH raw-byte dump exceeded +COSIM_TABLE_DUMP_LIMIT=8" >&2
     exit 1
@@ -72,6 +80,10 @@ typedef struct {
     unsigned completion_read_data[MAX_COMPLETIONS];
     int cleanup_count;
     int order_errors;
+    int scenario;
+    int request_count;
+    int poll_count;
+    int interrupt_count;
 } test_rc_state_t;
 
 static test_rc_state_t states[MAX_RC];
@@ -82,6 +94,22 @@ void table_test_reset(int rc, int requires_read)
         return;
     memset(&states[rc], 0, sizeof(states[rc]));
     states[rc].requires_read = requires_read;
+    states[rc].request_count = rc == 0 ? 3 : 0;
+}
+
+void table_test_set_scenario(int rc, int scenario)
+{
+    test_rc_state_t *s;
+    if (rc < 0 || rc >= MAX_RC)
+        return;
+    s = &states[rc];
+    s->scenario = scenario;
+    if (scenario >= 1 && scenario <= 3)
+        s->request_count = 1;
+    else if (scenario == 4)
+        s->request_count = 2;
+    else if (scenario == 5)
+        s->request_count = 0;
 }
 
 int table_vcs_load_routes_rc(int rc, const char *path)
@@ -97,7 +125,7 @@ int table_vcs_register_handler_rc(int rc, const char *name,
                                   int supports_read)
 {
     test_rc_state_t *s = &states[rc];
-    if (s->phase != 1 || name == 0 || strcmp(name, "table0") != 0)
+    if (s->phase != 1 || name == 0 || name[0] == '\0')
         s->order_errors++;
     s->registered_supports_read = supports_read;
     s->phase = 2;
@@ -133,7 +161,14 @@ int table_vcs_poll_request_rc(int rc)
         s->order_errors++;
         return -1;
     }
-    if (s->interrupted || rc != 0 || s->request_slot >= 3)
+    s->poll_count++;
+    if (s->scenario == 5) {
+        /* WRITE_BEGIN is accepted; DATA remains pending until interrupt. */
+        if (s->interrupted || s->poll_count > 1000)
+            return -1;
+        return 0;
+    }
+    if (s->interrupted || s->request_slot >= s->request_count)
         return -1;
     s->outstanding = 1;
     return 1;
@@ -141,12 +176,17 @@ int table_vcs_poll_request_rc(int rc)
 
 int table_vcs_get_request_kind_rc(int rc)
 {
+    if (states[rc].scenario != 0)
+        return 1;
     return states[rc].request_slot < 2 ? 1 : 2;
 }
 
 const char *table_vcs_get_request_handler_rc(int rc)
 {
-    (void)rc;
+    if (states[rc].scenario == 2)
+        return "missing";
+    if (states[rc].scenario == 3)
+        return "codec_table";
     return "table0";
 }
 
@@ -159,22 +199,37 @@ int table_vcs_get_request_pf_index_rc(int rc) { (void)rc; return 0; }
 int table_vcs_get_request_vf_index_rc(int rc) { (void)rc; return 0; }
 int table_vcs_get_request_bar_index_rc(int rc) { (void)rc; return 1; }
 unsigned table_vcs_get_request_generation_rc(int rc) { (void)rc; return 9; }
-unsigned table_vcs_get_request_route_id_rc(int rc) { (void)rc; return 77; }
+unsigned table_vcs_get_request_route_id_rc(int rc)
+{
+    return states[rc].scenario == 0 ? 77U : 80U + states[rc].scenario;
+}
 uint64_t table_vcs_get_request_first_index_rc(int rc)
 {
+    if (states[rc].scenario != 0)
+        return 2;
     return states[rc].request_slot < 2 ? 2 : 4;
 }
 uint64_t table_vcs_get_request_bar_offset_rc(int rc)
 {
+    if (states[rc].scenario != 0)
+        return UINT64_C(0x200);
     return states[rc].request_slot < 2 ? UINT64_C(0x200) : UINT64_C(0x408);
 }
 unsigned table_vcs_get_request_entry_count_rc(int rc)
 {
+    if (states[rc].scenario == 1)
+        return 3U;
+    if (states[rc].scenario != 0)
+        return 1U;
     return states[rc].request_slot < 2 ? 3U : 1U;
 }
 unsigned table_vcs_get_request_entry_bytes_rc(int rc) { (void)rc; return 16; }
 unsigned table_vcs_get_request_payload_bytes_rc(int rc)
 {
+    if (states[rc].scenario == 1)
+        return 47U;
+    if (states[rc].scenario != 0)
+        return 16U;
     return states[rc].request_slot < 2 ? 48U : 0U;
 }
 unsigned table_vcs_get_request_byte_offset_rc(int rc)
@@ -187,14 +242,18 @@ uint64_t table_vcs_get_request_transaction_id_rc(int rc)
     static const uint64_t transactions[] = {UINT64_C(0x111),
                                              UINT64_C(0x222),
                                              UINT64_C(0x333)};
+    if (states[rc].scenario != 0)
+        return UINT64_C(0x400) + (unsigned)states[rc].scenario;
     return transactions[states[rc].request_slot];
 }
 uint64_t table_vcs_get_request_payload_u64_rc(int rc, unsigned word)
 {
     uint64_t value = 0;
-    unsigned base = states[rc].request_slot == 0 ? 0U : 0x80U;
+    unsigned base = states[rc].scenario != 0 ? 0x40U :
+                    (states[rc].request_slot == 0 ? 0U : 0x80U);
     unsigned byte_index;
-    if (states[rc].request_slot >= 2 || word >= 6)
+    if ((states[rc].scenario == 0 && states[rc].request_slot >= 2) ||
+        word >= 6)
         return 0;
     for (byte_index = 0; byte_index < 8; byte_index++)
         value |= (uint64_t)((base + word * 8 + byte_index) & 0xffU)
@@ -220,10 +279,14 @@ int table_vcs_complete_rc(int rc, int status, uint64_t failed_index,
     s->completion_count++;
     s->request_slot++;
     s->outstanding = 0;
-    return 0;
+    return s->scenario == 4 ? -1 : 0;
 }
 
-void table_vcs_interrupt_rc(int rc) { states[rc].interrupted = 1; }
+void table_vcs_interrupt_rc(int rc)
+{
+    states[rc].interrupt_count++;
+    states[rc].interrupted = 1;
+}
 
 void table_vcs_cleanup_rc(int rc)
 {
@@ -247,5 +310,7 @@ unsigned table_test_get_completion_read_data(int rc, int slot)
 { return states[rc].completion_read_data[slot]; }
 int table_test_get_cleanup_count(int rc) { return states[rc].cleanup_count; }
 int table_test_get_order_errors(int rc) { return states[rc].order_errors; }
+int table_test_get_poll_count(int rc) { return states[rc].poll_count; }
+int table_test_get_interrupt_count(int rc) { return states[rc].interrupt_count; }
 COSIM_TABLE_DPI_C_END
 COSIM_TABLE_DPI_C_DOUBLE

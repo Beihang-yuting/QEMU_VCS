@@ -292,6 +292,18 @@ class cosim_table_service;
                  read_counters[key], error_counters[key]);
     endtask
 
+    protected function void record_completion(
+        input string key,
+        input cosim_table_result completion,
+        input int complete_result
+    );
+        if (complete_result == 0 &&
+            completion.status == COSIM_TABLE_STATUS_SUCCESS)
+            success_counters[key]++;
+        else
+            error_counters[key]++;
+    endfunction
+
     protected task dispatch_write(
         input cosim_table_context ctx,
         output cosim_table_result completion
@@ -373,7 +385,6 @@ class cosim_table_service;
                 handler_result.failed_index = index;
                 log_handler_result(entry_ctx, index, handler_result,
                                    committed);
-                error_counters[key]++;
                 return;
             end
             committed++;
@@ -385,7 +396,6 @@ class cosim_table_service;
         completion.failed_index = COSIM_TABLE_FAILED_INDEX_NONE;
         completion.committed_count = committed;
         completion.handler_error = 0;
-        success_counters[key]++;
     endtask
 
     protected task dispatch_read(
@@ -407,13 +417,11 @@ class cosim_table_service;
         if (ctx.entry_count != 1 || ctx.payload_bytes != 0 ||
             ctx.entry_bytes == 0 || ctx.byte_offset + 4 > ctx.entry_bytes) begin
             completion.status = COSIM_TABLE_STATUS_PROTOCOL;
-            error_counters[key]++;
             return;
         end
         handler = registry.lookup(ctx.handler_name);
         if (handler == null || !handler.supports_read()) begin
             completion.handler_error = -1;
-            error_counters[key]++;
             return;
         end
 
@@ -422,12 +430,10 @@ class cosim_table_service;
         read_counters[key]++;
         if (handler_result.status != COSIM_TABLE_STATUS_SUCCESS) begin
             completion.handler_error = handler_result.handler_error;
-            error_counters[key]++;
         end else begin
             completion.status = COSIM_TABLE_STATUS_SUCCESS;
             completion.failed_index = COSIM_TABLE_FAILED_INDEX_NONE;
             completion.read_data = read_data;
-            success_counters[key]++;
         end
         log_handler_result(ctx, ctx.first_index, completion, 0);
     endtask
@@ -449,6 +455,10 @@ class cosim_table_service;
 
         while (!stop_requested) begin
             poll_result = table_vcs_poll_request_rc(rc_id);
+            if (poll_result == 0) begin
+                #100ns;
+                continue;
+            end
             if (poll_result != 1)
                 break;
 
@@ -469,7 +479,6 @@ class cosim_table_service;
                     completion.committed_count = 0;
                     completion.handler_error = 0;
                     completion.read_data = '0;
-                    error_counters[key]++;
                 end
             endcase
 
@@ -477,6 +486,7 @@ class cosim_table_service;
                 rc_id, completion.status, completion.failed_index,
                 completion.committed_count, completion.handler_error,
                 completion.read_data);
+            record_completion(key, completion, complete_result);
             log_completion(ctx, key, completion, complete_result);
             if (complete_result != 0) begin
                 stop_requested = 1'b1;
