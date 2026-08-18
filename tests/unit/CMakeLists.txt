@@ -31,6 +31,14 @@ add_executable(test_table_protocol test_table_protocol.c)
 target_include_directories(test_table_protocol PRIVATE ${CMAKE_SOURCE_DIR}/bridge/table)
 add_test(NAME test_table_protocol COMMAND test_table_protocol)
 
+add_executable(test_table_route test_table_route.c)
+target_include_directories(test_table_route PRIVATE ${CMAKE_SOURCE_DIR}/bridge/table)
+target_compile_definitions(test_table_route PRIVATE
+    TABLE_ROUTE_FIXTURE_DIR="${CMAKE_SOURCE_DIR}/tests/fixtures"
+)
+target_link_libraries(test_table_route cosim_bridge_common)
+add_test(NAME test_table_route COMMAND test_table_route)
+
 add_executable(test_bridge_wait_hooks test_bridge_wait_hooks.c)
 target_link_libraries(test_bridge_wait_hooks cosim_bridge pthread)
 add_test(NAME test_bridge_wait_hooks COMMAND test_bridge_wait_hooks)

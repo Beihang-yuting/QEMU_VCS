@@ -7,10 +7,12 @@ add_library(cosim_bridge_common STATIC
     common/link_model.c
     common/transport_shm.c
     common/transport_tcp.c
+    table/cosim_table_route.c
 )
 target_include_directories(cosim_bridge_common PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/common
     ${CMAKE_CURRENT_SOURCE_DIR}/qemu
+    ${CMAKE_CURRENT_SOURCE_DIR}/table
 )
 target_link_libraries(cosim_bridge_common PRIVATE rt pthread)
 
