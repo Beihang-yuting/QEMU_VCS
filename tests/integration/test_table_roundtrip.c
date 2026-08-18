@@ -417,6 +417,8 @@ static void raw_send_frame(int fd, const cosim_table_frame_hdr_t *frame,
         raw_send_exact(fd, payload, payload_bytes);
 }
 
+static void raw_drain_request(int fd, int is_write);
+
 static void raw_publish_small_route(int fd)
 {
     const uint64_t transaction_id = 99;
@@ -455,6 +457,319 @@ static void raw_publish_small_route(int fd)
     frame = frame_header(COSIM_TABLE_MSG_ROUTE_END, sizeof(end), 0,
                          transaction_id);
     raw_send_frame(fd, &frame, &end, sizeof(end), NULL, 0);
+}
+
+static cosim_table_route_entry_t make_wire_route(uint32_t route_id,
+                                                 uint64_t start,
+                                                 uint64_t end)
+{
+    cosim_table_route_entry_t route;
+
+    memset(&route, 0, sizeof(route));
+    route.route_id = cosim_table_cpu_to_le32(route_id);
+    route.target.rc_id = cosim_table_cpu_to_le16(TEST_RC_ID);
+    route.target.target_type = COSIM_TABLE_TARGET_PF;
+    route.operation_mask = cosim_table_cpu_to_le32(COSIM_TABLE_OP_WRITE);
+    route.start_offset = cosim_table_cpu_to_le64(start);
+    route.end_offset = cosim_table_cpu_to_le64(end);
+    route.entry_bytes = cosim_table_cpu_to_le32(16);
+    route.stride_bytes = cosim_table_cpu_to_le32(16);
+    memcpy(route.handler_name, "validation", sizeof("validation"));
+    return route;
+}
+
+static void raw_invalid_route_peer(uint16_t port, int duplicate_id)
+{
+    const uint64_t transaction_id = 77;
+    cosim_table_route_begin_t begin;
+    cosim_table_route_entry_t routes[2];
+    cosim_table_route_end_t end;
+    cosim_table_frame_hdr_t frame;
+    size_t i;
+    int fd = raw_connect(port);
+
+    raw_handshake(fd);
+    memset(&begin, 0, sizeof(begin));
+    begin.generation = cosim_table_cpu_to_le32(2);
+    begin.entry_count = cosim_table_cpu_to_le32(2);
+    frame = frame_header(COSIM_TABLE_MSG_ROUTE_BEGIN, sizeof(begin), 0,
+                         transaction_id);
+    raw_send_frame(fd, &frame, &begin, sizeof(begin), NULL, 0);
+
+    routes[0] = make_wire_route(7, UINT64_C(0x1000), UINT64_C(0x1010));
+    routes[1] = make_wire_route(duplicate_id ? 7 : 8,
+                                duplicate_id ? UINT64_C(0x1040)
+                                             : UINT64_C(0x1008),
+                                duplicate_id ? UINT64_C(0x1050)
+                                             : UINT64_C(0x1018));
+    for (i = 0; i < sizeof(routes) / sizeof(routes[0]); i++) {
+        frame = frame_header(COSIM_TABLE_MSG_ROUTE_ENTRY, sizeof(routes[i]),
+                             0, transaction_id);
+        raw_send_frame(fd, &frame, &routes[i], sizeof(routes[i]), NULL, 0);
+    }
+
+    memset(&end, 0, sizeof(end));
+    end.generation = begin.generation;
+    frame = frame_header(COSIM_TABLE_MSG_ROUTE_END, sizeof(end), 0,
+                         transaction_id);
+    raw_send_frame(fd, &frame, &end, sizeof(end), NULL, 0);
+    CHECK(close(fd) == 0);
+}
+
+static void run_invalid_route_map_test(int duplicate_id)
+{
+    const uint16_t port = reserve_available_port();
+    cosim_table_transport_cfg_t cfg;
+    cosim_table_transport_t *transport;
+    cosim_table_client_t *client;
+    pid_t child;
+
+    memset(&cfg, 0, sizeof(cfg));
+    cfg.listen_addr = "127.0.0.1";
+    cfg.table_port_base = port - TEST_INSTANCE_ID;
+    cfg.instance_id = TEST_INSTANCE_ID;
+    cfg.rc_id = TEST_RC_ID;
+    cfg.is_server = 1;
+    cfg.connect_timeout_ms = TEST_TIMEOUT_MS;
+    transport = cosim_table_transport_create(&cfg);
+    CHECK(transport != NULL);
+    child = fork();
+    CHECK(child >= 0);
+    if (child == 0) {
+        raw_invalid_route_peer(port, duplicate_id);
+        _exit(0);
+    }
+
+    client = cosim_table_client_create(transport, TEST_RC_ID);
+    CHECK(client != NULL);
+    CHECK(cosim_table_client_wait_routes(client, TEST_TIMEOUT_MS) == -1);
+    cosim_table_client_destroy(client);
+    cosim_table_transport_close(transport);
+    wait_child_ok(child, TEST_TIMEOUT_MS);
+}
+
+static void raw_singleton_route_peer(uint16_t port)
+{
+    const uint64_t route_transaction = 99;
+    cosim_table_route_begin_t begin;
+    cosim_table_route_entry_t route;
+    cosim_table_route_end_t end;
+    cosim_table_completion_t completion;
+    cosim_table_frame_hdr_t frame;
+    int fd = raw_connect(port);
+
+    raw_handshake(fd);
+    memset(&begin, 0, sizeof(begin));
+    begin.generation = cosim_table_cpu_to_le32(1);
+    begin.entry_count = cosim_table_cpu_to_le32(1);
+    frame = frame_header(COSIM_TABLE_MSG_ROUTE_BEGIN, sizeof(begin), 0,
+                         route_transaction);
+    raw_send_frame(fd, &frame, &begin, sizeof(begin), NULL, 0);
+
+    memset(&route, 0, sizeof(route));
+    route.route_id = cosim_table_cpu_to_le32(17);
+    route.target.rc_id = cosim_table_cpu_to_le16(TEST_RC_ID);
+    route.target.target_type = COSIM_TABLE_TARGET_PF;
+    route.operation_mask = cosim_table_cpu_to_le32(
+        COSIM_TABLE_OP_WRITE | COSIM_TABLE_OP_READ_DWORD);
+    route.start_offset = cosim_table_cpu_to_le64(0);
+    route.end_offset = cosim_table_cpu_to_le64(16);
+    route.entry_bytes = cosim_table_cpu_to_le32(16);
+    route.stride_bytes = cosim_table_cpu_to_le32(64);
+    memcpy(route.handler_name, "singleton", sizeof("singleton"));
+    frame = frame_header(COSIM_TABLE_MSG_ROUTE_ENTRY, sizeof(route), 0,
+                         route_transaction);
+    raw_send_frame(fd, &frame, &route, sizeof(route), NULL, 0);
+
+    memset(&end, 0, sizeof(end));
+    end.generation = begin.generation;
+    frame = frame_header(COSIM_TABLE_MSG_ROUTE_END, sizeof(end), 0,
+                         route_transaction);
+    raw_send_frame(fd, &frame, &end, sizeof(end), NULL, 0);
+
+    raw_drain_request(fd, 0);
+    memset(&completion, 0, sizeof(completion));
+    completion.status = cosim_table_cpu_to_le32(COSIM_TABLE_ST_SUCCESS);
+    completion.failed_index = cosim_table_cpu_to_le32(UINT32_MAX);
+    completion.returned_dword = cosim_table_cpu_to_le32(UINT32_C(0xa5a55a5a));
+    frame = frame_header(COSIM_TABLE_MSG_COMPLETION, sizeof(completion), 0, 1);
+    raw_send_frame(fd, &frame, &completion, sizeof(completion), NULL, 0);
+    CHECK(close(fd) == 0);
+}
+
+static void test_singleton_route_with_large_stride(void)
+{
+    const uint16_t port = reserve_available_port();
+    cosim_table_transport_cfg_t cfg;
+    cosim_table_transport_t *transport;
+    cosim_table_client_t *client;
+    cosim_table_target_t target;
+    cosim_table_read_dword_t request;
+    cosim_table_completion_t completion;
+    const cosim_table_route_entry_t *route;
+    pid_t child;
+
+    memset(&cfg, 0, sizeof(cfg));
+    cfg.listen_addr = "127.0.0.1";
+    cfg.table_port_base = port - TEST_INSTANCE_ID;
+    cfg.instance_id = TEST_INSTANCE_ID;
+    cfg.rc_id = TEST_RC_ID;
+    cfg.is_server = 1;
+    cfg.connect_timeout_ms = TEST_TIMEOUT_MS;
+    transport = cosim_table_transport_create(&cfg);
+    CHECK(transport != NULL);
+    child = fork();
+    CHECK(child >= 0);
+    if (child == 0) {
+        raw_singleton_route_peer(port);
+        _exit(0);
+    }
+
+    client = cosim_table_client_create(transport, TEST_RC_ID);
+    CHECK(client != NULL);
+    CHECK(cosim_table_client_wait_routes(client, TEST_TIMEOUT_MS) == 0);
+    memset(&target, 0, sizeof(target));
+    target.rc_id = cosim_table_cpu_to_le16(TEST_RC_ID);
+    target.target_type = COSIM_TABLE_TARGET_PF;
+    route = cosim_table_client_match(client, &target, 0,
+                                     COSIM_TABLE_OP_READ_DWORD);
+    CHECK(route != NULL);
+    CHECK(cosim_table_le32_to_cpu(route->route_id) == 17);
+
+    memset(&request, 0, sizeof(request));
+    request.target = target;
+    CHECK(cosim_table_client_read_dword(client, &request, &completion,
+                                        TEST_TIMEOUT_MS) ==
+          COSIM_TABLE_ST_SUCCESS);
+    CHECK(completion.returned_dword == UINT32_C(0xa5a55a5a));
+
+    cosim_table_client_destroy(client);
+    cosim_table_transport_close(transport);
+    wait_child_ok(child, TEST_TIMEOUT_MS);
+}
+
+typedef struct {
+    size_t accepted_bytes;
+    int send_errno;
+} late_send_report_t;
+
+static void raw_late_completion_peer(uint16_t port, int trigger_fd,
+                                     int report_fd)
+{
+    cosim_table_completion_t completion;
+    cosim_table_frame_hdr_t frame;
+    late_send_report_t report;
+    struct pollfd inbound;
+    uint8_t bytes[sizeof(cosim_table_frame_hdr_t)];
+    ssize_t send_result;
+    char marker;
+    int poll_result;
+    int fd = raw_connect(port);
+
+    raw_handshake(fd);
+    raw_publish_small_route(fd);
+    raw_drain_request(fd, 0);
+    CHECK(read(trigger_fd, &marker, 1) == 1);
+    CHECK(marker == 'T');
+
+    memset(&completion, 0, sizeof(completion));
+    completion.status = cosim_table_cpu_to_le32(COSIM_TABLE_ST_SUCCESS);
+    completion.failed_index = cosim_table_cpu_to_le32(UINT32_MAX);
+    completion.returned_dword = cosim_table_cpu_to_le32(UINT32_C(0x12345678));
+    frame = frame_header(COSIM_TABLE_MSG_COMPLETION, sizeof(completion), 0, 1);
+    memset(&report, 0, sizeof(report));
+    send_result = send(fd, &frame, sizeof(frame), MSG_NOSIGNAL);
+    if (send_result > 0) {
+        report.accepted_bytes = (size_t)send_result;
+        if (send_result == (ssize_t)sizeof(frame)) {
+            send_result = send(fd, &completion, sizeof(completion),
+                               MSG_NOSIGNAL);
+            if (send_result > 0)
+                report.accepted_bytes += (size_t)send_result;
+            else if (send_result < 0)
+                report.send_errno = errno;
+        }
+    } else if (send_result < 0) {
+        report.send_errno = errno;
+    }
+    CHECK(write(report_fd, &report, sizeof(report)) == (ssize_t)sizeof(report));
+
+    memset(&inbound, 0, sizeof(inbound));
+    inbound.fd = fd;
+    inbound.events = POLLIN;
+    poll_result = poll(&inbound, 1, 500);
+    CHECK(poll_result >= 0);
+    if (poll_result > 0 &&
+        (inbound.revents & (POLLIN | POLLHUP | POLLERR)) != 0) {
+        CHECK(recv(fd, bytes, sizeof(bytes), MSG_DONTWAIT) <= 0);
+    }
+    CHECK(close(fd) == 0);
+}
+
+static void test_timeout_makes_client_terminal(void)
+{
+    const uint16_t port = reserve_available_port();
+    cosim_table_transport_cfg_t cfg;
+    cosim_table_transport_t *transport;
+    cosim_table_client_t *client;
+    cosim_table_read_dword_t request;
+    cosim_table_completion_t completion;
+    late_send_report_t report;
+    pid_t child;
+    int trigger_pipe[2];
+    int ready_pipe[2];
+    char marker;
+
+    memset(&cfg, 0, sizeof(cfg));
+    cfg.listen_addr = "127.0.0.1";
+    cfg.table_port_base = port - TEST_INSTANCE_ID;
+    cfg.instance_id = TEST_INSTANCE_ID;
+    cfg.rc_id = TEST_RC_ID;
+    cfg.is_server = 1;
+    cfg.connect_timeout_ms = TEST_TIMEOUT_MS;
+    transport = cosim_table_transport_create(&cfg);
+    CHECK(transport != NULL);
+    CHECK(pipe(trigger_pipe) == 0);
+    CHECK(pipe(ready_pipe) == 0);
+    child = fork();
+    CHECK(child >= 0);
+    if (child == 0) {
+        CHECK(close(trigger_pipe[1]) == 0);
+        CHECK(close(ready_pipe[0]) == 0);
+        raw_late_completion_peer(port, trigger_pipe[0], ready_pipe[1]);
+        CHECK(close(trigger_pipe[0]) == 0);
+        CHECK(close(ready_pipe[1]) == 0);
+        _exit(0);
+    }
+    CHECK(close(trigger_pipe[0]) == 0);
+    CHECK(close(ready_pipe[1]) == 0);
+
+    client = cosim_table_client_create(transport, TEST_RC_ID);
+    CHECK(client != NULL);
+    CHECK(cosim_table_client_wait_routes(client, TEST_TIMEOUT_MS) == 0);
+    memset(&request, 0, sizeof(request));
+    request.target.rc_id = cosim_table_cpu_to_le16(TEST_RC_ID);
+    request.target.target_type = COSIM_TABLE_TARGET_PF;
+    request.bar_offset = cosim_table_cpu_to_le64(UINT64_C(0x1004));
+    CHECK(cosim_table_client_read_dword(client, &request, &completion, 50) ==
+          COSIM_TABLE_ST_TIMEOUT);
+
+    marker = 'T';
+    CHECK(write(trigger_pipe[1], &marker, 1) == 1);
+    CHECK(read(ready_pipe[0], &report, sizeof(report)) ==
+          (ssize_t)sizeof(report));
+    CHECK(report.accepted_bytes > 0 || report.send_errno == EPIPE ||
+          report.send_errno == ECONNRESET || report.send_errno == ESHUTDOWN);
+    CHECK(cosim_table_client_read_dword(client, &request, &completion,
+                                        TEST_TIMEOUT_MS) ==
+          COSIM_TABLE_ST_TARGET_GONE);
+    CHECK(completion.status == COSIM_TABLE_ST_TARGET_GONE);
+
+    CHECK(close(trigger_pipe[1]) == 0);
+    CHECK(close(ready_pipe[0]) == 0);
+    cosim_table_client_destroy(client);
+    cosim_table_transport_close(transport);
+    wait_child_ok(child, TEST_TIMEOUT_MS);
 }
 
 static void raw_drain_request(int fd, int is_write)
@@ -761,6 +1076,10 @@ static void test_semantic_roundtrip(void)
 
 int main(void)
 {
+    test_singleton_route_with_large_stride();
+    run_invalid_route_map_test(1);
+    run_invalid_route_map_test(0);
+    test_timeout_makes_client_terminal();
     test_semantic_roundtrip();
     test_wire_completion_validation_matrix();
     puts("table semantic roundtrip: PASS");

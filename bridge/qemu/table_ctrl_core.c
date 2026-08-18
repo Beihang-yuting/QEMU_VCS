@@ -24,9 +24,9 @@ int cosim_table_ctrl_core_init(cosim_table_ctrl_core_t *core,
 {
     if (core == NULL || ops == NULL || max_payload_bytes == 0 ||
         ops->dma_read == NULL || ops->dma_write == NULL ||
-        ops->release_barrier == NULL || ops->target_active == NULL ||
-        ops->match == NULL || ops->write == NULL ||
-        ops->read_dword == NULL)
+        ops->acquire_barrier == NULL || ops->release_barrier == NULL ||
+        ops->target_active == NULL || ops->match == NULL ||
+        ops->write == NULL || ops->read_dword == NULL)
         return -1;
     memset(core, 0, sizeof(*core));
     core->ops = *ops;
@@ -245,6 +245,7 @@ cosim_table_status_t cosim_table_ctrl_process_slot(
     const cosim_table_route_entry_t *route;
     cosim_table_completion_t completion;
     cosim_table_status_t status;
+    cosim_u32 state;
     cosim_u32 busy;
     uint8_t *payload = NULL;
     uint64_t first_index;
@@ -264,6 +265,19 @@ cosim_table_status_t cosim_table_ctrl_process_slot(
         slot_bytes < sizeof(header) ||
         slot_dma_address > UINT64_MAX - slot_bytes)
         goto done;
+    if (core->ops.dma_read(core->opaque, slot_dma_address, &state,
+                           sizeof(state)) != (ssize_t)sizeof(state)) {
+        status = COSIM_TABLE_ST_UNKNOWN;
+        goto done;
+    }
+    if (cosim_table_le32_to_cpu(state) == COSIM_TABLE_SLOT_BUSY) {
+        status = COSIM_TABLE_ST_SLOT_BUSY;
+        goto done;
+    }
+    if (cosim_table_le32_to_cpu(state) != COSIM_TABLE_SLOT_READY)
+        goto done;
+
+    core->ops.acquire_barrier(core->opaque);
     if (core->ops.dma_read(core->opaque, slot_dma_address, &header,
                            sizeof(header)) != (ssize_t)sizeof(header)) {
         status = COSIM_TABLE_ST_UNKNOWN;
@@ -276,7 +290,6 @@ cosim_table_status_t cosim_table_ctrl_process_slot(
     if (cosim_table_le32_to_cpu(header.state) != COSIM_TABLE_SLOT_READY)
         goto done;
 
-    core->ops.release_barrier(core->opaque);
     busy = cosim_table_cpu_to_le32(COSIM_TABLE_SLOT_BUSY);
     if (core->ops.dma_write(core->opaque, slot_dma_address, &busy,
                             sizeof(busy)) != (ssize_t)sizeof(busy)) {

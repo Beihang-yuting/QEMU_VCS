@@ -36,6 +36,8 @@ typedef struct {
     int dma_reads;
     int dma_writes;
     int result_written;
+    int acquire_count;
+    uint32_t state_after_acquire;
     int release_count;
     int release_after_result;
     int complete_count;
@@ -48,7 +50,16 @@ typedef struct {
     cosim_table_write_begin_t observed_request;
     cosim_table_read_dword_t observed_read;
     uint8_t observed_payload[TEST_PAYLOAD_BYTES];
+    char events[32];
+    size_t event_count;
 } fake_context_t;
+
+static void record_event(fake_context_t *fake, char event)
+{
+    CHECK(fake->event_count + 1 < sizeof(fake->events));
+    fake->events[fake->event_count++] = event;
+    fake->events[fake->event_count] = '\0';
+}
 
 static cosim_table_slot_hdr_t *fake_header(fake_context_t *fake)
 {
@@ -68,6 +79,10 @@ static ssize_t fake_dma_read(void *opaque, uint64_t address, void *buffer,
     if (displacement > sizeof(fake->memory) ||
         bytes > sizeof(fake->memory) - (size_t)displacement)
         return -1;
+    if (displacement == 0 && bytes == sizeof(cosim_u32))
+        record_event(fake, 'S');
+    if (displacement == 0 && bytes == sizeof(cosim_table_slot_hdr_t))
+        record_event(fake, 'H');
     if (fake->reenter && displacement == 0 &&
         bytes == sizeof(cosim_table_slot_hdr_t)) {
         fake->reenter = 0;
@@ -94,18 +109,37 @@ static ssize_t fake_dma_write(void *opaque, uint64_t address,
 
     if (displacement == offsetof(cosim_table_slot_hdr_t, result_status)) {
         CHECK(bytes == sizeof(cosim_u32) * 5u);
+        record_event(fake, 'R');
         fake->result_written = 1;
     }
     if (displacement == offsetof(cosim_table_slot_hdr_t, state) &&
-        bytes == sizeof(cosim_u32) &&
-        cosim_table_le32_to_cpu(*(const cosim_u32 *)buffer) ==
-            COSIM_TABLE_SLOT_COMPLETE) {
-        CHECK(fake->result_written);
-        CHECK(fake->release_after_result);
-        fake->complete_count++;
+        bytes == sizeof(cosim_u32)) {
+        uint32_t state =
+            cosim_table_le32_to_cpu(*(const cosim_u32 *)buffer);
+
+        if (state == COSIM_TABLE_SLOT_BUSY) {
+            record_event(fake, 'B');
+        } else if (state == COSIM_TABLE_SLOT_COMPLETE) {
+            CHECK(fake->result_written);
+            CHECK(fake->release_after_result);
+            record_event(fake, 'C');
+            fake->complete_count++;
+        }
     }
     memcpy(fake->memory + displacement, buffer, bytes);
     return (ssize_t)bytes;
+}
+
+static void fake_acquire(void *opaque)
+{
+    fake_context_t *fake = opaque;
+
+    fake->acquire_count++;
+    record_event(fake, 'A');
+    if (fake->state_after_acquire != 0) {
+        fake_header(fake)->state =
+            cosim_table_cpu_to_le32(fake->state_after_acquire);
+    }
 }
 
 static void fake_release(void *opaque)
@@ -113,6 +147,7 @@ static void fake_release(void *opaque)
     fake_context_t *fake = opaque;
 
     fake->release_count++;
+    record_event(fake, 'L');
     if (fake->result_written)
         fake->release_after_result = 1;
 }
@@ -227,6 +262,7 @@ static void setup(fake_context_t *fake, cosim_table_ctrl_core_t *core)
     memset(&ops, 0, sizeof(ops));
     ops.dma_read = fake_dma_read;
     ops.dma_write = fake_dma_write;
+    ops.acquire_barrier = fake_acquire;
     ops.release_barrier = fake_release;
     ops.target_active = fake_target_active;
     ops.match = fake_match;
@@ -265,7 +301,8 @@ static void test_not_ready_claims_and_completes_slot(void)
     CHECK(cosim_table_ctrl_process_slot(&core, test_slot_address,
                                         TEST_SLOT_BYTES, TEST_TIMEOUT_MS) ==
           COSIM_TABLE_ST_NOT_READY);
-    CHECK(fake.dma_reads == 1);
+    CHECK(fake.dma_reads == 2);
+    CHECK(strcmp(fake.events, "SAHBRLC") == 0);
     check_completion(&fake, COSIM_TABLE_ST_NOT_READY, UINT32_MAX, 0);
 }
 
@@ -338,6 +375,8 @@ static void test_slot_address_size_overflow_and_owner_states(void)
                                             TEST_TIMEOUT_MS) ==
               owner_statuses[i]);
         CHECK(fake.complete_count == 0);
+        CHECK(strcmp(fake.events, "S") == 0);
+        CHECK(fake.acquire_count == 0);
     }
 }
 
@@ -417,6 +456,22 @@ static void test_local_slot_contention_is_safe(void)
     check_completion(&fake, COSIM_TABLE_ST_SUCCESS, UINT32_MAX, 3);
 }
 
+static void test_header_snapshot_rechecks_ready_state(void)
+{
+    fake_context_t fake;
+    cosim_table_ctrl_core_t core;
+
+    setup(&fake, &core);
+    fake.state_after_acquire = COSIM_TABLE_SLOT_BUSY;
+    CHECK(cosim_table_ctrl_process_slot(&core, test_slot_address,
+                                        TEST_SLOT_BYTES, TEST_TIMEOUT_MS) ==
+          COSIM_TABLE_ST_SLOT_BUSY);
+    CHECK(strcmp(fake.events, "SAH") == 0);
+    CHECK(fake.dma_writes == 0);
+    CHECK(fake.write_called == 0);
+    CHECK(fake.complete_count == 0);
+}
+
 static void test_no_route_completes_without_rpc(void)
 {
     fake_context_t fake;
@@ -441,6 +496,7 @@ static void test_three_entry_success_uses_route_geometry(void)
                                         TEST_SLOT_BYTES, TEST_TIMEOUT_MS) ==
           COSIM_TABLE_ST_SUCCESS);
     check_completion(&fake, COSIM_TABLE_ST_SUCCESS, UINT32_MAX, 3);
+    CHECK(strcmp(fake.events, "SAHBRLC") == 0);
     CHECK(cosim_table_le32_to_cpu(fake.observed_request.route_id) == 7);
     CHECK(cosim_table_le32_to_cpu(fake.observed_request.entry_index) == 12);
     CHECK(cosim_table_le32_to_cpu(fake.observed_request.payload_bytes) ==
@@ -632,6 +688,7 @@ int main(void)
     test_slot_address_size_overflow_and_owner_states();
     test_invalid_offset_index_count_and_payload_combinations();
     test_local_slot_contention_is_safe();
+    test_header_snapshot_rechecks_ready_state();
     test_no_route_completes_without_rpc();
     test_three_entry_success_uses_route_geometry();
     test_partial_exec_error_is_not_replayable();

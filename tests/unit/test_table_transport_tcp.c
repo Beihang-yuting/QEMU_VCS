@@ -589,6 +589,295 @@ static void test_rejects_mismatched_rc_identity(void)
     wait_child_ok(child, 2000);
 }
 
+static int find_connection_fd(uint16_t port, int match_peer)
+{
+    int fd;
+
+    for (fd = 3; fd < 1024; fd++) {
+        struct sockaddr_in local;
+        struct sockaddr_in peer;
+        socklen_t local_bytes = sizeof(local);
+        socklen_t peer_bytes = sizeof(peer);
+        uint16_t selected_port;
+
+        if (getsockname(fd, (struct sockaddr *)&local, &local_bytes) != 0 ||
+            getpeername(fd, (struct sockaddr *)&peer, &peer_bytes) != 0 ||
+            local.sin_family != AF_INET || peer.sin_family != AF_INET)
+            continue;
+        selected_port = ntohs(match_peer ? peer.sin_port : local.sin_port);
+        if (selected_port == port)
+            return fd;
+    }
+    return -1;
+}
+
+static void set_connection_buffer(uint16_t port, int match_peer,
+                                  int option)
+{
+    const int buffer_bytes = 4096;
+    int fd = find_connection_fd(port, match_peer);
+
+    CHECK(fd >= 0);
+    CHECK(setsockopt(fd, SOL_SOCKET, option, &buffer_bytes,
+                     sizeof(buffer_bytes)) == 0);
+}
+
+static void fill_connection_send_buffer(uint16_t port)
+{
+    uint8_t bytes[4096];
+    int fd = find_connection_fd(port, 1);
+
+    CHECK(fd >= 0);
+    memset(bytes, 0xa7, sizeof(bytes));
+    for (;;) {
+        ssize_t result = send(fd, bytes, sizeof(bytes),
+                              MSG_DONTWAIT | MSG_NOSIGNAL);
+
+        if (result > 0)
+            continue;
+        CHECK(result < 0);
+        CHECK(errno == EAGAIN || errno == EWOULDBLOCK);
+        return;
+    }
+}
+
+static void backpressure_server_main(const cosim_table_transport_cfg_t *cfg,
+                                     uint16_t port, int ready_fd,
+                                     int release_fd)
+{
+    cosim_table_transport_t *transport;
+    cosim_table_frame_hdr_t frame;
+    cosim_table_hello_t hello;
+    char marker = 'R';
+
+    transport = cosim_table_transport_create(cfg);
+    CHECK(transport != NULL);
+    CHECK(cosim_table_recv(transport, &frame, &hello, sizeof(hello), NULL, 0,
+                           TEST_TIMEOUT_MS) == 0);
+    check_frame(&frame, COSIM_TABLE_MSG_HELLO, sizeof(hello), 0, 1);
+    set_connection_buffer(port, 0, SO_RCVBUF);
+    CHECK(write(ready_fd, &marker, 1) == 1);
+    CHECK(read(release_fd, &marker, 1) == 1);
+    CHECK(marker == 'D');
+    cosim_table_transport_close(transport);
+}
+
+static void test_send_timeout_reports_etimedout(void)
+{
+    const uint16_t port = reserve_available_port();
+    cosim_table_transport_cfg_t server_cfg =
+        make_server_cfg(port, TEST_TIMEOUT_MS);
+    cosim_table_transport_cfg_t client_cfg =
+        make_client_cfg(port, TEST_TIMEOUT_MS);
+    cosim_table_transport_t *client;
+    cosim_table_frame_hdr_t frame;
+    cosim_table_hello_t hello;
+    cosim_table_write_data_t data_header;
+    uint8_t payload[COSIM_TABLE_FRAME_DATA_BYTES];
+    uint64_t started_ms;
+    pid_t child;
+    int ready_pipe[2];
+    int release_pipe[2];
+    int result = 0;
+    int saved_errno = 0;
+    unsigned int attempt;
+    char marker;
+
+    CHECK(pipe(ready_pipe) == 0);
+    CHECK(pipe(release_pipe) == 0);
+    child = fork();
+    CHECK(child >= 0);
+    if (child == 0) {
+        CHECK(close(ready_pipe[0]) == 0);
+        CHECK(close(release_pipe[1]) == 0);
+        backpressure_server_main(&server_cfg, port, ready_pipe[1],
+                                 release_pipe[0]);
+        CHECK(close(ready_pipe[1]) == 0);
+        CHECK(close(release_pipe[0]) == 0);
+        _exit(0);
+    }
+    CHECK(close(ready_pipe[1]) == 0);
+    CHECK(close(release_pipe[0]) == 0);
+
+    client = cosim_table_transport_create(&client_cfg);
+    CHECK(client != NULL);
+    set_connection_buffer(port, 1, SO_SNDBUF);
+    memset(&hello, 0, sizeof(hello));
+    frame = make_frame(COSIM_TABLE_MSG_HELLO, sizeof(hello), 0, 1);
+    CHECK(cosim_table_send(client, &frame, &hello, NULL,
+                           TEST_TIMEOUT_MS) == 0);
+    CHECK(read(ready_pipe[0], &marker, 1) == 1);
+    CHECK(marker == 'R');
+
+    memset(payload, 0x5a, sizeof(payload));
+    memset(&data_header, 0, sizeof(data_header));
+    data_header.data_bytes = cosim_table_cpu_to_le32(sizeof(payload));
+    started_ms = monotonic_ms();
+    for (attempt = 0; attempt < 4096; attempt++) {
+        frame = make_frame(COSIM_TABLE_MSG_WRITE_DATA, sizeof(data_header),
+                           sizeof(payload), attempt + 2u);
+        errno = 0;
+        result = cosim_table_send(client, &frame, &data_header, payload, 10);
+        if (result != 0) {
+            saved_errno = errno;
+            break;
+        }
+    }
+    CHECK(result == -1);
+    CHECK(saved_errno == ETIMEDOUT);
+    CHECK(monotonic_ms() - started_ms < 2000);
+    frame = make_frame(COSIM_TABLE_MSG_HELLO, sizeof(hello), 0,
+                       UINT64_C(0xffff));
+    CHECK(cosim_table_send(client, &frame, &hello, NULL, 100) == -1);
+
+    marker = 'D';
+    CHECK(write(release_pipe[1], &marker, 1) == 1);
+    CHECK(close(release_pipe[1]) == 0);
+    CHECK(close(ready_pipe[0]) == 0);
+    cosim_table_transport_close(client);
+    wait_child_ok(child, TEST_TIMEOUT_MS);
+}
+
+typedef struct {
+    cosim_table_transport_t *transport;
+    cosim_table_frame_hdr_t frame;
+    cosim_table_write_data_t header;
+    const uint8_t *payload;
+    pthread_mutex_t lock;
+    pthread_cond_t condition;
+    int started;
+    int finished;
+    int result;
+    int saved_errno;
+} blocking_send_ctx_t;
+
+static void *blocking_send_main(void *opaque)
+{
+    blocking_send_ctx_t *ctx = opaque;
+
+    CHECK(pthread_mutex_lock(&ctx->lock) == 0);
+    ctx->started = 1;
+    CHECK(pthread_cond_broadcast(&ctx->condition) == 0);
+    CHECK(pthread_mutex_unlock(&ctx->lock) == 0);
+
+    errno = 0;
+    ctx->result = cosim_table_send(ctx->transport, &ctx->frame, &ctx->header,
+                                   ctx->payload, 1000);
+    ctx->saved_errno = errno;
+
+    CHECK(pthread_mutex_lock(&ctx->lock) == 0);
+    ctx->finished = 1;
+    CHECK(pthread_cond_broadcast(&ctx->condition) == 0);
+    CHECK(pthread_mutex_unlock(&ctx->lock) == 0);
+    return NULL;
+}
+
+static void require_send_is_blocked(blocking_send_ctx_t *ctx)
+{
+    struct timespec deadline;
+    int wait_result = 0;
+
+    CHECK(pthread_mutex_lock(&ctx->lock) == 0);
+    while (!ctx->started)
+        CHECK(pthread_cond_wait(&ctx->condition, &ctx->lock) == 0);
+    deadline = realtime_after_ms(50);
+    while (!ctx->finished && wait_result == 0)
+        wait_result = pthread_cond_timedwait(&ctx->condition, &ctx->lock,
+                                             &deadline);
+    CHECK(!ctx->finished);
+    CHECK(wait_result == ETIMEDOUT);
+    CHECK(pthread_mutex_unlock(&ctx->lock) == 0);
+}
+
+static void test_send_lock_wait_obeys_deadline(void)
+{
+    const uint16_t port = reserve_available_port();
+    cosim_table_transport_cfg_t server_cfg =
+        make_server_cfg(port, TEST_TIMEOUT_MS);
+    cosim_table_transport_cfg_t client_cfg =
+        make_client_cfg(port, TEST_TIMEOUT_MS);
+    cosim_table_transport_t *client;
+    cosim_table_frame_hdr_t frame;
+    cosim_table_hello_t hello;
+    cosim_table_write_data_t data_header;
+    blocking_send_ctx_t send_ctx;
+    uint8_t payload[COSIM_TABLE_FRAME_DATA_BYTES];
+    struct timespec join_deadline;
+    pthread_t send_thread;
+    uint64_t started_ms;
+    pid_t child;
+    int ready_pipe[2];
+    int release_pipe[2];
+    int result;
+    int saved_errno;
+    char marker;
+
+    CHECK(pipe(ready_pipe) == 0);
+    CHECK(pipe(release_pipe) == 0);
+    child = fork();
+    CHECK(child >= 0);
+    if (child == 0) {
+        CHECK(close(ready_pipe[0]) == 0);
+        CHECK(close(release_pipe[1]) == 0);
+        backpressure_server_main(&server_cfg, port, ready_pipe[1],
+                                 release_pipe[0]);
+        CHECK(close(ready_pipe[1]) == 0);
+        CHECK(close(release_pipe[0]) == 0);
+        _exit(0);
+    }
+    CHECK(close(ready_pipe[1]) == 0);
+    CHECK(close(release_pipe[0]) == 0);
+
+    client = cosim_table_transport_create(&client_cfg);
+    CHECK(client != NULL);
+    set_connection_buffer(port, 1, SO_SNDBUF);
+    memset(&hello, 0, sizeof(hello));
+    frame = make_frame(COSIM_TABLE_MSG_HELLO, sizeof(hello), 0, 1);
+    CHECK(cosim_table_send(client, &frame, &hello, NULL,
+                           TEST_TIMEOUT_MS) == 0);
+    CHECK(read(ready_pipe[0], &marker, 1) == 1);
+    CHECK(marker == 'R');
+    fill_connection_send_buffer(port);
+
+    memset(payload, 0x3c, sizeof(payload));
+    memset(&data_header, 0, sizeof(data_header));
+    data_header.data_bytes = cosim_table_cpu_to_le32(sizeof(payload));
+    memset(&send_ctx, 0, sizeof(send_ctx));
+    send_ctx.transport = client;
+    send_ctx.frame = make_frame(COSIM_TABLE_MSG_WRITE_DATA,
+                                sizeof(data_header), sizeof(payload), 2);
+    send_ctx.header = data_header;
+    send_ctx.payload = payload;
+    CHECK(pthread_mutex_init(&send_ctx.lock, NULL) == 0);
+    CHECK(pthread_cond_init(&send_ctx.condition, NULL) == 0);
+    CHECK(pthread_create(&send_thread, NULL, blocking_send_main,
+                         &send_ctx) == 0);
+    require_send_is_blocked(&send_ctx);
+
+    frame = make_frame(COSIM_TABLE_MSG_WRITE_DATA, sizeof(data_header),
+                       sizeof(payload), 3);
+    started_ms = monotonic_ms();
+    errno = 0;
+    result = cosim_table_send(client, &frame, &data_header, payload, 50);
+    saved_errno = errno;
+    CHECK(result == -1);
+    CHECK(saved_errno == ETIMEDOUT);
+    CHECK(monotonic_ms() - started_ms < 300);
+
+    join_deadline = realtime_after_ms(2000);
+    CHECK(pthread_timedjoin_np(send_thread, NULL, &join_deadline) == 0);
+    CHECK(send_ctx.result == -1);
+    CHECK(pthread_cond_destroy(&send_ctx.condition) == 0);
+    CHECK(pthread_mutex_destroy(&send_ctx.lock) == 0);
+
+    marker = 'D';
+    CHECK(write(release_pipe[1], &marker, 1) == 1);
+    CHECK(close(release_pipe[1]) == 0);
+    CHECK(close(ready_pipe[0]) == 0);
+    cosim_table_transport_close(client);
+    wait_child_ok(child, TEST_TIMEOUT_MS);
+}
+
 int main(void)
 {
     test_rejects_port_overflow();
@@ -597,6 +886,8 @@ int main(void)
     test_interrupts_connected_blocking_receive();
     test_accept_timeout_then_late_client_roundtrip();
     test_rejects_mismatched_rc_identity();
+    test_send_timeout_reports_etimedout();
+    test_send_lock_wait_obeys_deadline();
     test_fragmented_roundtrip_and_shutdown();
     puts("table TCP transport tests passed");
     return 0;

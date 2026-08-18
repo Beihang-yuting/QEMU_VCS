@@ -14,7 +14,9 @@ typedef struct cosim_table_client cosim_table_client_t;
 
 /* The caller retains ownership of transport and closes it after destroy.
  * Requests and target fields use protocol little-endian encoding.  Completion
- * fields returned by write/read are decoded to host byte order. */
+ * fields returned by write/read are decoded to host byte order.  A send or
+ * completion-wait timeout after an RPC starts makes the client terminal;
+ * later read/write calls return TARGET_GONE without using the wire. */
 cosim_table_client_t *cosim_table_client_create(
     cosim_table_transport_t *transport, uint16_t rc_id);
 int cosim_table_client_wait_routes(cosim_table_client_t *client,

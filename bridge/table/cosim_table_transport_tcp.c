@@ -140,9 +140,15 @@ static int send_exact(int fd, const void *buffer, size_t bytes,
     size_t sent = 0;
 
     while (sent < bytes) {
+        int ready;
         ssize_t result;
 
-        if (wait_fd(fd, POLLOUT, deadline) != 0)
+        ready = wait_fd(fd, POLLOUT, deadline);
+        if (ready == 1) {
+            errno = ETIMEDOUT;
+            return -1;
+        }
+        if (ready < 0)
             return -1;
         result = send(fd, cursor + sent, bytes - sent,
                       MSG_DONTWAIT | MSG_NOSIGNAL);
@@ -156,6 +162,50 @@ static int send_exact(int fd, const void *buffer, size_t bytes,
         sent += (size_t)result;
     }
     return 0;
+}
+
+static int lock_send_before_deadline(pthread_mutex_t *lock,
+                                     const table_deadline_t *deadline)
+{
+    const struct timespec pause = { 0, 1000000L };
+
+    if (deadline->infinite) {
+        int result = pthread_mutex_lock(lock);
+
+        if (result == 0)
+            return 0;
+        errno = result;
+        return -1;
+    }
+    for (;;) {
+        int remaining = deadline_remaining_ms(deadline);
+        int result;
+
+        if (remaining == 0) {
+            errno = ETIMEDOUT;
+            return -1;
+        }
+        if (remaining < 0)
+            return -1;
+        result = pthread_mutex_trylock(lock);
+        if (result == 0) {
+            remaining = deadline_remaining_ms(deadline);
+            if (remaining > 0)
+                return 0;
+            (void)pthread_mutex_unlock(lock);
+            if (remaining == 0)
+                errno = ETIMEDOUT;
+            return -1;
+        }
+        if (result != EBUSY) {
+            errno = result;
+            return -1;
+        }
+        while (nanosleep(&pause, NULL) != 0) {
+            if (errno != EINTR)
+                return -1;
+        }
+    }
 }
 
 /* A timeout is recoverable only if no byte of this frame was consumed. */
@@ -647,6 +697,7 @@ int cosim_table_transport_tcp_send(void *opaque,
     cosim_u32 payload_bytes;
     int fd;
     int result = -1;
+    int saved_errno = 0;
 
     if (backend == NULL ||
         validate_frame(frame, &header_bytes, &payload_bytes) != 0 ||
@@ -656,17 +707,24 @@ int cosim_table_transport_tcp_send(void *opaque,
         operation_begin(backend, &fd) != 0)
         return -1;
 
-    (void)pthread_mutex_lock(&backend->send_lock);
-    if (send_exact(fd, frame, sizeof(*frame), &deadline) == 0 &&
-        (header_bytes == 0 ||
-         send_exact(fd, header, header_bytes, &deadline) == 0) &&
-        (payload_bytes == 0 ||
-         send_exact(fd, payload, payload_bytes, &deadline) == 0))
-        result = 0;
-    (void)pthread_mutex_unlock(&backend->send_lock);
+    if (lock_send_before_deadline(&backend->send_lock, &deadline) == 0) {
+        if (send_exact(fd, frame, sizeof(*frame), &deadline) == 0 &&
+            (header_bytes == 0 ||
+             send_exact(fd, header, header_bytes, &deadline) == 0) &&
+            (payload_bytes == 0 ||
+             send_exact(fd, payload, payload_bytes, &deadline) == 0))
+            result = 0;
+        if (result != 0)
+            saved_errno = errno;
+        (void)pthread_mutex_unlock(&backend->send_lock);
+    } else {
+        saved_errno = errno;
+    }
     if (result != 0)
         mark_fatal(backend);
     operation_end(backend);
+    if (result != 0)
+        errno = saved_errno;
     return result;
 }
 

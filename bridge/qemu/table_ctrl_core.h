@@ -17,6 +17,7 @@ typedef struct {
                         size_t bytes);
     ssize_t (*dma_write)(void *opaque, uint64_t address, const void *buffer,
                          size_t bytes);
+    void (*acquire_barrier)(void *opaque);
     void (*release_barrier)(void *opaque);
     int (*target_active)(void *opaque, const cosim_table_target_t *target);
     const cosim_table_route_entry_t *(*match)(

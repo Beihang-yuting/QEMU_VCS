@@ -17,6 +17,7 @@ struct cosim_table_client {
     pthread_mutex_t request_lock;
     cosim_table_route_map_t routes;
     uint64_t next_transaction_id;
+    int terminal;
     atomic_int routes_installed;
 };
 
@@ -164,7 +165,10 @@ static int route_entry_valid(const cosim_table_client_t *client,
     uint32_t entry_bytes = cosim_table_le32_to_cpu(route->entry_bytes);
     uint32_t stride_bytes = cosim_table_le32_to_cpu(route->stride_bytes);
     uint32_t index_base = cosim_table_le32_to_cpu(route->index_base);
+    uint64_t span;
     uint64_t slots;
+    uint64_t last_offset;
+    uint64_t last_start;
     uint64_t last_index;
     const void *handler_end;
 
@@ -183,19 +187,25 @@ static int route_entry_valid(const cosim_table_client_t *client,
                             COSIM_TABLE_OP_READ_DWORD)) != 0 ||
         (operation_mask & COSIM_TABLE_OP_WRITE) == 0 ||
         start >= end || entry_bytes == 0 || stride_bytes < entry_bytes ||
-        end - start < entry_bytes || (end - start) % stride_bytes != 0)
+        end - start < entry_bytes)
         return 0;
 
     handler_end = memchr(route->handler_name, '\0',
                          sizeof(route->handler_name));
     if (route->handler_name[0] == '\0' || handler_end == NULL)
         return 0;
-    slots = (end - start) / stride_bytes;
+    span = end - start;
+    slots = UINT64_C(1) + (span - entry_bytes) / stride_bytes;
     if (slots == 0 || slots - 1 > UINT32_MAX - (uint64_t)index_base)
         return 0;
+    if (slots - 1 > (UINT64_MAX - start) / stride_bytes)
+        return 0;
+    last_offset = (slots - 1) * stride_bytes;
+    last_start = start + last_offset;
+    if (last_start > end - entry_bytes)
+        return 0;
     last_index = (uint64_t)index_base + slots - 1;
-    return last_index <= UINT32_MAX &&
-           entry_bytes <= end - (start + (slots - 1) * stride_bytes);
+    return last_index <= UINT32_MAX;
 }
 
 static uint64_t route_hash(const cosim_table_route_entry_t *entries,
@@ -230,46 +240,129 @@ static int route_logical_index(const cosim_table_route_entry_t *route,
     return 0;
 }
 
-static int route_maps_overlap(const cosim_table_route_entry_t *left,
-                              const cosim_table_route_entry_t *right)
+static int compare_u64(uint64_t left, uint64_t right)
 {
-    uint32_t left_operations =
-        cosim_table_le32_to_cpu(left->operation_mask);
-    uint32_t right_operations =
-        cosim_table_le32_to_cpu(right->operation_mask);
-    uint64_t left_start = cosim_table_le64_to_cpu(left->start_offset);
-    uint64_t left_end = cosim_table_le64_to_cpu(left->end_offset);
-    uint64_t right_start = cosim_table_le64_to_cpu(right->start_offset);
-    uint64_t right_end = cosim_table_le64_to_cpu(right->end_offset);
+    return left < right ? -1 : left > right ? 1 : 0;
+}
 
-    if (cosim_table_le16_to_cpu(left->target.device_instance) !=
-            cosim_table_le16_to_cpu(right->target.device_instance) ||
-        left->target.target_type != right->target.target_type ||
-        left->target.pf_index != right->target.pf_index ||
-        left->target.bar_index != right->target.bar_index ||
-        (left_operations & right_operations) == 0)
-        return 0;
-    return left_start < right_end && right_start < left_end;
+static int compare_route_ids(const void *left_pointer,
+                             const void *right_pointer)
+{
+    const cosim_table_route_entry_t *left = left_pointer;
+    const cosim_table_route_entry_t *right = right_pointer;
+
+    return compare_u64(cosim_table_le32_to_cpu(left->route_id),
+                       cosim_table_le32_to_cpu(right->route_id));
+}
+
+static int compare_route_owners(const void *left_pointer,
+                                const void *right_pointer)
+{
+    const cosim_table_route_entry_t *left = left_pointer;
+    const cosim_table_route_entry_t *right = right_pointer;
+    int result;
+
+    result = compare_u64(cosim_table_le16_to_cpu(left->target.rc_id),
+                         cosim_table_le16_to_cpu(right->target.rc_id));
+    if (result == 0)
+        result = compare_u64(
+            cosim_table_le16_to_cpu(left->target.device_instance),
+            cosim_table_le16_to_cpu(right->target.device_instance));
+    if (result == 0)
+        result = compare_u64(left->target.target_type,
+                             right->target.target_type);
+    if (result == 0)
+        result = compare_u64(left->target.pf_index,
+                             right->target.pf_index);
+    if (result == 0)
+        result = compare_u64(left->target.vf_index,
+                             right->target.vf_index);
+    if (result == 0)
+        result = compare_u64(left->target.bar_index,
+                             right->target.bar_index);
+    if (result == 0)
+        result = compare_u64(cosim_table_le64_to_cpu(left->start_offset),
+                             cosim_table_le64_to_cpu(right->start_offset));
+    return result;
+}
+
+static int same_route_owner(const cosim_table_route_entry_t *left,
+                            const cosim_table_route_entry_t *right)
+{
+    return cosim_table_le16_to_cpu(left->target.rc_id) ==
+               cosim_table_le16_to_cpu(right->target.rc_id) &&
+           cosim_table_le16_to_cpu(left->target.device_instance) ==
+               cosim_table_le16_to_cpu(right->target.device_instance) &&
+           left->target.target_type == right->target.target_type &&
+           left->target.pf_index == right->target.pf_index &&
+           left->target.vf_index == right->target.vf_index &&
+           left->target.bar_index == right->target.bar_index;
+}
+
+static int route_ids_duplicate(const cosim_table_route_entry_t *left,
+                               const cosim_table_route_entry_t *right)
+{
+    return cosim_table_le32_to_cpu(left->route_id) ==
+           cosim_table_le32_to_cpu(right->route_id);
+}
+
+static int ordered_routes_overlap(const cosim_table_route_entry_t *previous,
+                                  const cosim_table_route_entry_t *current,
+                                  uint64_t maximum_end)
+{
+    uint64_t current_start =
+        cosim_table_le64_to_cpu(current->start_offset);
+
+    return same_route_owner(previous, current) &&
+           current_start < maximum_end;
 }
 
 static int validate_route_map(const cosim_table_client_t *client,
                               const cosim_table_route_entry_t *entries,
                               size_t count)
 {
+    cosim_table_route_entry_t *ordered;
+    uint64_t maximum_end;
     size_t i;
-    size_t j;
 
     for (i = 0; i < count; i++) {
         if (!route_entry_valid(client, &entries[i]))
             return -1;
-        for (j = 0; j < i; j++) {
-            if (cosim_table_le32_to_cpu(entries[i].route_id) ==
-                    cosim_table_le32_to_cpu(entries[j].route_id) ||
-                route_maps_overlap(&entries[i], &entries[j]))
-                return -1;
-        }
     }
+    if (count < 2)
+        return 0;
+    if (count > SIZE_MAX / sizeof(*ordered))
+        return -1;
+    ordered = malloc(count * sizeof(*ordered));
+    if (ordered == NULL)
+        return -1;
+    memcpy(ordered, entries, count * sizeof(*ordered));
+
+    qsort(ordered, count, sizeof(*ordered), compare_route_ids);
+    for (i = 1; i < count; i++) {
+        if (route_ids_duplicate(&ordered[i - 1], &ordered[i]))
+            goto invalid;
+    }
+
+    qsort(ordered, count, sizeof(*ordered), compare_route_owners);
+    maximum_end = cosim_table_le64_to_cpu(ordered[0].end_offset);
+    for (i = 1; i < count; i++) {
+        if (!same_route_owner(&ordered[i - 1], &ordered[i])) {
+            maximum_end = cosim_table_le64_to_cpu(ordered[i].end_offset);
+            continue;
+        }
+        if (ordered_routes_overlap(&ordered[i - 1], &ordered[i],
+                                   maximum_end))
+            goto invalid;
+        if (maximum_end < cosim_table_le64_to_cpu(ordered[i].end_offset))
+            maximum_end = cosim_table_le64_to_cpu(ordered[i].end_offset);
+    }
+    free(ordered);
     return 0;
+
+invalid:
+    free(ordered);
+    return -1;
 }
 
 cosim_table_client_t *cosim_table_client_create(
@@ -400,10 +493,34 @@ static void completion_reset(cosim_table_completion_t *completion,
     completion->failed_index = UINT32_MAX;
 }
 
+static void client_mark_terminal(cosim_table_client_t *client)
+{
+    if (!client->terminal) {
+        client->terminal = 1;
+        cosim_table_transport_interrupt(client->transport);
+    }
+}
+
+static cosim_table_status_t client_send(
+    cosim_table_client_t *client, const cosim_table_frame_hdr_t *frame,
+    const void *header, const void *payload, int timeout_ms)
+{
+    int send_errno;
+
+    if (cosim_table_send(client->transport, frame, header, payload,
+                         timeout_ms) == 0)
+        return COSIM_TABLE_ST_SUCCESS;
+    send_errno = errno;
+    client_mark_terminal(client);
+    return send_errno == ETIMEDOUT ? COSIM_TABLE_ST_TIMEOUT
+                                   : COSIM_TABLE_ST_TARGET_GONE;
+}
+
 static cosim_table_status_t receive_completion(
     cosim_table_client_t *client, uint64_t transaction_id,
     cosim_table_completion_t *completion, uint32_t first_index,
-    uint32_t entry_count, int is_read, int timeout_ms)
+    uint32_t entry_count, int is_read, int timeout_ms,
+    int *transport_timed_out)
 {
     cosim_table_completion_t wire;
     cosim_table_frame_hdr_t frame;
@@ -414,10 +531,12 @@ static cosim_table_status_t receive_completion(
     uint32_t returned_dword;
     int receive_result;
 
+    *transport_timed_out = 0;
     memset(&wire, 0, sizeof(wire));
     receive_result = cosim_table_recv(client->transport, &frame, &wire,
                                       sizeof(wire), NULL, 0, timeout_ms);
     if (receive_result == 1) {
+        *transport_timed_out = 1;
         completion_reset(completion, COSIM_TABLE_ST_TIMEOUT);
         return COSIM_TABLE_ST_TIMEOUT;
     }
@@ -492,6 +611,8 @@ cosim_table_status_t cosim_table_client_write(
     size_t sent = 0;
     cosim_table_status_t status = COSIM_TABLE_ST_PROTOCOL;
     table_deadline_t deadline;
+    int completion_timed_out;
+    int in_flight = 0;
     int remaining;
 
     if (client == NULL || request == NULL || payload == NULL ||
@@ -505,6 +626,11 @@ cosim_table_status_t cosim_table_client_write(
     }
     if (remaining != 0)
         return COSIM_TABLE_ST_PROTOCOL;
+    if (client->terminal) {
+        status = COSIM_TABLE_ST_TARGET_GONE;
+        completion_reset(completion, status);
+        goto done;
+    }
     if (!atomic_load_explicit(&client->routes_installed,
                               memory_order_acquire)) {
         status = COSIM_TABLE_ST_NOT_READY;
@@ -538,9 +664,12 @@ cosim_table_status_t cosim_table_client_write(
     remaining = deadline_remaining_ms(&deadline);
     if (remaining == 0)
         goto timed_out;
-    if (cosim_table_send(client->transport, &frame, &outbound, NULL,
-                         remaining) != 0)
-        goto target_gone;
+    status = client_send(client, &frame, &outbound, NULL, remaining);
+    if (status != COSIM_TABLE_ST_SUCCESS) {
+        completion_reset(completion, status);
+        goto done;
+    }
+    in_flight = 1;
     while (sent < payload_bytes) {
         size_t chunk = payload_bytes - sent;
 
@@ -554,9 +683,12 @@ cosim_table_status_t cosim_table_client_write(
         remaining = deadline_remaining_ms(&deadline);
         if (remaining == 0)
             goto timed_out;
-        if (cosim_table_send(client->transport, &frame, &data_header,
-                             payload + sent, remaining) != 0)
-            goto target_gone;
+        status = client_send(client, &frame, &data_header, payload + sent,
+                             remaining);
+        if (status != COSIM_TABLE_ST_SUCCESS) {
+            completion_reset(completion, status);
+            goto done;
+        }
         sent += chunk;
     }
     memset(&end, 0, sizeof(end));
@@ -566,24 +698,26 @@ cosim_table_status_t cosim_table_client_write(
     remaining = deadline_remaining_ms(&deadline);
     if (remaining == 0)
         goto timed_out;
-    if (cosim_table_send(client->transport, &frame, &end, NULL,
-                         remaining) != 0)
-        goto target_gone;
+    status = client_send(client, &frame, &end, NULL, remaining);
+    if (status != COSIM_TABLE_ST_SUCCESS) {
+        completion_reset(completion, status);
+        goto done;
+    }
     remaining = deadline_remaining_ms(&deadline);
     if (remaining == 0)
         goto timed_out;
     status = receive_completion(client, transaction_id, completion,
                                 (uint32_t)first_index, entry_count, 0,
-                                remaining);
+                                remaining, &completion_timed_out);
+    if (completion_timed_out)
+        client_mark_terminal(client);
     goto done;
 
 timed_out:
     status = COSIM_TABLE_ST_TIMEOUT;
     completion_reset(completion, status);
-    goto done;
-target_gone:
-    status = COSIM_TABLE_ST_TARGET_GONE;
-    completion_reset(completion, status);
+    if (in_flight)
+        client_mark_terminal(client);
 done:
     (void)pthread_mutex_unlock(&client->request_lock);
     return status;
@@ -601,6 +735,7 @@ cosim_table_status_t cosim_table_client_read_dword(
     uint32_t read_index;
     cosim_table_status_t status = COSIM_TABLE_ST_PROTOCOL;
     table_deadline_t deadline;
+    int completion_timed_out;
     int remaining;
 
     if (client == NULL || request == NULL || completion == NULL ||
@@ -614,6 +749,11 @@ cosim_table_status_t cosim_table_client_read_dword(
     }
     if (remaining != 0)
         return COSIM_TABLE_ST_PROTOCOL;
+    if (client->terminal) {
+        status = COSIM_TABLE_ST_TARGET_GONE;
+        completion_reset(completion, status);
+        goto done;
+    }
     if (!atomic_load_explicit(&client->routes_installed,
                               memory_order_acquire)) {
         status = COSIM_TABLE_ST_NOT_READY;
@@ -648,9 +788,8 @@ cosim_table_status_t cosim_table_client_read_dword(
         completion_reset(completion, status);
         goto done;
     }
-    if (cosim_table_send(client->transport, &frame, &outbound, NULL,
-                         remaining) != 0) {
-        status = COSIM_TABLE_ST_TARGET_GONE;
+    status = client_send(client, &frame, &outbound, NULL, remaining);
+    if (status != COSIM_TABLE_ST_SUCCESS) {
         completion_reset(completion, status);
         goto done;
     }
@@ -658,10 +797,14 @@ cosim_table_status_t cosim_table_client_read_dword(
     if (remaining == 0) {
         status = COSIM_TABLE_ST_TIMEOUT;
         completion_reset(completion, status);
+        client_mark_terminal(client);
         goto done;
     }
     status = receive_completion(client, transaction_id, completion,
-                                read_index, 0, 1, remaining);
+                                read_index, 0, 1, remaining,
+                                &completion_timed_out);
+    if (completion_timed_out)
+        client_mark_terminal(client);
 
 done:
     (void)pthread_mutex_unlock(&client->request_lock);
