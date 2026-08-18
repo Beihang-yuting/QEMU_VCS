@@ -37,8 +37,13 @@ _Static_assert(sizeof(table_handshake_t) == 16,
 typedef struct {
     int connection_fd;
     int listener_fd;
+    int is_server;
+    int connecting;
     int fatal;
     int closing;
+    int connect_timeout_ms;
+    uint16_t rc_id;
+    uint32_t instance_id;
     unsigned int active_operations;
     pthread_mutex_t state_lock;
     pthread_mutex_t send_lock;
@@ -305,7 +310,7 @@ static int connect_host(const char *remote_host, uint16_t port,
     if (getaddrinfo(remote_host, service, &hints, &addresses) != 0)
         return -1;
 
-    while (deadline_remaining_ms(deadline) != 0 && connection < 0) {
+    while (deadline_remaining_ms(deadline) > 0 && connection < 0) {
         struct addrinfo *address;
 
         for (address = addresses; address != NULL; address = address->ai_next) {
@@ -418,29 +423,103 @@ static int validate_frame(const cosim_table_frame_hdr_t *frame,
     return 0;
 }
 
-static int operation_begin(table_tcp_backend_t *backend, int *fd)
+static void operation_end_locked(table_tcp_backend_t *backend)
 {
-    int result = -1;
-
-    if (pthread_mutex_lock(&backend->state_lock) != 0)
-        return -1;
-    if (!backend->closing && !backend->fatal && backend->connection_fd >= 0) {
-        ++backend->active_operations;
-        *fd = backend->connection_fd;
-        result = 0;
-    }
-    (void)pthread_mutex_unlock(&backend->state_lock);
-    return result;
+    if (backend->active_operations > 0)
+        --backend->active_operations;
+    (void)pthread_cond_broadcast(&backend->idle);
 }
 
 static void operation_end(table_tcp_backend_t *backend)
 {
     (void)pthread_mutex_lock(&backend->state_lock);
-    if (backend->active_operations > 0)
-        --backend->active_operations;
-    if (backend->active_operations == 0)
-        (void)pthread_cond_broadcast(&backend->idle);
+    operation_end_locked(backend);
     (void)pthread_mutex_unlock(&backend->state_lock);
+}
+
+/*
+ * Acquire one active-operation reference and return the connected socket.
+ * Server transports accept and handshake lazily so create() can return the
+ * listener to its owner before a VCS client exists.  The provisional accepted
+ * socket is published before handshake I/O, allowing interrupt() to shutdown
+ * every descriptor on which this function may be blocked.
+ */
+static int operation_begin(table_tcp_backend_t *backend, int *fd)
+{
+    table_deadline_t deadline;
+    int accepted_fd = -1;
+    int listener_fd;
+    int listener_to_close = -1;
+    int handshake_result;
+
+    if (pthread_mutex_lock(&backend->state_lock) != 0)
+        return -1;
+    if (backend->closing || backend->fatal) {
+        (void)pthread_mutex_unlock(&backend->state_lock);
+        return -1;
+    }
+    ++backend->active_operations;
+
+    while (backend->connecting && !backend->closing && !backend->fatal)
+        (void)pthread_cond_wait(&backend->idle, &backend->state_lock);
+    if (backend->closing || backend->fatal)
+        goto fail_locked;
+    if (backend->connection_fd >= 0) {
+        *fd = backend->connection_fd;
+        (void)pthread_mutex_unlock(&backend->state_lock);
+        return 0;
+    }
+    if (!backend->is_server || backend->listener_fd < 0)
+        goto fail_locked;
+
+    backend->connecting = 1;
+    listener_fd = backend->listener_fd;
+    (void)pthread_mutex_unlock(&backend->state_lock);
+
+    if (deadline_init(&deadline, backend->connect_timeout_ms) == 0)
+        accepted_fd = accept_connection(listener_fd, &deadline);
+    if (accepted_fd >= 0 && set_connection_options(accepted_fd) != 0) {
+        (void)close(accepted_fd);
+        accepted_fd = -1;
+    }
+
+    (void)pthread_mutex_lock(&backend->state_lock);
+    if (accepted_fd < 0 || backend->closing || backend->fatal) {
+        if (accepted_fd >= 0)
+            (void)close(accepted_fd);
+        backend->connecting = 0;
+        if (!backend->closing)
+            backend->fatal = 1;
+        goto fail_locked;
+    }
+    backend->connection_fd = accepted_fd;
+    (void)pthread_mutex_unlock(&backend->state_lock);
+
+    handshake_result = perform_handshake(accepted_fd, backend->rc_id,
+                                         backend->instance_id,
+                                         backend->connect_timeout_ms);
+
+    (void)pthread_mutex_lock(&backend->state_lock);
+    if (handshake_result != 0 || backend->closing || backend->fatal) {
+        backend->fatal = 1;
+        (void)shutdown(accepted_fd, SHUT_RDWR);
+        backend->connecting = 0;
+        goto fail_locked;
+    }
+    listener_to_close = backend->listener_fd;
+    backend->listener_fd = -1;
+    backend->connecting = 0;
+    *fd = accepted_fd;
+    (void)pthread_cond_broadcast(&backend->idle);
+    (void)pthread_mutex_unlock(&backend->state_lock);
+    if (listener_to_close >= 0)
+        (void)close(listener_to_close);
+    return 0;
+
+fail_locked:
+    operation_end_locked(backend);
+    (void)pthread_mutex_unlock(&backend->state_lock);
+    return -1;
 }
 
 static void mark_fatal(table_tcp_backend_t *backend)
@@ -449,6 +528,9 @@ static void mark_fatal(table_tcp_backend_t *backend)
     backend->fatal = 1;
     if (backend->connection_fd >= 0)
         (void)shutdown(backend->connection_fd, SHUT_RDWR);
+    if (backend->listener_fd >= 0)
+        (void)shutdown(backend->listener_fd, SHUT_RDWR);
+    (void)pthread_cond_broadcast(&backend->idle);
     (void)pthread_mutex_unlock(&backend->state_lock);
 }
 
@@ -480,14 +562,16 @@ void *cosim_table_transport_tcp_open(const cosim_table_transport_cfg_t *cfg)
         return NULL;
     timeout_ms = cfg->connect_timeout_ms > 0
         ? cfg->connect_timeout_ms : TABLE_DEFAULT_CONNECT_TIMEOUT_MS;
-    if (deadline_init(&deadline, timeout_ms) != 0)
-        return NULL;
 
     backend = calloc(1, sizeof(*backend));
     if (backend == NULL)
         return NULL;
     backend->connection_fd = -1;
     backend->listener_fd = -1;
+    backend->is_server = cfg->is_server;
+    backend->connect_timeout_ms = timeout_ms;
+    backend->rc_id = cfg->rc_id;
+    backend->instance_id = cfg->instance_id;
     if (pthread_mutex_init(&backend->state_lock, NULL) != 0) {
         free(backend);
         return NULL;
@@ -508,19 +592,20 @@ void *cosim_table_transport_tcp_open(const cosim_table_transport_cfg_t *cfg)
         host = cfg->listen_addr != NULL && cfg->listen_addr[0] != '\0'
             ? cfg->listen_addr : "0.0.0.0";
         backend->listener_fd = open_listener(host, (uint16_t)port);
-        if (backend->listener_fd >= 0)
-            backend->connection_fd =
-                accept_connection(backend->listener_fd, &deadline);
-        if (backend->listener_fd >= 0) {
-            (void)close(backend->listener_fd);
-            backend->listener_fd = -1;
+        if (backend->listener_fd < 0) {
+            destroy_unopened_backend(backend);
+            return NULL;
         }
-    } else {
-        host = cfg->remote_host != NULL && cfg->remote_host[0] != '\0'
-            ? cfg->remote_host : "127.0.0.1";
-        backend->connection_fd =
-            connect_host(host, (uint16_t)port, &deadline);
+        return backend;
     }
+
+    host = cfg->remote_host != NULL && cfg->remote_host[0] != '\0'
+        ? cfg->remote_host : "127.0.0.1";
+    if (deadline_init(&deadline, timeout_ms) != 0)
+        backend->connection_fd = -1;
+    else
+        backend->connection_fd = connect_host(host, (uint16_t)port,
+                                              &deadline);
     if (backend->connection_fd < 0 ||
         set_connection_options(backend->connection_fd) != 0 ||
         perform_handshake(backend->connection_fd, cfg->rc_id,
@@ -643,6 +728,7 @@ void cosim_table_transport_tcp_interrupt(void *opaque)
         (void)shutdown(backend->connection_fd, SHUT_RDWR);
     if (backend->listener_fd >= 0)
         (void)shutdown(backend->listener_fd, SHUT_RDWR);
+    (void)pthread_cond_broadcast(&backend->idle);
     (void)pthread_mutex_unlock(&backend->state_lock);
 }
 
@@ -661,6 +747,7 @@ void cosim_table_transport_tcp_close(void *opaque)
         (void)shutdown(backend->connection_fd, SHUT_RDWR);
     if (backend->listener_fd >= 0)
         (void)shutdown(backend->listener_fd, SHUT_RDWR);
+    (void)pthread_cond_broadcast(&backend->idle);
     while (backend->active_operations != 0)
         (void)pthread_cond_wait(&backend->idle, &backend->state_lock);
     connection_fd = backend->connection_fd;

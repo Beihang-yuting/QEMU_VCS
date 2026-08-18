@@ -4,6 +4,7 @@
 #include <arpa/inet.h>
 #include <errno.h>
 #include <poll.h>
+#include <pthread.h>
 #include <signal.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -36,6 +37,20 @@ static uint64_t monotonic_ms(void)
 
     CHECK(clock_gettime(CLOCK_MONOTONIC, &now) == 0);
     return (uint64_t)now.tv_sec * 1000u + (uint64_t)now.tv_nsec / 1000000u;
+}
+
+static struct timespec realtime_after_ms(long milliseconds)
+{
+    struct timespec deadline;
+
+    CHECK(clock_gettime(CLOCK_REALTIME, &deadline) == 0);
+    deadline.tv_sec += milliseconds / 1000;
+    deadline.tv_nsec += (milliseconds % 1000) * 1000000L;
+    if (deadline.tv_nsec >= 1000000000L) {
+        deadline.tv_sec++;
+        deadline.tv_nsec -= 1000000000L;
+    }
+    return deadline;
 }
 
 static void wait_child_ok(pid_t child, int timeout_ms)
@@ -307,6 +322,171 @@ static void test_rejects_port_overflow(void)
     CHECK(cosim_table_transport_create(&cfg) == NULL);
 }
 
+typedef struct {
+    cosim_table_transport_t *transport;
+    pthread_mutex_t lock;
+    pthread_cond_t condition;
+    int started;
+    int finished;
+    int result;
+} blocking_recv_ctx_t;
+
+static void blocking_recv_ctx_init(blocking_recv_ctx_t *ctx,
+                                   cosim_table_transport_t *transport)
+{
+    memset(ctx, 0, sizeof(*ctx));
+    ctx->transport = transport;
+    CHECK(pthread_mutex_init(&ctx->lock, NULL) == 0);
+    CHECK(pthread_cond_init(&ctx->condition, NULL) == 0);
+}
+
+static void blocking_recv_ctx_destroy(blocking_recv_ctx_t *ctx)
+{
+    CHECK(pthread_cond_destroy(&ctx->condition) == 0);
+    CHECK(pthread_mutex_destroy(&ctx->lock) == 0);
+}
+
+static void *blocking_recv_main(void *opaque)
+{
+    blocking_recv_ctx_t *ctx = opaque;
+    cosim_table_frame_hdr_t frame;
+    unsigned char header[sizeof(cosim_table_route_entry_t)];
+    unsigned char payload[COSIM_TABLE_FRAME_DATA_BYTES];
+
+    CHECK(pthread_mutex_lock(&ctx->lock) == 0);
+    ctx->started = 1;
+    CHECK(pthread_cond_broadcast(&ctx->condition) == 0);
+    CHECK(pthread_mutex_unlock(&ctx->lock) == 0);
+
+    ctx->result = cosim_table_recv(ctx->transport, &frame,
+                                   header, sizeof(header),
+                                   payload, sizeof(payload), -1);
+
+    CHECK(pthread_mutex_lock(&ctx->lock) == 0);
+    ctx->finished = 1;
+    CHECK(pthread_cond_broadcast(&ctx->condition) == 0);
+    CHECK(pthread_mutex_unlock(&ctx->lock) == 0);
+    return NULL;
+}
+
+static void require_recv_is_blocked(blocking_recv_ctx_t *ctx)
+{
+    struct timespec deadline;
+    int wait_result = 0;
+
+    CHECK(pthread_mutex_lock(&ctx->lock) == 0);
+    while (!ctx->started)
+        CHECK(pthread_cond_wait(&ctx->condition, &ctx->lock) == 0);
+    deadline = realtime_after_ms(50);
+    while (!ctx->finished && wait_result == 0)
+        wait_result = pthread_cond_timedwait(&ctx->condition, &ctx->lock,
+                                             &deadline);
+    CHECK(!ctx->finished);
+    CHECK(wait_result == ETIMEDOUT);
+    CHECK(pthread_mutex_unlock(&ctx->lock) == 0);
+}
+
+static void interrupt_and_join(cosim_table_transport_t *transport,
+                               blocking_recv_ctx_t *ctx,
+                               pthread_t thread)
+{
+    struct timespec deadline = realtime_after_ms(2000);
+    uint64_t started_ms = monotonic_ms();
+
+    cosim_table_transport_interrupt(transport);
+    CHECK(pthread_timedjoin_np(thread, NULL, &deadline) == 0);
+    CHECK(monotonic_ms() - started_ms < 2000);
+    CHECK(ctx->result == -1);
+}
+
+static cosim_table_transport_cfg_t make_server_cfg(uint16_t port,
+                                                    int timeout_ms)
+{
+    cosim_table_transport_cfg_t cfg;
+
+    memset(&cfg, 0, sizeof(cfg));
+    cfg.listen_addr = "127.0.0.1";
+    cfg.table_port_base = port - TEST_INSTANCE_ID;
+    cfg.instance_id = TEST_INSTANCE_ID;
+    cfg.rc_id = TEST_RC_ID;
+    cfg.is_server = 1;
+    cfg.connect_timeout_ms = timeout_ms;
+    return cfg;
+}
+
+static cosim_table_transport_cfg_t make_client_cfg(uint16_t port,
+                                                    int timeout_ms)
+{
+    cosim_table_transport_cfg_t cfg;
+
+    memset(&cfg, 0, sizeof(cfg));
+    cfg.remote_host = "127.0.0.1";
+    cfg.table_port_base = port - TEST_INSTANCE_ID;
+    cfg.instance_id = TEST_INSTANCE_ID;
+    cfg.rc_id = TEST_RC_ID;
+    cfg.connect_timeout_ms = timeout_ms;
+    return cfg;
+}
+
+static void test_server_create_returns_before_accept(void)
+{
+    const uint16_t port = reserve_available_port();
+    cosim_table_transport_cfg_t cfg = make_server_cfg(port, 500);
+    cosim_table_transport_t *server;
+    uint64_t started_ms = monotonic_ms();
+
+    server = cosim_table_transport_create(&cfg);
+    CHECK(server != NULL);
+    CHECK(monotonic_ms() - started_ms < 200);
+    cosim_table_transport_close(server);
+}
+
+static void test_interrupts_listener_accept(void)
+{
+    const uint16_t port = reserve_available_port();
+    cosim_table_transport_cfg_t cfg = make_server_cfg(port, 5000);
+    cosim_table_transport_t *server;
+    blocking_recv_ctx_t recv_ctx;
+    pthread_t recv_thread;
+
+    server = cosim_table_transport_create(&cfg);
+    CHECK(server != NULL);
+    blocking_recv_ctx_init(&recv_ctx, server);
+    CHECK(pthread_create(&recv_thread, NULL,
+                         blocking_recv_main, &recv_ctx) == 0);
+    require_recv_is_blocked(&recv_ctx);
+    interrupt_and_join(server, &recv_ctx, recv_thread);
+    blocking_recv_ctx_destroy(&recv_ctx);
+    cosim_table_transport_close(server);
+}
+
+static void test_interrupts_connected_blocking_receive(void)
+{
+    const uint16_t port = reserve_available_port();
+    cosim_table_transport_cfg_t server_cfg =
+        make_server_cfg(port, TEST_TIMEOUT_MS);
+    cosim_table_transport_cfg_t client_cfg =
+        make_client_cfg(port, TEST_TIMEOUT_MS);
+    cosim_table_transport_t *server;
+    cosim_table_transport_t *client;
+    blocking_recv_ctx_t recv_ctx;
+    pthread_t recv_thread;
+
+    server = cosim_table_transport_create(&server_cfg);
+    CHECK(server != NULL);
+    blocking_recv_ctx_init(&recv_ctx, server);
+    CHECK(pthread_create(&recv_thread, NULL,
+                         blocking_recv_main, &recv_ctx) == 0);
+    client = cosim_table_transport_create(&client_cfg);
+    CHECK(client != NULL);
+
+    require_recv_is_blocked(&recv_ctx);
+    interrupt_and_join(server, &recv_ctx, recv_thread);
+    blocking_recv_ctx_destroy(&recv_ctx);
+    cosim_table_transport_close(client);
+    cosim_table_transport_close(server);
+}
+
 static void test_rejects_mismatched_rc_identity(void)
 {
     const uint16_t port = reserve_available_port();
@@ -325,10 +505,16 @@ static void test_rejects_mismatched_rc_identity(void)
     child = fork();
     CHECK(child >= 0);
     if (child == 0) {
+        cosim_table_frame_hdr_t frame;
+        unsigned char header[sizeof(cosim_table_route_entry_t)];
+        unsigned char payload[COSIM_TABLE_FRAME_DATA_BYTES];
         cosim_table_transport_t *server =
             cosim_table_transport_create(&server_cfg);
 
-        CHECK(server == NULL);
+        CHECK(server != NULL);
+        CHECK(cosim_table_recv(server, &frame, header, sizeof(header),
+                               payload, sizeof(payload), -1) == -1);
+        cosim_table_transport_close(server);
         _exit(0);
     }
 
@@ -347,6 +533,9 @@ static void test_rejects_mismatched_rc_identity(void)
 int main(void)
 {
     test_rejects_port_overflow();
+    test_server_create_returns_before_accept();
+    test_interrupts_listener_accept();
+    test_interrupts_connected_blocking_receive();
     test_rejects_mismatched_rc_identity();
     test_fragmented_roundtrip_and_shutdown();
     puts("table TCP transport tests passed");
