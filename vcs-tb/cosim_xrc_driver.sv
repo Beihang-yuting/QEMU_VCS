@@ -114,6 +114,7 @@ class cosim_xrc_driver extends pcie_tl_rc_driver;
     // ---- Coordination ----
     bit   bridge_ready = 0;
     bit   be_matrix_pending = 0;
+    bit   prepolled_tlp_valid = 0;
     event shutdown_event;
     int   polling_interval_ns = 10;
 
@@ -360,6 +361,7 @@ class cosim_xrc_driver extends pcie_tl_rc_driver;
         int table_poll_result;
         bit table_ready;
 
+        prepolled_tlp_valid = 0;
         // 全程 hold objection: 交互式 cosim 期望"不敲 start_cosim 就一直跑等你",
         // 结束由 UCLI finish 或 request_loop shutdown 决定。
         phase.raise_objection(this, "cosim_xrc_driver holding run");
@@ -406,7 +408,9 @@ class cosim_xrc_driver extends pcie_tl_rc_driver;
                         rc_index))
                     break;
                 end
-                if (table_poll_result == 0) begin
+                if (cosim_runtime_policy_pkg::
+                    cosim_realization_poll_captured_tlp(table_poll_result)) begin
+                    prepolled_tlp_valid = 1;
                     `uvm_error(get_name(), $sformatf(
                         "RC%0d received Guest traffic before REALIZED",
                         rc_index))
@@ -1081,7 +1085,11 @@ class cosim_xrc_driver extends pcie_tl_rc_driver;
         `uvm_info(get_name(), $sformatf("RC%0d bridge ready, polling", rc_index), UVM_MEDIUM)
 
         forever begin
-            ret = bridge_vcs_poll_tlp_scalar_rc(rc_index);
+            if (prepolled_tlp_valid) begin
+                ret = 0;
+                prepolled_tlp_valid = 0;
+            end else
+                ret = bridge_vcs_poll_tlp_scalar_rc(rc_index);
             if (ret < 0) begin
                 `uvm_info(get_name(), $sformatf("RC%0d poll<0: shutdown", rc_index), UVM_MEDIUM)
                 ->shutdown_event;
@@ -1342,6 +1350,7 @@ class cosim_xrc_driver extends pcie_tl_rc_driver;
             end
             total_tlp_count++;
         end
+        prepolled_tlp_valid = 0;
     endtask
 
     // -----------------------------------------------------------------------

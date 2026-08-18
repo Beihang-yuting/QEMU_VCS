@@ -32,6 +32,12 @@ package cosim_runtime_policy_pkg;
         return last_devfn <= 255;
     endfunction
 
+    function automatic bit cosim_realization_poll_captured_tlp(
+        input int poll_result
+    );
+        return poll_result == 0;
+    endfunction
+
 endpackage : cosim_runtime_policy_pkg
 
 `endif

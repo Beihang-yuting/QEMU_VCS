@@ -19,6 +19,12 @@ module test_runtime_bdf_utils;
         bit [15:0] base;
         bit [15:0] rid;
         bit [255:0] seen;
+        bit prepolled_tlp_valid;
+        int poll_calls;
+        int poll_result;
+        int dispatch_count;
+        bit [31:0] scalar_data;
+        bit [31:0] dispatched_data[2];
 
         base = pcie_pf_base_bdf(16'h0200);
         expect_bdf("02:00.0 base", base, 16'h0200);
@@ -88,7 +94,47 @@ module test_runtime_bdf_utils;
         if (cosim_single_bus_profile_fits(16, 2147483647))
             $fatal(1, "single-bus capacity check accepted an overflowing MAX_VFS");
 
-        $display("PASS: runtime BDF arithmetic, bind trigger, and launch policy");
+        // Model the driver boundary where realization polling and the main
+        // request loop share the scalar DPI getter storage. A ret==0 poll has
+        // already populated the first TLP and must not be repeated before the
+        // getter/dispatch path consumes it.
+        poll_calls = 0;
+        dispatch_count = 0;
+        scalar_data = 32'h1111_aaaa;
+        poll_result = 0;
+        poll_calls++;
+        prepolled_tlp_valid =
+            cosim_realization_poll_captured_tlp(poll_result);
+        if (!prepolled_tlp_valid)
+            $fatal(1, "realization poll ret==0 must retain the scalar TLP");
+
+        if (prepolled_tlp_valid) begin
+            poll_result = 0;
+            prepolled_tlp_valid = 0;
+        end else begin
+            poll_calls++;
+            scalar_data = 32'h2222_bbbb;
+        end
+        dispatched_data[dispatch_count++] = scalar_data;
+        if (poll_calls != 1 || dispatched_data[0] != 32'h1111_aaaa)
+            $fatal(1, "first main-loop dispatch re-polled over the retained TLP");
+
+        if (prepolled_tlp_valid) begin
+            poll_result = 0;
+            prepolled_tlp_valid = 0;
+        end else begin
+            poll_calls++;
+            poll_result = 0;
+            scalar_data = 32'h2222_bbbb;
+        end
+        dispatched_data[dispatch_count++] = scalar_data;
+        if (poll_calls != 2 || dispatched_data[1] != 32'h2222_bbbb)
+            $fatal(1, "second main-loop iteration must resume normal polling");
+        if (cosim_realization_poll_captured_tlp(1) ||
+            cosim_realization_poll_captured_tlp(-1))
+            $fatal(1, "empty/error realization polls must not retain a TLP");
+
+        $display("PASS: runtime BDF arithmetic, bind trigger, launch and pre-poll policy");
         $finish;
     end
 endmodule

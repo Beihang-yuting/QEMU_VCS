@@ -117,6 +117,44 @@ if re.search(r"\bwhile\s*\([^)]*bridge_vcs_is_realized_rc", run_phase):
 poll_bound = re.search(r"table_ready_poll\s*<\s*(\d+)", run_phase)
 if poll_bound is None or int(poll_bound.group(1)) > 100:
     fail("realization polling must not stall the main bridge for an excessive interval")
+if re.search(r"bit\s+prepolled_tlp_valid\s*=\s*0\s*;", xrc_driver) is None:
+    fail("cosim_xrc_driver needs per-instance pre-polled TLP state")
+capture = re.search(
+    r"if\s*\(\s*cosim_runtime_policy_pkg::\s*"
+    r"cosim_realization_poll_captured_tlp\s*\(\s*table_poll_result\s*\)\s*\)"
+    r"\s*begin(?P<body>.*?)end",
+    run_phase,
+    flags=re.DOTALL,
+)
+if capture is None:
+    fail("realization ret==0 must use the tested pre-poll decision helper")
+capture_body = capture.group("body")
+capture_set = capture_body.find("prepolled_tlp_valid = 1")
+capture_break = capture_body.find("break")
+if capture_set < 0 or capture_break < 0 or capture_set >= capture_break:
+    fail("realization ret==0 must save the pre-polled TLP before leaving the wait")
+if "bridge_vcs_get_poll_" in run_phase:
+    fail("realization polling must leave scalar getters untouched for request_loop")
+
+request_loop = block(
+    xrc_driver,
+    r"protected\s+task\s+request_loop\s*\(\s*uvm_phase\s+phase\s*\)\s*;",
+    "endtask",
+)
+consume = re.search(
+    r"if\s*\(\s*prepolled_tlp_valid\s*\)\s*begin\s*"
+    r"ret\s*=\s*0\s*;\s*prepolled_tlp_valid\s*=\s*0\s*;\s*end\s*"
+    r"else\s*ret\s*=\s*bridge_vcs_poll_tlp_scalar_rc\s*\(\s*rc_index\s*\)\s*;",
+    request_loop,
+    flags=re.DOTALL,
+)
+if consume is None:
+    fail("request_loop must consume one pre-polled TLP before polling again")
+first_poll = request_loop.find("bridge_vcs_poll_tlp_scalar_rc")
+if first_poll < 0 or consume.start() >= first_poll:
+    fail("pre-polled selection must guard the first main request poll")
+if not re.search(r"prepolled_tlp_valid\s*=\s*0\s*;\s*$", request_loop):
+    fail("request_loop must leave pre-polled state clear on shutdown/re-entry")
 
 print("[table-xrc-source] PASS")
 PY
