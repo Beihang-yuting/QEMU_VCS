@@ -150,6 +150,15 @@ static int test_rejects_null_values(void)
     return 0;
 }
 
+static int test_generation_exhaustion_fails_closed(void)
+{
+    CHECK(cosim_table_target_next_generation(0) == 1);
+    CHECK(cosim_table_target_next_generation(UINT32_MAX - 1) == UINT32_MAX);
+    CHECK(cosim_table_target_next_generation(UINT32_MAX) == 0);
+    CHECK(cosim_table_target_next_generation(UINT32_MAX) == 0);
+    return 0;
+}
+
 int main(void)
 {
     CHECK(test_matches_live_pf0_logical_bars() == 0);
@@ -158,6 +167,7 @@ int main(void)
     CHECK(test_rejects_absent_bar() == 0);
     CHECK(test_rejects_mismatched_live_identity() == 0);
     CHECK(test_rejects_null_values() == 0);
+    CHECK(test_generation_exhaustion_fails_closed() == 0);
     puts("PASS: table target snapshot policy");
     return 0;
 }

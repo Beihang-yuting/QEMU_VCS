@@ -315,8 +315,11 @@ if device_exit.find("cosim_table_target_remove(s);") > device_exit.find(
     fail("PF0 table snapshot must be removed before its bridge is destroyed")
 
 class_init = function_body("cosim_pcie_rc_class_init")
-require(class_init, "dc->legacy_reset = cosim_pcie_rc_reset;",
+require(class_init,
+        "device_class_set_legacy_reset(dc, cosim_pcie_rc_reset);",
         "cosim_pcie_rc_class_init")
+forbid(class_init, "dc->legacy_reset = cosim_pcie_rc_reset;",
+       "cosim_pcie_rc_class_init")
 
 print("[qemu-request-routing] PASS")
 PY

@@ -30,6 +30,7 @@ add_library(cosim_bridge SHARED
 target_include_directories(cosim_bridge PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/common
     ${CMAKE_CURRENT_SOURCE_DIR}/qemu
+    ${CMAKE_CURRENT_SOURCE_DIR}/table
 )
 target_link_libraries(cosim_bridge PRIVATE cosim_bridge_common rt pthread)
 

@@ -14,6 +14,7 @@ typedef struct {
     uint64_t bar_sizes[6];
 } cosim_table_target_snapshot_t;
 
+uint32_t cosim_table_target_next_generation(uint32_t generation);
 int cosim_table_target_snapshot_valid(
     const cosim_table_target_snapshot_t *snapshot);
 int cosim_table_target_matches(const cosim_table_target_snapshot_t *snapshot,

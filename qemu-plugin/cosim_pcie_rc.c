@@ -338,13 +338,15 @@ static CosimPCIeRC *g_rc_pfs[COSIM_RC_MAX_PF];
 static CosimPCIeRC *g_table_target_registry;
 static uint32_t g_table_target_generation;
 
-static uint32_t cosim_table_target_next_generation(void)
+static uint32_t cosim_table_target_allocate_generation(void)
 {
-    ++g_table_target_generation;
-    if (g_table_target_generation == 0) {
-        ++g_table_target_generation;
+    uint32_t next =
+        cosim_table_target_next_generation(g_table_target_generation);
+
+    if (next != 0) {
+        g_table_target_generation = next;
     }
-    return g_table_target_generation;
+    return next;
 }
 
 static void cosim_table_target_unlink(CosimPCIeRC *s)
@@ -368,7 +370,7 @@ static void cosim_table_target_remove(CosimPCIeRC *s)
     }
     cosim_table_target_unlink(s);
     s->table_target_snapshot.generation =
-        cosim_table_target_next_generation();
+        cosim_table_target_allocate_generation();
 }
 
 static void cosim_table_target_publish(CosimPCIeRC *s, PCIDevice *pci_dev)
@@ -392,7 +394,7 @@ static void cosim_table_target_publish(CosimPCIeRC *s, PCIDevice *pci_dev)
         if (existing->instance_id == s->instance_id) {
             cosim_table_target_unlink(existing);
             existing->table_target_snapshot.generation =
-                cosim_table_target_next_generation();
+                cosim_table_target_allocate_generation();
             break;
         }
         existing = next;
@@ -402,7 +404,7 @@ static void cosim_table_target_publish(CosimPCIeRC *s, PCIDevice *pci_dev)
     snapshot.device_instance = 0;
     snapshot.pci_domain = cosim_current_pci_domain(pci_dev);
     snapshot.target_bdf = cosim_current_bdf(pci_dev);
-    snapshot.generation = cosim_table_target_next_generation();
+    snapshot.generation = cosim_table_target_allocate_generation();
     for (physical_bar = 0; physical_bar < COSIM_MAX_BARS; ++physical_bar) {
         if (s->bar_ctx[physical_bar].dev != s) {
             continue;
@@ -1922,7 +1924,7 @@ static void cosim_pcie_rc_class_init(ObjectClass *klass, void *data)
     k->exit = cosim_pcie_rc_exit;
     k->config_read = cosim_config_read;
     k->config_write = cosim_config_write;
-    dc->legacy_reset = cosim_pcie_rc_reset;
+    device_class_set_legacy_reset(dc, cosim_pcie_rc_reset);
     k->vendor_id = COSIM_PCI_VENDOR_ID;
     k->device_id = COSIM_PCI_DEVICE_ID;
     k->revision = COSIM_PCI_REVISION;

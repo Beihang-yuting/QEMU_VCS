@@ -8,6 +8,13 @@ enum {
     COSIM_TABLE_PHYSICAL_BARS = 6,
 };
 
+uint32_t cosim_table_target_next_generation(uint32_t generation)
+{
+    /* Generation zero is the invalid sentinel.  Saturate at UINT32_MAX so
+     * exhaustion fails closed instead of reusing an old identity (ABA). */
+    return generation == UINT32_MAX ? 0 : generation + 1;
+}
+
 int cosim_table_target_snapshot_valid(
     const cosim_table_target_snapshot_t *snapshot)
 {

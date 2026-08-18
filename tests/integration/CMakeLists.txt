@@ -2,6 +2,12 @@ add_executable(test_sock_sync test_sock_sync.c)
 target_link_libraries(test_sock_sync cosim_bridge)
 add_test(NAME test_sock_sync COMMAND test_sock_sync)
 
+add_executable(test_cosim_bridge_public_table_header
+               test_cosim_bridge_public_table_header.c)
+target_link_libraries(test_cosim_bridge_public_table_header cosim_bridge)
+add_test(NAME test_cosim_bridge_public_table_header
+         COMMAND test_cosim_bridge_public_table_header)
+
 add_executable(test_table_roundtrip test_table_roundtrip.c)
 target_include_directories(test_table_roundtrip PRIVATE
     ${CMAKE_SOURCE_DIR}/bridge/qemu
@@ -113,6 +119,17 @@ add_test(NAME test_qemu_table_target_link_closure
                  ${CMAKE_CURRENT_SOURCE_DIR}/test_qemu_table_target_build_closure.sh
                  link $<TARGET_FILE:cosim_bridge>)
 set_tests_properties(test_qemu_table_target_link_closure PROPERTIES TIMEOUT 20)
+
+set(COSIM_QEMU_BUILD_DIR "" CACHE PATH
+    "QEMU build tree used by the real QOM legacy-reset registration probe")
+if(COSIM_QEMU_BUILD_DIR)
+    add_test(NAME test_qemu_legacy_reset_registration
+             COMMAND bash
+                     ${CMAKE_CURRENT_SOURCE_DIR}/test_qemu_legacy_reset_registration.sh
+                     ${COSIM_QEMU_BUILD_DIR})
+    set_tests_properties(test_qemu_legacy_reset_registration
+                         PROPERTIES TIMEOUT 120)
+endif()
 
 add_test(NAME test_cq_bar_routing_source
          COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/test_cq_bar_routing_source.sh)
