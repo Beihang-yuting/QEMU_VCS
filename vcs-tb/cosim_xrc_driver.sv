@@ -356,6 +356,10 @@ class cosim_xrc_driver extends pcie_tl_rc_driver;
     // rx_loop 全程运行, 按 cosim_active 分流 DUT 回来的 completion。
     // -----------------------------------------------------------------------
     virtual task run_phase(uvm_phase phase);
+        int table_ready_poll;
+        int table_poll_result;
+        bit table_ready;
+
         // 全程 hold objection: 交互式 cosim 期望"不敲 start_cosim 就一直跑等你",
         // 结束由 UCLI finish 或 request_loop shutdown 决定。
         phase.raise_objection(this, "cosim_xrc_driver holding run");
@@ -387,11 +391,44 @@ class cosim_xrc_driver extends pcie_tl_rc_driver;
         // ---- 阶段2: 连 QEMU + QEMU 主导 ----
         if (self_init_bridge_en && !bridge_ready)
             self_init_bridge();
+        if (cosim_table_runtime::enabled()) begin
+            table_ready = bridge_vcs_is_realized_rc(rc_index);
+            for (table_ready_poll = 0;
+                 table_ready_poll < 20 && !table_ready;
+                 table_ready_poll++) begin
+                // QEMU publishes REALIZED before Guest traffic. Polling the
+                // retained control channel consumes that handshake without
+                // introducing a second topology model.
+                table_poll_result = bridge_vcs_poll_tlp_scalar_rc(rc_index);
+                if (table_poll_result < 0) begin
+                    `uvm_error(get_name(), $sformatf(
+                        "RC%0d table realization poll lost the main bridge",
+                        rc_index))
+                    break;
+                end
+                if (table_poll_result == 0) begin
+                    `uvm_error(get_name(), $sformatf(
+                        "RC%0d received Guest traffic before REALIZED",
+                        rc_index))
+                    break;
+                end
+                table_ready = bridge_vcs_is_realized_rc(rc_index);
+                if (!table_ready)
+                    #(polling_interval_ns * 1ns);
+            end
+            if (table_ready)
+                cosim_table_runtime::start_rc(rc_index);
+            else
+                `uvm_error(get_name(), $sformatf(
+                    "RC%0d table sideband inactive: QEMU target is not realized",
+                    rc_index))
+        end
         cosim_active = 1;                 // rx_loop 切到 forward_to_qemu
         if ($test$plusargs("BE_MATRIX_SELFTEST"))
             be_matrix_pending = 1;
         request_loop(phase);              // QEMU poll → DUT, 阻塞直到 shutdown
 
+        cosim_table_runtime::stop_rc(rc_index);
         bridge_vcs_cleanup_ex_rc(rc_index);
         phase.drop_objection(this, "cosim_xrc_driver done");
     endtask

@@ -7,12 +7,14 @@
  * Compile AFTER: axis_pkg, pcie_tl_pkg, xilinx_pcie_adapter_pkg, cosim_bridge_pkg.
  */
 `include "cosim_xrc_utils_pkg.sv"
+`include "cosim_table_pkg.sv"
 
 package cosim_xrc_pkg;
     import uvm_pkg::*;
     import pcie_tl_pkg::*;
     import xilinx_pcie_adapter_pkg::*;
     import cosim_bridge_pkg::*;
+    import cosim_table_pkg::*;
 `ifdef AIP_CORE_PKG_SV
     import aip_core_pkg::*;           // aip_cmd + aip_cmd_1i 宏(UCLI start_cosim 注册)
 `endif
@@ -31,7 +33,26 @@ package cosim_xrc_pkg;
     //   若你 env 还在用基类 pcie_tl_if_adapter(未接 xilinx),调 cosim_maybe_enable(1)。
     // -----------------------------------------------------------------------
     function automatic void cosim_maybe_enable(bit override_adapter = 0);
-        if (!$test$plusargs("COSIM")) return;   // 无 +COSIM:原样,不做任何 override
+        uvm_cmdline_processor command_line;
+        string arguments[$];
+        integer table_enable;
+        bit table_enabled;
+        bit cosim_enabled;
+
+        table_enabled = $value$plusargs("COSIM_TABLE_ENABLE=%d", table_enable) &&
+                        table_enable == 1;
+        command_line = uvm_cmdline_processor::get_inst();
+        command_line.get_args(arguments);
+        cosim_enabled = 1'b0;
+        foreach (arguments[i]) begin
+            if (arguments[i] == "+COSIM") begin
+                cosim_enabled = 1'b1;
+                break;
+            end
+        end
+        if (table_enabled && !cosim_enabled)
+            $fatal(1, "COSIM_TABLE_ENABLE=1 requires an exact +COSIM argument");
+        if (!cosim_enabled) return;   // 无精确 +COSIM:原样,不做任何 override
         if (override_adapter)
             pcie_tl_if_adapter::type_id::set_type_override(xilinx_pcie_if_adapter::get_type());
         pcie_tl_rc_driver::type_id::set_type_override(cosim_xrc_driver::get_type());

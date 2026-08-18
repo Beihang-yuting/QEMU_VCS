@@ -126,6 +126,14 @@ add_test(NAME test_cosim_table_service
          COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/../sv/run_test_cosim_table_service.sh)
 set_tests_properties(test_cosim_table_service PROPERTIES TIMEOUT 120)
 
+add_test(NAME test_cosim_table_runtime
+         COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/../sv/run_test_cosim_table_runtime.sh)
+set_tests_properties(test_cosim_table_runtime PROPERTIES TIMEOUT 300)
+
+add_test(NAME test_table_xrc_source_contract
+         COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/test_table_xrc_source_contract.sh)
+set_tests_properties(test_table_xrc_source_contract PROPERTIES TIMEOUT 10)
+
 add_test(NAME test_cosim_tag_map_order
          COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/test_cosim_tag_map_order.sh)
 set_tests_properties(test_cosim_tag_map_order PROPERTIES TIMEOUT 10)
