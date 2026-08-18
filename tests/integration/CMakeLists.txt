@@ -2,6 +2,15 @@ add_executable(test_sock_sync test_sock_sync.c)
 target_link_libraries(test_sock_sync cosim_bridge)
 add_test(NAME test_sock_sync COMMAND test_sock_sync)
 
+add_executable(test_table_roundtrip test_table_roundtrip.c)
+target_include_directories(test_table_roundtrip PRIVATE
+    ${CMAKE_SOURCE_DIR}/bridge/qemu
+    ${CMAKE_SOURCE_DIR}/bridge/table
+)
+target_link_libraries(test_table_roundtrip cosim_bridge_common pthread)
+add_test(NAME test_table_roundtrip COMMAND test_table_roundtrip)
+set_tests_properties(test_table_roundtrip PROPERTIES TIMEOUT 15)
+
 add_executable(test_bridge_loopback test_bridge_loopback.c)
 target_link_libraries(test_bridge_loopback cosim_bridge)
 add_test(NAME test_bridge_loopback COMMAND test_bridge_loopback)

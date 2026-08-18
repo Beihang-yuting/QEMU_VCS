@@ -10,6 +10,8 @@ add_library(cosim_bridge_common STATIC
     table/cosim_table_route.c
     table/cosim_table_transport.c
     table/cosim_table_transport_tcp.c
+    qemu/table_client.c
+    qemu/table_ctrl_core.c
 )
 target_include_directories(cosim_bridge_common PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/common

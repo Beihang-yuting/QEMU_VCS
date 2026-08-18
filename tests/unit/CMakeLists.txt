@@ -45,6 +45,15 @@ target_link_libraries(test_table_transport_tcp cosim_bridge_common pthread)
 add_test(NAME test_table_transport_tcp COMMAND test_table_transport_tcp)
 set_tests_properties(test_table_transport_tcp PROPERTIES TIMEOUT 15)
 
+add_executable(test_table_ctrl_core test_table_ctrl_core.c)
+target_include_directories(test_table_ctrl_core PRIVATE
+    ${CMAKE_SOURCE_DIR}/bridge/qemu
+    ${CMAKE_SOURCE_DIR}/bridge/table
+)
+target_link_libraries(test_table_ctrl_core cosim_bridge_common pthread)
+add_test(NAME test_table_ctrl_core COMMAND test_table_ctrl_core)
+set_tests_properties(test_table_ctrl_core PROPERTIES TIMEOUT 10)
+
 add_executable(test_bridge_wait_hooks test_bridge_wait_hooks.c)
 target_link_libraries(test_bridge_wait_hooks cosim_bridge pthread)
 add_test(NAME test_bridge_wait_hooks COMMAND test_bridge_wait_hooks)
