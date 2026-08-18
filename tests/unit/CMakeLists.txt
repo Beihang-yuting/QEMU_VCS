@@ -27,6 +27,10 @@ target_link_libraries(test_transport_tcp cosim_bridge_common cosim_bridge pthrea
 add_test(NAME test_transport_tcp COMMAND test_transport_tcp)
 set_tests_properties(test_transport_tcp PROPERTIES TIMEOUT 30)
 
+add_executable(test_table_protocol test_table_protocol.c)
+target_include_directories(test_table_protocol PRIVATE ${CMAKE_SOURCE_DIR}/bridge/table)
+add_test(NAME test_table_protocol COMMAND test_table_protocol)
+
 add_executable(test_bridge_wait_hooks test_bridge_wait_hooks.c)
 target_link_libraries(test_bridge_wait_hooks cosim_bridge pthread)
 add_test(NAME test_bridge_wait_hooks COMMAND test_bridge_wait_hooks)
