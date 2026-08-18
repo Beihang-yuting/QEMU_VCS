@@ -772,6 +772,80 @@ static void test_timeout_makes_client_terminal(void)
     wait_child_ok(child, TEST_TIMEOUT_MS);
 }
 
+static void raw_interrupted_transport_peer(uint16_t port, int report_fd)
+{
+    struct pollfd inbound;
+    uint8_t bytes[sizeof(cosim_table_frame_hdr_t)];
+    char report = 'N';
+    ssize_t received;
+    int fd = raw_connect(port);
+
+    raw_handshake(fd);
+    raw_publish_small_route(fd);
+    memset(&inbound, 0, sizeof(inbound));
+    inbound.fd = fd;
+    inbound.events = POLLIN;
+    CHECK(poll(&inbound, 1, TEST_TIMEOUT_MS) > 0);
+    received = recv(fd, bytes, sizeof(bytes), MSG_DONTWAIT);
+    CHECK(received <= 0);
+    CHECK(write(report_fd, &report, 1) == 1);
+    CHECK(close(fd) == 0);
+}
+
+static void test_interrupted_transport_is_target_gone_not_stale_timeout(void)
+{
+    const uint16_t port = reserve_available_port();
+    cosim_table_transport_cfg_t cfg;
+    cosim_table_transport_t *transport;
+    cosim_table_client_t *client;
+    cosim_table_read_dword_t request;
+    cosim_table_completion_t completion;
+    pid_t child;
+    int report_pipe[2];
+    char report;
+
+    memset(&cfg, 0, sizeof(cfg));
+    cfg.listen_addr = "127.0.0.1";
+    cfg.table_port_base = port - TEST_INSTANCE_ID;
+    cfg.instance_id = TEST_INSTANCE_ID;
+    cfg.rc_id = TEST_RC_ID;
+    cfg.is_server = 1;
+    cfg.connect_timeout_ms = TEST_TIMEOUT_MS;
+    transport = cosim_table_transport_create(&cfg);
+    CHECK(transport != NULL);
+    CHECK(pipe(report_pipe) == 0);
+    child = fork();
+    CHECK(child >= 0);
+    if (child == 0) {
+        CHECK(close(report_pipe[0]) == 0);
+        raw_interrupted_transport_peer(port, report_pipe[1]);
+        CHECK(close(report_pipe[1]) == 0);
+        _exit(0);
+    }
+    CHECK(close(report_pipe[1]) == 0);
+
+    client = cosim_table_client_create(transport, TEST_RC_ID);
+    CHECK(client != NULL);
+    CHECK(cosim_table_client_wait_routes(client, TEST_TIMEOUT_MS) == 0);
+    memset(&request, 0, sizeof(request));
+    request.target.rc_id = cosim_table_cpu_to_le16(TEST_RC_ID);
+    request.target.target_type = COSIM_TABLE_TARGET_PF;
+    request.bar_offset = cosim_table_cpu_to_le64(UINT64_C(0x1004));
+    cosim_table_transport_interrupt(transport);
+    errno = ETIMEDOUT;
+    CHECK(cosim_table_client_read_dword(client, &request, &completion,
+                                        TEST_TIMEOUT_MS) ==
+          COSIM_TABLE_ST_TARGET_GONE);
+    CHECK(completion.status == COSIM_TABLE_ST_TARGET_GONE);
+    CHECK(read(report_pipe[0], &report, 1) == 1);
+    CHECK(report == 'N');
+
+    CHECK(close(report_pipe[0]) == 0);
+    cosim_table_client_destroy(client);
+    cosim_table_transport_close(transport);
+    wait_child_ok(child, TEST_TIMEOUT_MS);
+}
+
 static void raw_drain_request(int fd, int is_write)
 {
     cosim_table_frame_hdr_t frame;
@@ -907,6 +981,7 @@ static void run_wire_case(const wire_case_spec_t *spec)
         request.bar_offset = cosim_table_cpu_to_le64(UINT64_C(0x1000));
         request.payload_bytes = cosim_table_cpu_to_le32(sizeof(payload));
         memset(payload, 0x5a, sizeof(payload));
+        errno = ETIMEDOUT;
         status = cosim_table_client_write(client, &request, payload,
                                           &completion, TEST_TIMEOUT_MS);
     } else {
@@ -915,6 +990,7 @@ static void run_wire_case(const wire_case_spec_t *spec)
         memset(&request, 0, sizeof(request));
         request.target = target;
         request.bar_offset = cosim_table_cpu_to_le64(UINT64_C(0x1004));
+        errno = ETIMEDOUT;
         status = cosim_table_client_read_dword(client, &request, &completion,
                                                TEST_TIMEOUT_MS);
     }
@@ -1079,6 +1155,7 @@ int main(void)
     test_singleton_route_with_large_stride();
     run_invalid_route_map_test(1);
     run_invalid_route_map_test(0);
+    test_interrupted_transport_is_target_gone_not_stale_timeout();
     test_timeout_makes_client_terminal();
     test_semantic_roundtrip();
     test_wire_completion_validation_matrix();

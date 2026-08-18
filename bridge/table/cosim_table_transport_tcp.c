@@ -126,10 +126,16 @@ static int wait_fd(int fd, short events, const table_deadline_t *deadline)
                 continue;
             return -1;
         }
+        if ((descriptor.revents & POLLNVAL) != 0) {
+            errno = EBADF;
+            return -1;
+        }
         if ((descriptor.revents & events) != 0)
             return 0;
-        if ((descriptor.revents & (POLLERR | POLLHUP | POLLNVAL)) != 0)
+        if ((descriptor.revents & (POLLERR | POLLHUP)) != 0) {
+            errno = ECONNRESET;
             return -1;
+        }
     }
 }
 
@@ -157,8 +163,10 @@ static int send_exact(int fd, const void *buffer, size_t bytes,
                 continue;
             return -1;
         }
-        if (result == 0)
+        if (result == 0) {
+            errno = EPIPE;
             return -1;
+        }
         sent += (size_t)result;
     }
     return 0;
@@ -220,8 +228,10 @@ static int recv_exact(int fd, void *buffer, size_t bytes,
         int ready = wait_fd(fd, POLLIN, deadline);
         ssize_t result;
 
-        if (ready == 1)
+        if (ready == 1) {
+            errno = ETIMEDOUT;
             return allow_clean_timeout && received == 0 ? 1 : -1;
+        }
         if (ready < 0)
             return -1;
         result = recv(fd, cursor + received, bytes - received, MSG_DONTWAIT);
@@ -230,8 +240,10 @@ static int recv_exact(int fd, void *buffer, size_t bytes,
                 continue;
             return -1;
         }
-        if (result == 0)
+        if (result == 0) {
+            errno = ECONNRESET;
             return -1;
+        }
         received += (size_t)result;
     }
     return 0;
@@ -267,8 +279,10 @@ static int open_listener(const char *listen_addr, uint16_t port)
     hints.ai_protocol = IPPROTO_TCP;
     hints.ai_flags = AI_PASSIVE;
     (void)snprintf(service, sizeof(service), "%u", (unsigned int)port);
-    if (getaddrinfo(listen_addr, service, &hints, &addresses) != 0)
+    if (getaddrinfo(listen_addr, service, &hints, &addresses) != 0) {
+        errno = EADDRNOTAVAIL;
         return -1;
+    }
     for (address = addresses; address != NULL; address = address->ai_next) {
         int one = 1;
 
@@ -280,13 +294,22 @@ static int open_listener(const char *listen_addr, uint16_t port)
                        &one, sizeof(one)) != 0 ||
             bind(listener, address->ai_addr, address->ai_addrlen) != 0 ||
             listen(listener, 1) != 0 || set_nonblocking(listener) != 0) {
+            int saved_errno = errno;
+
             (void)close(listener);
+            errno = saved_errno;
             listener = -1;
             continue;
         }
         break;
     }
-    freeaddrinfo(addresses);
+    {
+        int saved_errno = errno;
+
+        freeaddrinfo(addresses);
+        if (listener < 0)
+            errno = saved_errno != 0 ? saved_errno : EADDRINUSE;
+    }
     return listener;
 }
 
@@ -298,8 +321,11 @@ static int accept_connection(int listener, const table_deadline_t *deadline,
         int connection;
         int ready = wait_fd(listener, POLLIN, deadline);
 
-        if (ready != 0)
+        if (ready != 0) {
+            if (ready == 1)
+                errno = ETIMEDOUT;
             return ready;
+        }
         connection = accept(listener, NULL, NULL);
         if (connection >= 0) {
             *accepted_fd = connection;
@@ -323,12 +349,18 @@ static int try_connect_address(const struct addrinfo *address,
     if (connection < 0)
         return -1;
     if (set_nonblocking(connection) != 0) {
+        int saved_errno = errno;
+
         (void)close(connection);
+        errno = saved_errno;
         return -1;
     }
     result = connect(connection, address->ai_addr, address->ai_addrlen);
     if (result != 0 && errno != EINPROGRESS && errno != EINTR) {
+        int saved_errno = errno;
+
         (void)close(connection);
+        errno = saved_errno;
         return -1;
     }
     if (result != 0) {
@@ -337,7 +369,12 @@ static int try_connect_address(const struct addrinfo *address,
             getsockopt(connection, SOL_SOCKET, SO_ERROR,
                        &socket_error, &error_bytes) != 0 ||
             socket_error != 0) {
+            int saved_errno = result == 1 ? ETIMEDOUT : errno;
+
+            if (result == 0 && socket_error != 0)
+                saved_errno = socket_error;
             (void)close(connection);
+            errno = saved_errno != 0 ? saved_errno : ECONNREFUSED;
             return -1;
         }
     }
@@ -357,8 +394,10 @@ static int connect_host(const char *remote_host, uint16_t port,
     hints.ai_socktype = SOCK_STREAM;
     hints.ai_protocol = IPPROTO_TCP;
     (void)snprintf(service, sizeof(service), "%u", (unsigned int)port);
-    if (getaddrinfo(remote_host, service, &hints, &addresses) != 0)
+    if (getaddrinfo(remote_host, service, &hints, &addresses) != 0) {
+        errno = EHOSTUNREACH;
         return -1;
+    }
 
     while (deadline_remaining_ms(deadline) > 0 && connection < 0) {
         struct addrinfo *address;
@@ -377,7 +416,18 @@ static int connect_host(const char *remote_host, uint16_t port,
                 (void)poll(NULL, 0, pause_ms);
         }
     }
-    freeaddrinfo(addresses);
+    {
+        int saved_errno = errno;
+
+        freeaddrinfo(addresses);
+        if (connection < 0) {
+            int remaining = deadline_remaining_ms(deadline);
+
+            errno = remaining == 0 ? ETIMEDOUT
+                                   : saved_errno != 0 ? saved_errno
+                                                      : ECONNREFUSED;
+        }
+    }
     return connection;
 }
 
@@ -401,8 +451,10 @@ static int perform_handshake(int fd, uint16_t rc_id, uint32_t instance_id,
         cosim_table_le16_to_cpu(inbound.version) != TABLE_HANDSHAKE_VERSION ||
         cosim_table_le16_to_cpu(inbound.rc_id) != rc_id ||
         cosim_table_le32_to_cpu(inbound.instance_id) != instance_id ||
-        inbound.reserved != 0)
+        inbound.reserved != 0) {
+        errno = EPROTO;
         return -1;
+    }
     return 0;
 }
 
@@ -455,21 +507,30 @@ static int validate_frame(const cosim_table_frame_hdr_t *frame,
     cosim_u16 type;
     cosim_u32 expected;
 
-    if (frame == NULL ||
-        cosim_table_le32_to_cpu(frame->magic) != COSIM_TABLE_MAGIC ||
+    if (frame == NULL) {
+        errno = EINVAL;
+        return -1;
+    }
+    if (cosim_table_le32_to_cpu(frame->magic) != COSIM_TABLE_MAGIC ||
         cosim_table_le16_to_cpu(frame->version) !=
             COSIM_TABLE_PROTOCOL_VERSION ||
-        cosim_table_le64_to_cpu(frame->transaction_id) == 0)
+        cosim_table_le64_to_cpu(frame->transaction_id) == 0) {
+        errno = EPROTO;
         return -1;
+    }
     type = cosim_table_le16_to_cpu(frame->type);
     *header_bytes = cosim_table_le32_to_cpu(frame->header_bytes);
     *payload_bytes = cosim_table_le32_to_cpu(frame->payload_bytes);
     if (expected_header_bytes(type, &expected) != 0 ||
         *header_bytes != expected ||
-        *payload_bytes > COSIM_TABLE_FRAME_DATA_BYTES)
+        *payload_bytes > COSIM_TABLE_FRAME_DATA_BYTES) {
+        errno = EPROTO;
         return -1;
-    if (type != COSIM_TABLE_MSG_WRITE_DATA && *payload_bytes != 0)
+    }
+    if (type != COSIM_TABLE_MSG_WRITE_DATA && *payload_bytes != 0) {
+        errno = EPROTO;
         return -1;
+    }
     return 0;
 }
 
@@ -502,52 +563,80 @@ static int operation_begin(table_tcp_backend_t *backend, int *fd)
     int listener_to_close = -1;
     int accept_result = -1;
     int handshake_result;
+    int operation_errno = 0;
     int retryable_connection_error = 0;
+    int result;
 
-    if (pthread_mutex_lock(&backend->state_lock) != 0)
+    result = pthread_mutex_lock(&backend->state_lock);
+    if (result != 0) {
+        errno = result;
         return -1;
+    }
     if (backend->closing || backend->fatal) {
+        errno = ESHUTDOWN;
         (void)pthread_mutex_unlock(&backend->state_lock);
         return -1;
     }
     ++backend->active_operations;
 
-    while (backend->connecting && !backend->closing && !backend->fatal)
-        (void)pthread_cond_wait(&backend->idle, &backend->state_lock);
-    if (backend->closing || backend->fatal)
+    while (backend->connecting && !backend->closing && !backend->fatal) {
+        result = pthread_cond_wait(&backend->idle, &backend->state_lock);
+        if (result != 0) {
+            errno = result;
+            goto fail_locked;
+        }
+    }
+    if (backend->closing || backend->fatal) {
+        errno = ESHUTDOWN;
         goto fail_locked;
+    }
     if (backend->connection_fd >= 0) {
         *fd = backend->connection_fd;
         (void)pthread_mutex_unlock(&backend->state_lock);
         return 0;
     }
-    if (!backend->is_server || backend->listener_fd < 0)
+    if (!backend->is_server || backend->listener_fd < 0) {
+        errno = ENOTCONN;
         goto fail_locked;
+    }
 
     backend->connecting = 1;
     listener_fd = backend->listener_fd;
     (void)pthread_mutex_unlock(&backend->state_lock);
 
-    if (deadline_init(&deadline, backend->connect_timeout_ms) == 0)
+    if (deadline_init(&deadline, backend->connect_timeout_ms) == 0) {
         accept_result = accept_connection(listener_fd, &deadline,
                                           &accepted_fd);
+        operation_errno = errno;
+    } else {
+        operation_errno = errno;
+    }
     if (accept_result == 0 &&
         (set_nonblocking(accepted_fd) != 0 ||
          set_connection_options(accepted_fd) != 0)) {
+        operation_errno = errno;
         (void)close(accepted_fd);
         accepted_fd = -1;
         retryable_connection_error = 1;
     }
 
-    (void)pthread_mutex_lock(&backend->state_lock);
+    result = pthread_mutex_lock(&backend->state_lock);
+    if (result != 0) {
+        if (accepted_fd >= 0)
+            (void)close(accepted_fd);
+        errno = result;
+        return -1;
+    }
     if (backend->closing || backend->fatal) {
         if (accepted_fd >= 0)
             (void)close(accepted_fd);
         backend->connecting = 0;
+        errno = ESHUTDOWN;
         goto fail_locked;
     }
     if (accept_result != 0 || retryable_connection_error) {
         int operation_result = accept_result == 1 ? 1 : -1;
+        int return_errno = accept_result == 1 ? ETIMEDOUT : operation_errno;
 
         backend->connecting = 0;
         if (accept_result < 0 && !retryable_connection_error) {
@@ -556,6 +645,7 @@ static int operation_begin(table_tcp_backend_t *backend, int *fd)
         }
         operation_end_locked(backend);
         (void)pthread_mutex_unlock(&backend->state_lock);
+        errno = return_errno != 0 ? return_errno : ECONNABORTED;
         return operation_result;
     }
     backend->connection_fd = accepted_fd;
@@ -564,9 +654,19 @@ static int operation_begin(table_tcp_backend_t *backend, int *fd)
     handshake_result = perform_handshake(accepted_fd, backend->rc_id,
                                          backend->instance_id,
                                          backend->connect_timeout_ms);
+    operation_errno = errno;
 
-    (void)pthread_mutex_lock(&backend->state_lock);
+    result = pthread_mutex_lock(&backend->state_lock);
+    if (result != 0) {
+        (void)shutdown(accepted_fd, SHUT_RDWR);
+        (void)close(accepted_fd);
+        errno = result;
+        return -1;
+    }
     if (handshake_result != 0 || backend->closing || backend->fatal) {
+        int return_errno = backend->closing || backend->fatal
+            ? ESHUTDOWN : operation_errno;
+
         if (backend->connection_fd == accepted_fd)
             backend->connection_fd = -1;
         (void)shutdown(accepted_fd, SHUT_RDWR);
@@ -574,6 +674,7 @@ static int operation_begin(table_tcp_backend_t *backend, int *fd)
         operation_end_locked(backend);
         (void)pthread_mutex_unlock(&backend->state_lock);
         (void)close(accepted_fd);
+        errno = return_errno != 0 ? return_errno : EPROTO;
         return -1;
     }
     listener_to_close = backend->listener_fd;
@@ -587,14 +688,22 @@ static int operation_begin(table_tcp_backend_t *backend, int *fd)
     return 0;
 
 fail_locked:
+    operation_errno = errno;
     operation_end_locked(backend);
     (void)pthread_mutex_unlock(&backend->state_lock);
+    errno = operation_errno;
     return -1;
 }
 
 static void mark_fatal(table_tcp_backend_t *backend)
 {
-    (void)pthread_mutex_lock(&backend->state_lock);
+    int saved_errno = errno;
+    int result = pthread_mutex_lock(&backend->state_lock);
+
+    if (result != 0) {
+        errno = saved_errno;
+        return;
+    }
     backend->fatal = 1;
     if (backend->connection_fd >= 0)
         (void)shutdown(backend->connection_fd, SHUT_RDWR);
@@ -602,6 +711,47 @@ static void mark_fatal(table_tcp_backend_t *backend)
         (void)shutdown(backend->listener_fd, SHUT_RDWR);
     (void)pthread_cond_broadcast(&backend->idle);
     (void)pthread_mutex_unlock(&backend->state_lock);
+    errno = saved_errno;
+}
+
+/* Call only while send_lock is held.  Lock order is send_lock -> state_lock. */
+static int publish_send_failure(table_tcp_backend_t *backend, int fd,
+                                int failure_errno)
+{
+    int result = pthread_mutex_lock(&backend->state_lock);
+
+    if (result != 0)
+        return result;
+    if (backend->closing || backend->fatal || backend->connection_fd != fd)
+        failure_errno = ESHUTDOWN;
+    backend->fatal = 1;
+    if (backend->connection_fd >= 0)
+        (void)shutdown(backend->connection_fd, SHUT_RDWR);
+    if (backend->listener_fd >= 0)
+        (void)shutdown(backend->listener_fd, SHUT_RDWR);
+    (void)pthread_cond_broadcast(&backend->idle);
+    (void)pthread_mutex_unlock(&backend->state_lock);
+    return failure_errno;
+}
+
+/* Call only while send_lock is held.  Lock order is send_lock -> state_lock. */
+static int send_connection_active(table_tcp_backend_t *backend, int fd)
+{
+    int result = pthread_mutex_lock(&backend->state_lock);
+    int active;
+
+    if (result != 0) {
+        errno = result;
+        return -1;
+    }
+    active = !backend->closing && !backend->fatal &&
+             backend->connection_fd == fd;
+    (void)pthread_mutex_unlock(&backend->state_lock);
+    if (!active) {
+        errno = ESHUTDOWN;
+        return -1;
+    }
+    return 0;
 }
 
 static void destroy_unopened_backend(table_tcp_backend_t *backend)
@@ -625,11 +775,15 @@ void *cosim_table_transport_tcp_open(const cosim_table_transport_cfg_t *cfg)
     int timeout_ms;
 
     if (cfg == NULL || (cfg->is_server != 0 && cfg->is_server != 1) ||
-        cfg->table_port_base == 0)
+        cfg->table_port_base == 0) {
+        errno = EINVAL;
         return NULL;
+    }
     port = (uint64_t)cfg->table_port_base + (uint64_t)cfg->instance_id;
-    if (port > UINT16_MAX)
+    if (port > UINT16_MAX) {
+        errno = EOVERFLOW;
         return NULL;
+    }
     timeout_ms = cfg->connect_timeout_ms > 0
         ? cfg->connect_timeout_ms : TABLE_DEFAULT_CONNECT_TIMEOUT_MS;
 
@@ -642,20 +796,35 @@ void *cosim_table_transport_tcp_open(const cosim_table_transport_cfg_t *cfg)
     backend->connect_timeout_ms = timeout_ms;
     backend->rc_id = cfg->rc_id;
     backend->instance_id = cfg->instance_id;
-    if (pthread_mutex_init(&backend->state_lock, NULL) != 0) {
-        free(backend);
-        return NULL;
+    {
+        int result = pthread_mutex_init(&backend->state_lock, NULL);
+
+        if (result != 0) {
+            errno = result;
+            free(backend);
+            return NULL;
+        }
     }
-    if (pthread_mutex_init(&backend->send_lock, NULL) != 0) {
-        (void)pthread_mutex_destroy(&backend->state_lock);
-        free(backend);
-        return NULL;
+    {
+        int result = pthread_mutex_init(&backend->send_lock, NULL);
+
+        if (result != 0) {
+            errno = result;
+            (void)pthread_mutex_destroy(&backend->state_lock);
+            free(backend);
+            return NULL;
+        }
     }
-    if (pthread_cond_init(&backend->idle, NULL) != 0) {
-        (void)pthread_mutex_destroy(&backend->send_lock);
-        (void)pthread_mutex_destroy(&backend->state_lock);
-        free(backend);
-        return NULL;
+    {
+        int result = pthread_cond_init(&backend->idle, NULL);
+
+        if (result != 0) {
+            errno = result;
+            (void)pthread_mutex_destroy(&backend->send_lock);
+            (void)pthread_mutex_destroy(&backend->state_lock);
+            free(backend);
+            return NULL;
+        }
     }
 
     if (cfg->is_server) {
@@ -663,7 +832,10 @@ void *cosim_table_transport_tcp_open(const cosim_table_transport_cfg_t *cfg)
             ? cfg->listen_addr : "0.0.0.0";
         backend->listener_fd = open_listener(host, (uint16_t)port);
         if (backend->listener_fd < 0) {
+            int saved_errno = errno;
+
             destroy_unopened_backend(backend);
+            errno = saved_errno;
             return NULL;
         }
         return backend;
@@ -680,7 +852,10 @@ void *cosim_table_transport_tcp_open(const cosim_table_transport_cfg_t *cfg)
         set_connection_options(backend->connection_fd) != 0 ||
         perform_handshake(backend->connection_fd, cfg->rc_id,
                           cfg->instance_id, timeout_ms) != 0) {
+        int saved_errno = errno;
+
         destroy_unopened_backend(backend);
+        errno = saved_errno != 0 ? saved_errno : ECONNREFUSED;
         return NULL;
     }
     return backend;
@@ -699,29 +874,42 @@ int cosim_table_transport_tcp_send(void *opaque,
     int result = -1;
     int saved_errno = 0;
 
-    if (backend == NULL ||
-        validate_frame(frame, &header_bytes, &payload_bytes) != 0 ||
-        (header_bytes != 0 && header == NULL) ||
-        (payload_bytes != 0 && payload == NULL) ||
-        deadline_init(&deadline, timeout_ms) != 0 ||
-        operation_begin(backend, &fd) != 0)
+    if (backend == NULL || frame == NULL) {
+        errno = EINVAL;
         return -1;
+    }
+    if (validate_frame(frame, &header_bytes, &payload_bytes) != 0)
+        return -1;
+    if ((header_bytes != 0 && header == NULL) ||
+        (payload_bytes != 0 && payload == NULL)) {
+        errno = EINVAL;
+        return -1;
+    }
+    if (deadline_init(&deadline, timeout_ms) != 0)
+        return -1;
+    result = operation_begin(backend, &fd);
+    if (result != 0) {
+        if (result == 1)
+            errno = ETIMEDOUT;
+        return -1;
+    }
+    result = -1;
 
     if (lock_send_before_deadline(&backend->send_lock, &deadline) == 0) {
-        if (send_exact(fd, frame, sizeof(*frame), &deadline) == 0 &&
+        if (send_connection_active(backend, fd) == 0 &&
+            send_exact(fd, frame, sizeof(*frame), &deadline) == 0 &&
             (header_bytes == 0 ||
              send_exact(fd, header, header_bytes, &deadline) == 0) &&
             (payload_bytes == 0 ||
              send_exact(fd, payload, payload_bytes, &deadline) == 0))
             result = 0;
         if (result != 0)
-            saved_errno = errno;
+            saved_errno = publish_send_failure(backend, fd, errno);
         (void)pthread_mutex_unlock(&backend->send_lock);
     } else {
         saved_errno = errno;
-    }
-    if (result != 0)
         mark_fatal(backend);
+    }
     operation_end(backend);
     if (result != 0)
         errno = saved_errno;
@@ -746,8 +934,11 @@ int cosim_table_transport_tcp_recv(void *opaque,
 
     if (backend == NULL || frame == NULL ||
         (header_capacity != 0 && header == NULL) ||
-        (payload_capacity != 0 && payload == NULL) ||
-        deadline_init(&deadline, timeout_ms) != 0)
+        (payload_capacity != 0 && payload == NULL)) {
+        errno = EINVAL;
+        return -1;
+    }
+    if (deadline_init(&deadline, timeout_ms) != 0)
         return -1;
 
     result = operation_begin(backend, &fd);
@@ -759,12 +950,16 @@ int cosim_table_transport_tcp_recv(void *opaque,
         operation_end(backend);
         return 1;
     }
-    if (result != 0 ||
-        validate_frame(&local_frame, &header_bytes, &payload_bytes) != 0 ||
-        header_bytes > header_capacity || payload_bytes > payload_capacity ||
-        (header_bytes != 0 && header == NULL) ||
-        (payload_bytes != 0 && payload == NULL))
+    if (result != 0)
         goto fatal;
+    if (validate_frame(&local_frame, &header_bytes, &payload_bytes) != 0)
+        goto fatal;
+    if (header_bytes > header_capacity || payload_bytes > payload_capacity ||
+        (header_bytes != 0 && header == NULL) ||
+        (payload_bytes != 0 && payload == NULL)) {
+        errno = EMSGSIZE;
+        goto fatal;
+    }
 
     if (header_bytes != 0) {
         local_header = malloc(header_bytes);
@@ -790,10 +985,15 @@ int cosim_table_transport_tcp_recv(void *opaque,
     return 0;
 
 fatal:
-    free(local_header);
-    free(local_payload);
-    mark_fatal(backend);
-    operation_end(backend);
+    {
+        int saved_errno = errno;
+
+        free(local_header);
+        free(local_payload);
+        mark_fatal(backend);
+        operation_end(backend);
+        errno = saved_errno;
+    }
     return -1;
 }
 

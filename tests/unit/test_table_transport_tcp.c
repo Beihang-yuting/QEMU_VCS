@@ -6,11 +6,13 @@
 #include <poll.h>
 #include <pthread.h>
 #include <signal.h>
+#include <stdatomic.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
+#include <sys/syscall.h>
 #include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
@@ -30,6 +32,32 @@ enum {
     TEST_PAYLOAD_BYTES = 150000,
     TEST_TIMEOUT_MS = 3000,
 };
+
+static atomic_int suppress_shutdown;
+static atomic_int inject_readable_hangup;
+
+int shutdown(int fd, int how)
+{
+    if (atomic_load_explicit(&suppress_shutdown, memory_order_acquire))
+        return 0;
+    return (int)syscall(SYS_shutdown, fd, how);
+}
+
+int poll(struct pollfd *fds, nfds_t nfds, int timeout)
+{
+    int result = (int)syscall(SYS_poll, fds, nfds, timeout);
+    nfds_t i;
+
+    if (result > 0 &&
+        atomic_load_explicit(&inject_readable_hangup,
+                             memory_order_acquire)) {
+        for (i = 0; i < nfds; i++) {
+            if ((fds[i].revents & POLLIN) != 0)
+                fds[i].revents |= POLLHUP;
+        }
+    }
+    return result;
+}
 
 static uint64_t monotonic_ms(void)
 {
@@ -319,7 +347,9 @@ static void test_rejects_port_overflow(void)
     cfg.rc_id = TEST_RC_ID;
     cfg.is_server = 1;
     cfg.connect_timeout_ms = 10;
+    errno = ETIMEDOUT;
     CHECK(cosim_table_transport_create(&cfg) == NULL);
+    CHECK(errno == EOVERFLOW);
 }
 
 typedef struct {
@@ -470,6 +500,8 @@ static void test_interrupts_connected_blocking_receive(void)
     cosim_table_transport_t *server;
     cosim_table_transport_t *client;
     blocking_recv_ctx_t recv_ctx;
+    cosim_table_frame_hdr_t frame;
+    cosim_table_hello_t hello;
     pthread_t recv_thread;
 
     server = cosim_table_transport_create(&server_cfg);
@@ -482,6 +514,11 @@ static void test_interrupts_connected_blocking_receive(void)
 
     require_recv_is_blocked(&recv_ctx);
     interrupt_and_join(server, &recv_ctx, recv_thread);
+    memset(&hello, 0, sizeof(hello));
+    frame = make_frame(COSIM_TABLE_MSG_HELLO, sizeof(hello), 0, 1);
+    errno = ETIMEDOUT;
+    CHECK(cosim_table_send(server, &frame, &hello, NULL, 100) == -1);
+    CHECK(errno == ESHUTDOWN);
     blocking_recv_ctx_destroy(&recv_ctx);
     cosim_table_transport_close(client);
     cosim_table_transport_close(server);
@@ -506,8 +543,10 @@ static void test_accept_timeout_then_late_client_roundtrip(void)
 
     server = cosim_table_transport_create(&server_cfg);
     CHECK(server != NULL);
+    errno = EIO;
     CHECK(cosim_table_recv(server, &frame, header, sizeof(header),
                            payload, sizeof(payload), 1000) == 1);
+    CHECK(errno == ETIMEDOUT);
 
     blocking_recv_ctx_init(&recv_ctx, server);
     CHECK(pthread_create(&recv_thread, NULL,
@@ -583,8 +622,10 @@ static void test_rejects_mismatched_rc_identity(void)
     client_cfg.instance_id = TEST_INSTANCE_ID;
     client_cfg.rc_id = TEST_RC_ID + 1;
     client_cfg.connect_timeout_ms = 1000;
+    errno = ETIMEDOUT;
     client = cosim_table_transport_create(&client_cfg);
     CHECK(client == NULL);
+    CHECK(errno == EPROTO);
 
     wait_child_ok(child, 2000);
 }
@@ -639,6 +680,17 @@ static void fill_connection_send_buffer(uint16_t port)
         CHECK(errno == EAGAIN || errno == EWOULDBLOCK);
         return;
     }
+}
+
+static void saturate_connection_send_buffer(uint16_t port)
+{
+    unsigned int round;
+
+    for (round = 0; round < 8; round++) {
+        fill_connection_send_buffer(port);
+        (void)poll(NULL, 0, 20);
+    }
+    fill_connection_send_buffer(port);
 }
 
 static void backpressure_server_main(const cosim_table_transport_cfg_t *cfg,
@@ -704,6 +756,17 @@ static void test_send_timeout_reports_etimedout(void)
     set_connection_buffer(port, 1, SO_SNDBUF);
     memset(&hello, 0, sizeof(hello));
     frame = make_frame(COSIM_TABLE_MSG_HELLO, sizeof(hello), 0, 1);
+    errno = ETIMEDOUT;
+    CHECK(cosim_table_send(NULL, &frame, &hello, NULL, 100) == -1);
+    CHECK(errno == EINVAL);
+    frame.magic = 0;
+    errno = ETIMEDOUT;
+    CHECK(cosim_table_send(client, &frame, &hello, NULL, 100) == -1);
+    CHECK(errno == EPROTO);
+    frame = make_frame(COSIM_TABLE_MSG_HELLO, sizeof(hello), 0, 1);
+    errno = ETIMEDOUT;
+    CHECK(cosim_table_send(client, &frame, NULL, NULL, 100) == -1);
+    CHECK(errno == EINVAL);
     CHECK(cosim_table_send(client, &frame, &hello, NULL,
                            TEST_TIMEOUT_MS) == 0);
     CHECK(read(ready_pipe[0], &marker, 1) == 1);
@@ -728,7 +791,9 @@ static void test_send_timeout_reports_etimedout(void)
     CHECK(monotonic_ms() - started_ms < 2000);
     frame = make_frame(COSIM_TABLE_MSG_HELLO, sizeof(hello), 0,
                        UINT64_C(0xffff));
+    errno = ETIMEDOUT;
     CHECK(cosim_table_send(client, &frame, &hello, NULL, 100) == -1);
+    CHECK(errno == ESHUTDOWN);
 
     marker = 'D';
     CHECK(write(release_pipe[1], &marker, 1) == 1);
@@ -749,6 +814,7 @@ typedef struct {
     int finished;
     int result;
     int saved_errno;
+    int timeout_ms;
 } blocking_send_ctx_t;
 
 static void *blocking_send_main(void *opaque)
@@ -762,7 +828,7 @@ static void *blocking_send_main(void *opaque)
 
     errno = 0;
     ctx->result = cosim_table_send(ctx->transport, &ctx->frame, &ctx->header,
-                                   ctx->payload, 1000);
+                                   ctx->payload, ctx->timeout_ms);
     ctx->saved_errno = errno;
 
     CHECK(pthread_mutex_lock(&ctx->lock) == 0);
@@ -848,6 +914,7 @@ static void test_send_lock_wait_obeys_deadline(void)
                                 sizeof(data_header), sizeof(payload), 2);
     send_ctx.header = data_header;
     send_ctx.payload = payload;
+    send_ctx.timeout_ms = 1000;
     CHECK(pthread_mutex_init(&send_ctx.lock, NULL) == 0);
     CHECK(pthread_cond_init(&send_ctx.condition, NULL) == 0);
     CHECK(pthread_create(&send_thread, NULL, blocking_send_main,
@@ -867,6 +934,7 @@ static void test_send_lock_wait_obeys_deadline(void)
     join_deadline = realtime_after_ms(2000);
     CHECK(pthread_timedjoin_np(send_thread, NULL, &join_deadline) == 0);
     CHECK(send_ctx.result == -1);
+    CHECK(send_ctx.saved_errno == ESHUTDOWN);
     CHECK(pthread_cond_destroy(&send_ctx.condition) == 0);
     CHECK(pthread_mutex_destroy(&send_ctx.lock) == 0);
 
@@ -878,8 +946,273 @@ static void test_send_lock_wait_obeys_deadline(void)
     wait_child_ok(child, TEST_TIMEOUT_MS);
 }
 
+static void draining_server_main(const cosim_table_transport_cfg_t *cfg,
+                                 uint16_t port, int ready_fd, int control_fd)
+{
+    cosim_table_transport_t *transport;
+    cosim_table_frame_hdr_t frame;
+    cosim_table_hello_t hello;
+    struct pollfd descriptors[2];
+    uint8_t bytes[4096];
+    char marker = 'R';
+    int connection_fd;
+    int done = 0;
+
+    transport = cosim_table_transport_create(cfg);
+    CHECK(transport != NULL);
+    CHECK(cosim_table_recv(transport, &frame, &hello, sizeof(hello), NULL, 0,
+                           TEST_TIMEOUT_MS) == 0);
+    set_connection_buffer(port, 0, SO_RCVBUF);
+    connection_fd = find_connection_fd(port, 0);
+    CHECK(connection_fd >= 0);
+    CHECK(write(ready_fd, &marker, 1) == 1);
+    CHECK(read(control_fd, &marker, 1) == 1);
+    CHECK(marker == 'G');
+
+    memset(descriptors, 0, sizeof(descriptors));
+    descriptors[0].fd = connection_fd;
+    descriptors[0].events = POLLIN;
+    descriptors[1].fd = control_fd;
+    descriptors[1].events = POLLIN;
+    while (!done) {
+        int poll_result = poll(descriptors, 2, TEST_TIMEOUT_MS);
+
+        CHECK(poll_result > 0);
+        if ((descriptors[1].revents & POLLIN) != 0) {
+            CHECK(read(control_fd, &marker, 1) == 1);
+            CHECK(marker == 'D');
+            done = 1;
+        }
+        if (!done && (descriptors[0].revents & POLLIN) != 0) {
+            ssize_t received;
+
+            do {
+                received = recv(connection_fd, bytes, sizeof(bytes),
+                                MSG_DONTWAIT);
+            } while (received > 0);
+            CHECK(received < 0 &&
+                  (errno == EAGAIN || errno == EWOULDBLOCK));
+        }
+    }
+    cosim_table_transport_close(transport);
+}
+
+static void test_queued_sender_cannot_write_after_send_failure(void)
+{
+    const uint16_t port = reserve_available_port();
+    cosim_table_transport_cfg_t server_cfg =
+        make_server_cfg(port, TEST_TIMEOUT_MS);
+    cosim_table_transport_cfg_t client_cfg =
+        make_client_cfg(port, TEST_TIMEOUT_MS);
+    cosim_table_transport_t *client;
+    cosim_table_frame_hdr_t frame;
+    cosim_table_hello_t hello;
+    cosim_table_write_data_t data_header;
+    blocking_send_ctx_t first;
+    blocking_send_ctx_t second;
+    uint8_t payload[COSIM_TABLE_FRAME_DATA_BYTES];
+    struct timespec join_deadline;
+    pthread_t first_thread;
+    pthread_t second_thread;
+    pid_t child;
+    int ready_pipe[2];
+    int control_pipe[2];
+    char marker;
+
+    CHECK(pipe(ready_pipe) == 0);
+    CHECK(pipe(control_pipe) == 0);
+    child = fork();
+    CHECK(child >= 0);
+    if (child == 0) {
+        CHECK(close(ready_pipe[0]) == 0);
+        CHECK(close(control_pipe[1]) == 0);
+        draining_server_main(&server_cfg, port, ready_pipe[1],
+                             control_pipe[0]);
+        CHECK(close(ready_pipe[1]) == 0);
+        CHECK(close(control_pipe[0]) == 0);
+        _exit(0);
+    }
+    CHECK(close(ready_pipe[1]) == 0);
+    CHECK(close(control_pipe[0]) == 0);
+
+    client = cosim_table_transport_create(&client_cfg);
+    CHECK(client != NULL);
+    set_connection_buffer(port, 1, SO_SNDBUF);
+    memset(&hello, 0, sizeof(hello));
+    frame = make_frame(COSIM_TABLE_MSG_HELLO, sizeof(hello), 0, 1);
+    CHECK(cosim_table_send(client, &frame, &hello, NULL,
+                           TEST_TIMEOUT_MS) == 0);
+    CHECK(read(ready_pipe[0], &marker, 1) == 1);
+    CHECK(marker == 'R');
+    saturate_connection_send_buffer(port);
+
+    memset(payload, 0x6d, sizeof(payload));
+    memset(&data_header, 0, sizeof(data_header));
+    data_header.data_bytes = cosim_table_cpu_to_le32(sizeof(payload));
+    memset(&first, 0, sizeof(first));
+    first.transport = client;
+    first.frame = make_frame(COSIM_TABLE_MSG_WRITE_DATA, sizeof(data_header),
+                             sizeof(payload), 2);
+    first.header = data_header;
+    first.payload = payload;
+    first.timeout_ms = 1000;
+    CHECK(pthread_mutex_init(&first.lock, NULL) == 0);
+    CHECK(pthread_cond_init(&first.condition, NULL) == 0);
+
+    memset(&second, 0, sizeof(second));
+    second.transport = client;
+    second.frame = make_frame(COSIM_TABLE_MSG_WRITE_END,
+                              sizeof(cosim_table_write_end_t), 0, 3);
+    second.header = data_header;
+    second.payload = payload;
+    second.timeout_ms = TEST_TIMEOUT_MS;
+    CHECK(pthread_mutex_init(&second.lock, NULL) == 0);
+    CHECK(pthread_cond_init(&second.condition, NULL) == 0);
+
+    atomic_store_explicit(&suppress_shutdown, 1, memory_order_release);
+    CHECK(pthread_create(&first_thread, NULL, blocking_send_main, &first) == 0);
+    require_send_is_blocked(&first);
+    CHECK(pthread_create(&second_thread, NULL, blocking_send_main,
+                         &second) == 0);
+    require_send_is_blocked(&second);
+
+    join_deadline = realtime_after_ms(2000);
+    CHECK(pthread_timedjoin_np(first_thread, NULL, &join_deadline) == 0);
+    CHECK(first.result == -1);
+    CHECK(first.saved_errno == ETIMEDOUT);
+    marker = 'G';
+    CHECK(write(control_pipe[1], &marker, 1) == 1);
+    join_deadline = realtime_after_ms(2000);
+    CHECK(pthread_timedjoin_np(second_thread, NULL, &join_deadline) == 0);
+    CHECK(second.result == -1);
+    CHECK(second.saved_errno == ESHUTDOWN);
+
+    marker = 'D';
+    CHECK(write(control_pipe[1], &marker, 1) == 1);
+    CHECK(close(control_pipe[1]) == 0);
+    CHECK(close(ready_pipe[0]) == 0);
+    atomic_store_explicit(&suppress_shutdown, 0, memory_order_release);
+    CHECK(pthread_cond_destroy(&second.condition) == 0);
+    CHECK(pthread_mutex_destroy(&second.lock) == 0);
+    CHECK(pthread_cond_destroy(&first.condition) == 0);
+    CHECK(pthread_mutex_destroy(&first.lock) == 0);
+    cosim_table_transport_close(client);
+    wait_child_ok(child, TEST_TIMEOUT_MS);
+}
+
+static void disconnect_server_main(const cosim_table_transport_cfg_t *cfg)
+{
+    cosim_table_transport_t *transport;
+    cosim_table_frame_hdr_t frame;
+    cosim_table_hello_t hello;
+
+    transport = cosim_table_transport_create(cfg);
+    CHECK(transport != NULL);
+    CHECK(cosim_table_recv(transport, &frame, &hello, sizeof(hello), NULL, 0,
+                           TEST_TIMEOUT_MS) == 0);
+    cosim_table_transport_close(transport);
+}
+
+static void completing_server_main(const cosim_table_transport_cfg_t *cfg)
+{
+    cosim_table_transport_t *transport;
+    cosim_table_frame_hdr_t frame;
+    cosim_table_hello_t hello;
+    cosim_table_completion_t completion;
+
+    transport = cosim_table_transport_create(cfg);
+    CHECK(transport != NULL);
+    CHECK(cosim_table_recv(transport, &frame, &hello, sizeof(hello), NULL, 0,
+                           TEST_TIMEOUT_MS) == 0);
+    memset(&completion, 0, sizeof(completion));
+    completion.status = cosim_table_cpu_to_le32(COSIM_TABLE_ST_SUCCESS);
+    completion.failed_index = cosim_table_cpu_to_le32(UINT32_MAX);
+    frame = make_frame(COSIM_TABLE_MSG_COMPLETION, sizeof(completion), 0, 1);
+    CHECK(cosim_table_send(transport, &frame, &completion, NULL,
+                           TEST_TIMEOUT_MS) == 0);
+    cosim_table_transport_close(transport);
+}
+
+static void test_reads_buffered_frame_before_peer_hangup(void)
+{
+    const uint16_t port = reserve_available_port();
+    cosim_table_transport_cfg_t server_cfg =
+        make_server_cfg(port, TEST_TIMEOUT_MS);
+    cosim_table_transport_cfg_t client_cfg =
+        make_client_cfg(port, TEST_TIMEOUT_MS);
+    cosim_table_transport_t *client;
+    cosim_table_frame_hdr_t frame;
+    cosim_table_hello_t hello;
+    cosim_table_completion_t completion;
+    pid_t child;
+
+    child = fork();
+    CHECK(child >= 0);
+    if (child == 0) {
+        completing_server_main(&server_cfg);
+        _exit(0);
+    }
+    client = cosim_table_transport_create(&client_cfg);
+    CHECK(client != NULL);
+    memset(&hello, 0, sizeof(hello));
+    frame = make_frame(COSIM_TABLE_MSG_HELLO, sizeof(hello), 0, 1);
+    CHECK(cosim_table_send(client, &frame, &hello, NULL,
+                           TEST_TIMEOUT_MS) == 0);
+    wait_child_ok(child, TEST_TIMEOUT_MS);
+
+    errno = ETIMEDOUT;
+    atomic_store_explicit(&inject_readable_hangup, 1, memory_order_release);
+    CHECK(cosim_table_recv(client, &frame, &completion, sizeof(completion),
+                           NULL, 0, 1000) == 0);
+    atomic_store_explicit(&inject_readable_hangup, 0, memory_order_release);
+    check_frame(&frame, COSIM_TABLE_MSG_COMPLETION, sizeof(completion), 0, 1);
+    CHECK(cosim_table_le32_to_cpu(completion.status) ==
+          COSIM_TABLE_ST_SUCCESS);
+    cosim_table_transport_close(client);
+}
+
+static void test_peer_disconnect_errno_is_not_stale_timeout(void)
+{
+    const uint16_t port = reserve_available_port();
+    cosim_table_transport_cfg_t server_cfg =
+        make_server_cfg(port, TEST_TIMEOUT_MS);
+    cosim_table_transport_cfg_t client_cfg =
+        make_client_cfg(port, TEST_TIMEOUT_MS);
+    cosim_table_transport_t *client;
+    cosim_table_frame_hdr_t frame;
+    cosim_table_hello_t hello;
+    cosim_table_completion_t completion;
+    pid_t child;
+
+    child = fork();
+    CHECK(child >= 0);
+    if (child == 0) {
+        disconnect_server_main(&server_cfg);
+        _exit(0);
+    }
+    client = cosim_table_transport_create(&client_cfg);
+    CHECK(client != NULL);
+    memset(&hello, 0, sizeof(hello));
+    frame = make_frame(COSIM_TABLE_MSG_HELLO, sizeof(hello), 0, 1);
+    CHECK(cosim_table_send(client, &frame, &hello, NULL,
+                           TEST_TIMEOUT_MS) == 0);
+    wait_child_ok(child, TEST_TIMEOUT_MS);
+
+    errno = ETIMEDOUT;
+    CHECK(cosim_table_recv(client, &frame, &completion, sizeof(completion),
+                           NULL, 0, 1000) == -1);
+    CHECK(errno == ECONNRESET);
+    frame = make_frame(COSIM_TABLE_MSG_HELLO, sizeof(hello), 0, 2);
+    errno = ETIMEDOUT;
+    CHECK(cosim_table_send(client, &frame, &hello, NULL, 100) == -1);
+    CHECK(errno == ESHUTDOWN);
+    cosim_table_transport_close(client);
+}
+
 int main(void)
 {
+    test_queued_sender_cannot_write_after_send_failure();
+    test_reads_buffered_frame_before_peer_hangup();
     test_rejects_port_overflow();
     test_server_create_returns_before_accept();
     test_interrupts_listener_accept();
@@ -888,6 +1221,7 @@ int main(void)
     test_rejects_mismatched_rc_identity();
     test_send_timeout_reports_etimedout();
     test_send_lock_wait_obeys_deadline();
+    test_peer_disconnect_errno_is_not_stale_timeout();
     test_fragmented_roundtrip_and_shutdown();
     puts("table TCP transport tests passed");
     return 0;

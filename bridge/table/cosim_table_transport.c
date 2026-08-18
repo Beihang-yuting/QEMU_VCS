@@ -1,5 +1,6 @@
 #include "cosim_table_transport.h"
 
+#include <errno.h>
 #include <stdlib.h>
 
 typedef int (*table_send_fn)(void *, const cosim_table_frame_hdr_t *,
@@ -40,7 +41,10 @@ cosim_table_transport_t *cosim_table_transport_create(
         return NULL;
     transport = calloc(1, sizeof(*transport));
     if (transport == NULL) {
+        int saved_errno = errno;
+
         cosim_table_transport_tcp_close(backend);
+        errno = saved_errno;
         return NULL;
     }
     transport->backend = backend;
@@ -55,8 +59,10 @@ int cosim_table_send(cosim_table_transport_t *transport,
                      const cosim_table_frame_hdr_t *frame,
                      const void *header, const void *payload, int timeout_ms)
 {
-    if (transport == NULL || transport->send == NULL)
+    if (transport == NULL || transport->send == NULL) {
+        errno = EINVAL;
         return -1;
+    }
     return transport->send(transport->backend, frame, header, payload,
                            timeout_ms);
 }
@@ -66,8 +72,10 @@ int cosim_table_recv(cosim_table_transport_t *transport,
                      void *header, size_t header_capacity,
                      void *payload, size_t payload_capacity, int timeout_ms)
 {
-    if (transport == NULL || transport->recv == NULL)
+    if (transport == NULL || transport->recv == NULL) {
+        errno = EINVAL;
         return -1;
+    }
     return transport->recv(transport->backend, frame,
                            header, header_capacity,
                            payload, payload_capacity, timeout_ms);

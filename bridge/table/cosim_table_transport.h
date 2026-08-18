@@ -26,8 +26,13 @@ typedef struct {
  * Frame and message-specific header fields are little-endian wire values as
  * defined by cosim_table_protocol.h.  Calls return 0 on success, 1 only when
  * receive times out before consuming a frame, and -1 on all other failures.
- * A send deadline expiration returns -1 with errno set to ETIMEDOUT and makes
- * the connection terminal because a partial frame may have reached the peer.
+ * A -1 return always sets errno: EINVAL denotes an invalid API argument,
+ * EPROTO an invalid wire frame, ETIMEDOUT an expired deadline, and ESHUTDOWN
+ * an interrupted or terminal transport.  Socket and pthread failures retain
+ * their specific errno value (for example ECONNRESET, EPIPE, or EBADF).
+ * A send deadline expiration makes the connection terminal because a partial
+ * frame may have reached the peer.  A partial-frame receive failure is also
+ * terminal; only the clean receive timeout reported as 1 is recoverable.
  * Sends are serialized internally, but callers must use only one receiver.
  * interrupt() may run concurrently with a blocked accept, send, or receive.
  * Before close(), the owner must prevent new API calls and join all I/O
