@@ -487,6 +487,65 @@ static void test_interrupts_connected_blocking_receive(void)
     cosim_table_transport_close(server);
 }
 
+static void test_accept_timeout_then_late_client_roundtrip(void)
+{
+    const uint64_t transaction_id = UINT64_C(0x8877665544332211);
+    const uint16_t port = reserve_available_port();
+    cosim_table_transport_cfg_t server_cfg = make_server_cfg(port, 100);
+    cosim_table_transport_cfg_t client_cfg = make_client_cfg(port, 1000);
+    cosim_table_transport_t *server;
+    cosim_table_transport_t *client;
+    blocking_recv_ctx_t recv_ctx;
+    cosim_table_frame_hdr_t frame;
+    cosim_table_hello_t hello;
+    cosim_table_completion_t completion;
+    unsigned char header[sizeof(cosim_table_route_entry_t)];
+    unsigned char payload[COSIM_TABLE_FRAME_DATA_BYTES];
+    pthread_t recv_thread;
+    struct timespec deadline;
+
+    server = cosim_table_transport_create(&server_cfg);
+    CHECK(server != NULL);
+    CHECK(cosim_table_recv(server, &frame, header, sizeof(header),
+                           payload, sizeof(payload), 1000) == 1);
+
+    blocking_recv_ctx_init(&recv_ctx, server);
+    CHECK(pthread_create(&recv_thread, NULL,
+                         blocking_recv_main, &recv_ctx) == 0);
+    client = cosim_table_transport_create(&client_cfg);
+    CHECK(client != NULL);
+
+    memset(&hello, 0, sizeof(hello));
+    hello.protocol_version =
+        cosim_table_cpu_to_le32(COSIM_TABLE_PROTOCOL_VERSION);
+    hello.max_frame_data_bytes =
+        cosim_table_cpu_to_le32(COSIM_TABLE_FRAME_DATA_BYTES);
+    frame = make_frame(COSIM_TABLE_MSG_HELLO, sizeof(hello), 0,
+                       transaction_id);
+    CHECK(cosim_table_send(client, &frame, &hello, NULL, 1000) == 0);
+
+    deadline = realtime_after_ms(2000);
+    CHECK(pthread_timedjoin_np(recv_thread, NULL, &deadline) == 0);
+    CHECK(recv_ctx.result == 0);
+    blocking_recv_ctx_destroy(&recv_ctx);
+
+    memset(&completion, 0, sizeof(completion));
+    completion.status = cosim_table_cpu_to_le32(COSIM_TABLE_ST_SUCCESS);
+    frame = make_frame(COSIM_TABLE_MSG_COMPLETION, sizeof(completion), 0,
+                       transaction_id);
+    CHECK(cosim_table_send(server, &frame, &completion, NULL, 1000) == 0);
+    memset(&completion, 0, sizeof(completion));
+    CHECK(cosim_table_recv(client, &frame, &completion, sizeof(completion),
+                           NULL, 0, 1000) == 0);
+    check_frame(&frame, COSIM_TABLE_MSG_COMPLETION, sizeof(completion), 0,
+                transaction_id);
+    CHECK(cosim_table_le32_to_cpu(completion.status) ==
+          COSIM_TABLE_ST_SUCCESS);
+
+    cosim_table_transport_close(client);
+    cosim_table_transport_close(server);
+}
+
 static void test_rejects_mismatched_rc_identity(void)
 {
     const uint16_t port = reserve_available_port();
@@ -536,6 +595,7 @@ int main(void)
     test_server_create_returns_before_accept();
     test_interrupts_listener_accept();
     test_interrupts_connected_blocking_receive();
+    test_accept_timeout_then_late_client_roundtrip();
     test_rejects_mismatched_rc_identity();
     test_fragmented_roundtrip_and_shutdown();
     puts("table TCP transport tests passed");

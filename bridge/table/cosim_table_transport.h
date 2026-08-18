@@ -26,6 +26,10 @@ typedef struct {
  * Frame and message-specific header fields are little-endian wire values as
  * defined by cosim_table_protocol.h.  Calls return 0 on success, 1 only when
  * receive times out before consuming a frame, and -1 on all other failures.
+ * Sends are serialized internally, but callers must use only one receiver.
+ * interrupt() may run concurrently with a blocked accept, send, or receive.
+ * Before close(), the owner must prevent new API calls and join all I/O
+ * threads; close() does not synchronize with calls that begin concurrently.
  */
 cosim_table_transport_t *cosim_table_transport_create(
     const cosim_table_transport_cfg_t *cfg);

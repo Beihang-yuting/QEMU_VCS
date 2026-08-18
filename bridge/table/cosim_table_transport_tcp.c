@@ -240,20 +240,20 @@ static int open_listener(const char *listen_addr, uint16_t port)
     return listener;
 }
 
-static int accept_connection(int listener, const table_deadline_t *deadline)
+/* Returns 0 on accept, 1 on clean timeout, and -1 on listener error. */
+static int accept_connection(int listener, const table_deadline_t *deadline,
+                             int *accepted_fd)
 {
     for (;;) {
         int connection;
+        int ready = wait_fd(listener, POLLIN, deadline);
 
-        if (wait_fd(listener, POLLIN, deadline) != 0)
-            return -1;
+        if (ready != 0)
+            return ready;
         connection = accept(listener, NULL, NULL);
         if (connection >= 0) {
-            if (set_nonblocking(connection) != 0) {
-                (void)close(connection);
-                return -1;
-            }
-            return connection;
+            *accepted_fd = connection;
+            return 0;
         }
         if (errno != EINTR && errno != EAGAIN && errno != EWOULDBLOCK)
             return -1;
@@ -450,7 +450,9 @@ static int operation_begin(table_tcp_backend_t *backend, int *fd)
     int accepted_fd = -1;
     int listener_fd;
     int listener_to_close = -1;
+    int accept_result = -1;
     int handshake_result;
+    int retryable_connection_error = 0;
 
     if (pthread_mutex_lock(&backend->state_lock) != 0)
         return -1;
@@ -477,20 +479,34 @@ static int operation_begin(table_tcp_backend_t *backend, int *fd)
     (void)pthread_mutex_unlock(&backend->state_lock);
 
     if (deadline_init(&deadline, backend->connect_timeout_ms) == 0)
-        accepted_fd = accept_connection(listener_fd, &deadline);
-    if (accepted_fd >= 0 && set_connection_options(accepted_fd) != 0) {
+        accept_result = accept_connection(listener_fd, &deadline,
+                                          &accepted_fd);
+    if (accept_result == 0 &&
+        (set_nonblocking(accepted_fd) != 0 ||
+         set_connection_options(accepted_fd) != 0)) {
         (void)close(accepted_fd);
         accepted_fd = -1;
+        retryable_connection_error = 1;
     }
 
     (void)pthread_mutex_lock(&backend->state_lock);
-    if (accepted_fd < 0 || backend->closing || backend->fatal) {
+    if (backend->closing || backend->fatal) {
         if (accepted_fd >= 0)
             (void)close(accepted_fd);
         backend->connecting = 0;
-        if (!backend->closing)
-            backend->fatal = 1;
         goto fail_locked;
+    }
+    if (accept_result != 0 || retryable_connection_error) {
+        int operation_result = accept_result == 1 ? 1 : -1;
+
+        backend->connecting = 0;
+        if (accept_result < 0 && !retryable_connection_error) {
+            backend->fatal = 1;
+            (void)shutdown(backend->listener_fd, SHUT_RDWR);
+        }
+        operation_end_locked(backend);
+        (void)pthread_mutex_unlock(&backend->state_lock);
+        return operation_result;
     }
     backend->connection_fd = accepted_fd;
     (void)pthread_mutex_unlock(&backend->state_lock);
@@ -501,10 +517,14 @@ static int operation_begin(table_tcp_backend_t *backend, int *fd)
 
     (void)pthread_mutex_lock(&backend->state_lock);
     if (handshake_result != 0 || backend->closing || backend->fatal) {
-        backend->fatal = 1;
+        if (backend->connection_fd == accepted_fd)
+            backend->connection_fd = -1;
         (void)shutdown(accepted_fd, SHUT_RDWR);
         backend->connecting = 0;
-        goto fail_locked;
+        operation_end_locked(backend);
+        (void)pthread_mutex_unlock(&backend->state_lock);
+        (void)close(accepted_fd);
+        return -1;
     }
     listener_to_close = backend->listener_fd;
     backend->listener_fd = -1;
@@ -669,9 +689,12 @@ int cosim_table_transport_tcp_recv(void *opaque,
     if (backend == NULL || frame == NULL ||
         (header_capacity != 0 && header == NULL) ||
         (payload_capacity != 0 && payload == NULL) ||
-        deadline_init(&deadline, timeout_ms) != 0 ||
-        operation_begin(backend, &fd) != 0)
+        deadline_init(&deadline, timeout_ms) != 0)
         return -1;
+
+    result = operation_begin(backend, &fd);
+    if (result != 0)
+        return result;
 
     result = recv_exact(fd, &local_frame, sizeof(local_frame), &deadline, 1);
     if (result == 1) {
