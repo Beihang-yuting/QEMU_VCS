@@ -8,6 +8,8 @@ add_library(cosim_bridge_common STATIC
     common/transport_shm.c
     common/transport_tcp.c
     table/cosim_table_route.c
+    table/cosim_table_transport.c
+    table/cosim_table_transport_tcp.c
 )
 target_include_directories(cosim_bridge_common PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/common
