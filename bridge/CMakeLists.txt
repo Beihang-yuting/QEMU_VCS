@@ -34,10 +34,12 @@ target_link_libraries(cosim_bridge PRIVATE cosim_bridge_common rt pthread)
 add_library(cosim_bridge_vcs SHARED
     vcs/bridge_vcs.c
     vcs/sock_sync_vcs.c
+    vcs/table_vcs_core.c
 )
 target_include_directories(cosim_bridge_vcs PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/common
     ${CMAKE_CURRENT_SOURCE_DIR}/vcs
+    ${CMAKE_CURRENT_SOURCE_DIR}/table
 )
 target_link_libraries(cosim_bridge_vcs PRIVATE cosim_bridge_common rt pthread)
 

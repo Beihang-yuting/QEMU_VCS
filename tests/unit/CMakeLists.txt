@@ -54,6 +54,20 @@ target_link_libraries(test_table_ctrl_core cosim_bridge_common pthread)
 add_test(NAME test_table_ctrl_core COMMAND test_table_ctrl_core)
 set_tests_properties(test_table_ctrl_core PROPERTIES TIMEOUT 10)
 
+add_executable(test_table_vcs_core test_table_vcs_core.c)
+target_include_directories(test_table_vcs_core PRIVATE
+    ${CMAKE_SOURCE_DIR}/bridge/table
+    ${CMAKE_SOURCE_DIR}/bridge/vcs
+)
+target_compile_definitions(test_table_vcs_core PRIVATE
+    TABLE_ROUTE_FIXTURE="${CMAKE_SOURCE_DIR}/tests/fixtures/table_routes_valid.ini"
+)
+target_link_libraries(test_table_vcs_core
+    cosim_bridge_vcs cosim_bridge_common pthread
+)
+add_test(NAME test_table_vcs_core COMMAND test_table_vcs_core)
+set_tests_properties(test_table_vcs_core PROPERTIES TIMEOUT 20)
+
 add_executable(test_bridge_wait_hooks test_bridge_wait_hooks.c)
 target_link_libraries(test_bridge_wait_hooks cosim_bridge pthread)
 add_test(NAME test_bridge_wait_hooks COMMAND test_bridge_wait_hooks)

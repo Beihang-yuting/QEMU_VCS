@@ -18,7 +18,7 @@ CC="${CC:-gcc}"
 AR="${AR:-ar}"
 
 CFLAGS="-std=c11 -D_DEFAULT_SOURCE -O2 -fPIC -Wall -Wextra -Wno-unused-parameter"
-INCS="-I $ROOT/bridge/common -I $ROOT/bridge/vcs -I $ROOT/bridge/qemu -I $ROOT/bridge/eth"
+INCS="-I $ROOT/bridge/common -I $ROOT/bridge/vcs -I $ROOT/bridge/qemu -I $ROOT/bridge/table -I $ROOT/bridge/eth"
 # ETH 版的 eth_mac_dpi.c 用 svGetArrayPtr(svdpi.h),需 VCS 头;设了 VCS_HOME 就带上。
 [ -n "$VCS_HOME" ] && INCS="$INCS -I $VCS_HOME/include"
 
@@ -26,6 +26,7 @@ INCS="-I $ROOT/bridge/common -I $ROOT/bridge/vcs -I $ROOT/bridge/qemu -I $ROOT/b
 SRCS=(
   bridge/vcs/bridge_vcs.c
   bridge/vcs/sock_sync_vcs.c
+  bridge/vcs/table_vcs_core.c
   bridge/common/shm_layout.c
   bridge/common/ring_buffer.c
   bridge/common/dma_manager.c
@@ -33,6 +34,9 @@ SRCS=(
   bridge/common/transport_shm.c
   bridge/common/transport_tcp.c
   bridge/common/eth_shm.c          # transport_shm.c 依赖 eth_shm_* 符号，必带
+  bridge/table/cosim_table_route.c
+  bridge/table/cosim_table_transport.c
+  bridge/table/cosim_table_transport_tcp.c
 )
 
 # ---- 可选 ETH 数据面（完整 eth 通路，MMIO-only 不需要）----
