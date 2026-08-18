@@ -39,11 +39,16 @@ typedef struct {
     int unsigned payload_bytes;
     int unsigned byte_offset;
     int unsigned flags;
+    cosim_table_protection_e protection;
+    bit protection_bits[];
     longint unsigned transaction_id;
     longint unsigned first_index;
     longint unsigned bar_offset;
     string handler_name;
 } cosim_table_context;
+
+localparam longint unsigned COSIM_TABLE_FAILED_INDEX_NONE =
+    64'h0000_0000_ffff_ffff;
 
 typedef struct {
     cosim_table_status_e status;

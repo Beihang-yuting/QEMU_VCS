@@ -14,6 +14,10 @@ module test_cosim_table_unit;
 
     class unit_handler extends cosim_table_handler;
         string name;
+        int unsigned write_calls;
+        cosim_table_protection_e captured_protection;
+        bit captured_protection_bits[];
+        byte unsigned captured_raw_data[];
 
         function new(string name);
             this.name = name;
@@ -29,8 +33,16 @@ module test_cosim_table_unit;
             byte unsigned raw_data[],
             output cosim_table_result result
         );
+            write_calls++;
+            captured_protection = ctx.protection;
+            captured_protection_bits = new[ctx.protection_bits.size()];
+            foreach (ctx.protection_bits[i])
+                captured_protection_bits[i] = ctx.protection_bits[i];
+            captured_raw_data = new[raw_data.size()];
+            foreach (raw_data[i])
+                captured_raw_data[i] = raw_data[i];
             result.status = COSIM_TABLE_STATUS_SUCCESS;
-            result.failed_index = '1;
+            result.failed_index = COSIM_TABLE_FAILED_INDEX_NONE;
             result.committed_count = 1;
             result.handler_error = 0;
             result.read_data = '0;
@@ -49,6 +61,27 @@ module test_cosim_table_unit;
         endfunction
     endclass
 
+    task automatic dispatch_write(
+        input cosim_table_registry registry,
+        input unit_handler handler,
+        input cosim_table_protection_e protection,
+        input byte unsigned raw_data[],
+        output bit dispatched,
+        output cosim_table_result result
+    );
+        cosim_table_codec_base selected_codec;
+        cosim_table_context ctx;
+
+        dispatched = registry.resolve_codec(handler.get_name(), protection,
+                                            selected_codec);
+        if (!dispatched)
+            return;
+        selected_codec.protect_entry(raw_data, protection,
+                                     ctx.protection_bits);
+        ctx.protection = protection;
+        handler.write_entry(ctx, 64'd7, raw_data, result);
+    endtask
+
     initial begin : run
         cosim_table_registry registry;
         cosim_table_builtin_codec codec;
@@ -64,6 +97,10 @@ module test_cosim_table_unit;
         byte unsigned raw_data[];
         bit bits[];
         bit ecc_bits[];
+        bit [31:0] read_data;
+        bit dispatched;
+        cosim_table_context ctx;
+        cosim_table_result result;
         int unsigned i;
 
         failures = 0;
@@ -196,6 +233,76 @@ module test_cosim_table_unit;
                                      selected_codec) &&
               selected_codec != null && selected_codec != custom_codec,
               "built-in protections resolve to the built-in codec");
+
+        check(registry.get_default_protection("vio_notify", protection),
+              "default protection is available for dispatch");
+        raw_data = new[1];
+        raw_data[0] = 8'hff;
+        dispatch_write(registry, lower_handler, protection, raw_data,
+                       dispatched, result);
+        check(dispatched && lower_handler.write_calls == 1 &&
+              lower_handler.captured_protection ==
+                  COSIM_TABLE_PROTECTION_NONE &&
+              lower_handler.captured_protection_bits.size() == 0 &&
+              lower_handler.captured_raw_data.size() == 1 &&
+              lower_handler.captured_raw_data[0] == 8'hff,
+              "NONE dispatch carries raw data and explicit empty protection");
+        check(result.failed_index[63:32] == 32'h0000_0000 &&
+              result.failed_index[31:0] == 32'hffff_ffff,
+              "successful result uses the wire-compatible failed-index sentinel");
+        lower_handler.read_dword(ctx, 64'd55, 0, read_data, result);
+        check(result.status == COSIM_TABLE_STATUS_UNSUPPORTED &&
+              result.failed_index == 64'd55,
+              "default unsupported read reports the requested index");
+
+        check(registry.get_default_protection("VIO_NOTIFY", protection),
+              "parity default protection is available for dispatch");
+        dispatch_write(registry, upper_handler, protection, raw_data,
+                       dispatched, result);
+        check(dispatched && upper_handler.write_calls == 1 &&
+              upper_handler.captured_protection ==
+                  COSIM_TABLE_PROTECTION_PARITY_EVEN &&
+              upper_handler.captured_protection_bits.size() == 1 &&
+              upper_handler.captured_protection_bits[0] == 1'b0,
+              "default parity mode and generated bit reach write_entry");
+
+        raw_data[0] = 8'h01;
+        protection = COSIM_TABLE_PROTECTION_ECC;
+        dispatch_write(registry, lower_handler, protection, raw_data,
+                       dispatched, result);
+        check(dispatched && lower_handler.write_calls == 2 &&
+              lower_handler.captured_protection ==
+                  COSIM_TABLE_PROTECTION_ECC &&
+              lower_handler.captured_protection_bits.size() == 5 &&
+              {lower_handler.captured_protection_bits[4],
+               lower_handler.captured_protection_bits[3],
+               lower_handler.captured_protection_bits[2],
+               lower_handler.captured_protection_bits[1],
+               lower_handler.captured_protection_bits[0]} == 5'b10011,
+              "ECC override and generated bits reach write_entry");
+
+        raw_data[0] = 8'h5a;
+        protection = COSIM_TABLE_PROTECTION_CUSTOM;
+        dispatch_write(registry, custom_handler, protection, raw_data,
+                       dispatched, result);
+        check(dispatched && custom_handler.write_calls == 1 &&
+              custom_handler.captured_protection ==
+                  COSIM_TABLE_PROTECTION_CUSTOM &&
+              custom_handler.captured_protection_bits.size() == 2 &&
+              custom_handler.captured_protection_bits[0] == 1'b0 &&
+              custom_handler.captured_protection_bits[1] == 1'b1,
+              "custom mode and user-codec bits reach write_entry");
+
+        check(registry.get_default_protection("vio_notify", protection) &&
+              protection == COSIM_TABLE_PROTECTION_NONE,
+              "an ECC override does not mutate the registered default");
+        dispatch_write(registry, lower_handler, protection, raw_data,
+                       dispatched, result);
+        check(dispatched && lower_handler.write_calls == 3 &&
+              lower_handler.captured_protection ==
+                  COSIM_TABLE_PROTECTION_NONE &&
+              lower_handler.captured_protection_bits.size() == 0,
+              "successive modes do not leak state through the handler");
 
         if (failures != 0)
             $fatal(1, "COSIM_TABLE_UNIT: %0d checks failed", failures);
