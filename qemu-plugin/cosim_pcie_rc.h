@@ -157,5 +157,8 @@ struct CosimPCIeRC {
 
 bool cosim_pcie_rc_get_table_target(
     uint32_t instance_id, cosim_table_target_snapshot_t *snapshot);
+/* BQL-only: invalidate outstanding Guest target identities while preserving
+ * the live PF0 topology.  Returns false for no live target or exhaustion. */
+bool cosim_pcie_rc_bump_table_target_generation(uint32_t instance_id);
 
 #endif /* COSIM_PCIE_RC_H */

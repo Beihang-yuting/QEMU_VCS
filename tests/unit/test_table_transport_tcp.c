@@ -1160,6 +1160,7 @@ static void test_reads_buffered_frame_before_peer_hangup(void)
                            TEST_TIMEOUT_MS) == 0);
     wait_child_ok(child, TEST_TIMEOUT_MS);
 
+    CHECK(cosim_table_transport_peer_closed(client) == 0);
     errno = ETIMEDOUT;
     atomic_store_explicit(&inject_readable_hangup, 1, memory_order_release);
     CHECK(cosim_table_recv(client, &frame, &completion, sizeof(completion),
@@ -1168,6 +1169,7 @@ static void test_reads_buffered_frame_before_peer_hangup(void)
     check_frame(&frame, COSIM_TABLE_MSG_COMPLETION, sizeof(completion), 0, 1);
     CHECK(cosim_table_le32_to_cpu(completion.status) ==
           COSIM_TABLE_ST_SUCCESS);
+    CHECK(cosim_table_transport_peer_closed(client) == 1);
     cosim_table_transport_close(client);
 }
 
@@ -1182,6 +1184,7 @@ static void test_peer_disconnect_errno_is_not_stale_timeout(void)
     cosim_table_frame_hdr_t frame;
     cosim_table_hello_t hello;
     cosim_table_completion_t completion;
+    uint64_t health_deadline;
     pid_t child;
 
     child = fork();
@@ -1197,6 +1200,12 @@ static void test_peer_disconnect_errno_is_not_stale_timeout(void)
     CHECK(cosim_table_send(client, &frame, &hello, NULL,
                            TEST_TIMEOUT_MS) == 0);
     wait_child_ok(child, TEST_TIMEOUT_MS);
+
+    health_deadline = monotonic_ms() + 1000;
+    while (cosim_table_transport_peer_closed(client) == 0 &&
+           monotonic_ms() < health_deadline)
+        (void)poll(NULL, 0, 10);
+    CHECK(cosim_table_transport_peer_closed(client) == 1);
 
     errno = ETIMEDOUT;
     CHECK(cosim_table_recv(client, &frame, &completion, sizeof(completion),

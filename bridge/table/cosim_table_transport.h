@@ -47,6 +47,13 @@ int cosim_table_recv(cosim_table_transport_t *transport,
                      cosim_table_frame_hdr_t *frame,
                      void *header, size_t header_capacity,
                      void *payload, size_t payload_capacity, int timeout_ms);
+/*
+ * Return 1 only when an established peer has closed or the transport has
+ * become terminal, 0 when no closure is visible, and -1 for an invalid API
+ * argument or an unexpected local query error.  The query never consumes
+ * buffered protocol bytes and may run concurrently with interrupt().
+ */
+int cosim_table_transport_peer_closed(cosim_table_transport_t *transport);
 void cosim_table_transport_interrupt(cosim_table_transport_t *transport);
 void cosim_table_transport_close(cosim_table_transport_t *transport);
 

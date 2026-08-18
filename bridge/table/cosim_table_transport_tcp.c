@@ -1071,6 +1071,83 @@ fatal:
     return -1;
 }
 
+int cosim_table_transport_tcp_peer_closed(void *opaque)
+{
+    table_tcp_backend_t *backend = opaque;
+    struct pollfd descriptor;
+    unsigned char byte;
+    int fd;
+    int poll_result;
+    int result;
+
+    if (backend == NULL) {
+        errno = EINVAL;
+        return -1;
+    }
+
+    result = pthread_mutex_lock(&backend->state_lock);
+    if (result != 0) {
+        errno = result;
+        return -1;
+    }
+    if (backend->closing || backend->fatal) {
+        (void)pthread_mutex_unlock(&backend->state_lock);
+        return 1;
+    }
+    if (backend->connection_fd < 0) {
+        (void)pthread_mutex_unlock(&backend->state_lock);
+        return 0;
+    }
+    ++backend->active_operations;
+    fd = backend->connection_fd;
+    (void)pthread_mutex_unlock(&backend->state_lock);
+
+    memset(&descriptor, 0, sizeof(descriptor));
+    descriptor.fd = fd;
+    descriptor.events = POLLIN;
+#ifdef POLLRDHUP
+    descriptor.events |= POLLRDHUP;
+#endif
+    do {
+        poll_result = poll(&descriptor, 1, 0);
+    } while (poll_result < 0 && errno == EINTR);
+
+    if (poll_result < 0) {
+        result = -1;
+    } else if (poll_result == 0) {
+        result = 0;
+    } else if ((descriptor.revents & POLLNVAL) != 0) {
+        errno = EBADF;
+        result = -1;
+    } else if ((descriptor.revents & (POLLIN | POLLERR | POLLHUP
+#ifdef POLLRDHUP
+                                      | POLLRDHUP
+#endif
+                                      )) == 0) {
+        result = 0;
+    } else {
+        ssize_t peeked;
+
+        do {
+            peeked = recv(fd, &byte, sizeof(byte),
+                          MSG_PEEK | MSG_DONTWAIT);
+        } while (peeked < 0 && errno == EINTR);
+        if (peeked > 0)
+            result = 0;
+        else if (peeked == 0)
+            result = 1;
+        else if (errno == EAGAIN || errno == EWOULDBLOCK)
+            result = 0;
+        else if (errno == ECONNRESET || errno == ENOTCONN || errno == EPIPE)
+            result = 1;
+        else
+            result = -1;
+    }
+
+    operation_end(backend);
+    return result;
+}
+
 void cosim_table_transport_tcp_interrupt(void *opaque)
 {
     table_tcp_backend_t *backend = opaque;

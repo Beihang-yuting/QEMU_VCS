@@ -259,6 +259,13 @@ if not re.search(
     flags=re.S,
 ):
     fail("cosim_pcie_rc.h must export the read-only instance-keyed snapshot API")
+if not re.search(
+    r"bool\s+cosim_pcie_rc_bump_table_target_generation\s*\(\s*"
+    r"uint32_t\s+instance_id\s*\)\s*;",
+    header,
+    flags=re.S,
+):
+    fail("CosimPCIeRC must own the controller-reset generation bump API")
 
 pf_arrays = re.findall(
     r"static\s+CosimPCIeRC\s*\*\s*[A-Za-z_][A-Za-z0-9_]*\s*\["
@@ -279,6 +286,15 @@ require(getter, "entry->instance_id == instance_id",
         "cosim_pcie_rc_get_table_target")
 require(getter, "*snapshot", "cosim_pcie_rc_get_table_target")
 require(getter, "table_target_snapshot", "cosim_pcie_rc_get_table_target")
+
+bump = function_body("cosim_pcie_rc_bump_table_target_generation")
+require(bump, "entry->instance_id == instance_id",
+        "cosim_pcie_rc_bump_table_target_generation")
+require(bump, "cosim_table_target_allocate_generation()",
+        "cosim_pcie_rc_bump_table_target_generation")
+require(bump, "cosim_table_target_unlink(entry)",
+        "cosim_pcie_rc_bump_table_target_generation")
+require(bump, "return false", "cosim_pcie_rc_bump_table_target_generation")
 
 publish = function_body("cosim_table_target_publish")
 require(publish, "s->pf_index != 0", "cosim_table_target_publish")

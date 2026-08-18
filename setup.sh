@@ -2072,11 +2072,13 @@ if [ "$NEED_QEMU" = true ]; then
         cp "${PROJECT_DIR}/qemu-plugin/cosim_pcie_rc.h" "${QEMU_DIR}/include/hw/net/"
         cp "${PROJECT_DIR}/qemu-plugin/cosim_mmio_be.h" "${QEMU_DIR}/include/hw/net/"
         cp "${PROJECT_DIR}/qemu-plugin/cosim_pcie_request.h" "${QEMU_DIR}/include/hw/net/"
+        cp "${PROJECT_DIR}/qemu-plugin/cosim_table_ctrl.c" "${QEMU_DIR}/hw/net/"
+        cp "${PROJECT_DIR}/qemu-plugin/cosim_table_ctrl.h" "${QEMU_DIR}/include/hw/net/"
 
         # 共享头文件（topology 等）
         cp "${PROJECT_DIR}/bridge/common/cosim_topology.h" "${QEMU_DIR}/include/hw/net/"
-        cp "${PROJECT_DIR}/bridge/qemu/table_target.h" "${QEMU_DIR}/include/hw/net/"
-        cp "${PROJECT_DIR}/bridge/table/cosim_table_protocol.h" "${QEMU_DIR}/include/hw/net/"
+        cp "${PROJECT_DIR}"/bridge/table/*.h "${QEMU_DIR}/include/hw/net/"
+        cp "${PROJECT_DIR}"/bridge/qemu/table_*.h "${QEMU_DIR}/include/hw/net/"
 
         MESON_FILE="${QEMU_DIR}/hw/net/meson.build"
         if ! grep -q "cosim_pcie_rc" "$MESON_FILE"; then
@@ -2088,6 +2090,12 @@ if [ "$NEED_QEMU" = true ]; then
             ok "已修补 meson.build (cosim_pcie_rc)"
         else
             info "meson.build 已包含 cosim_pcie_rc，无需修改"
+        fi
+        if ! grep -Fqx "system_ss.add(files('cosim_table_ctrl.c'))" "$MESON_FILE"; then
+            echo "system_ss.add(files('cosim_table_ctrl.c'))" >> "$MESON_FILE"
+            ok "已修补 meson.build (cosim_table_ctrl)"
+        else
+            info "meson.build 已包含 cosim_table_ctrl，无需修改"
         fi
 
         # ---- 应用 QEMU patch（SR-IOV VF hotplug 支持）----

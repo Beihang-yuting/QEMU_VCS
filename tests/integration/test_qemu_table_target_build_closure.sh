@@ -41,13 +41,13 @@ populate_project_fixture() {
         "$repo/qemu-plugin/cosim_pcie_rc.h" \
         "$repo/qemu-plugin/cosim_mmio_be.h" \
         "$repo/qemu-plugin/cosim_pcie_request.h" \
+        "$repo/qemu-plugin/cosim_table_ctrl.c" \
+        "$repo/qemu-plugin/cosim_table_ctrl.h" \
         "$project/qemu-plugin/" || return
     cp "$repo/bridge/common/cosim_topology.h" \
         "$project/bridge/common/" || return
-    cp "$repo/bridge/qemu/table_target.h" \
-        "$project/bridge/qemu/" || return
-    cp "$repo/bridge/table/cosim_table_protocol.h" \
-        "$project/bridge/table/" || return
+    cp "$repo"/bridge/qemu/table_*.h "$project/bridge/qemu/" || return
+    cp "$repo"/bridge/table/*.h "$project/bridge/table/" || return
 }
 
 compile_installed_header() {
@@ -107,6 +107,8 @@ check_make_injection() {
     populate_project_fixture "$project" || return
     mkdir -p "$qemu_tree/hw/net" "$qemu_tree/include/hw/net" \
         "$qemu_tree/build" "$root/bin" || return
+    printf "system_ss.add(files('cosim_pcie_rc.c'))\n" > \
+        "$qemu_tree/hw/net/meson.build"
     printf '# fixture\n' >"$qemu_tree/build/build.ninja"
     printf '#!/bin/sh\nexit 0\n' >"$ninja_stub"
     chmod +x "$ninja_stub"
@@ -176,7 +178,11 @@ check_link() {
         return 1
     fi
     bridge_dir=$(dirname "$bridge_so")
-    for symbol in cosim_table_target_snapshot_valid cosim_table_target_matches; do
+    for symbol in cosim_table_target_snapshot_valid cosim_table_target_matches \
+                  cosim_table_ctrl_core_init cosim_table_ctrl_process_slot \
+                  cosim_table_client_create cosim_table_client_wait_routes \
+                  cosim_table_transport_create \
+                  cosim_table_transport_interrupt; do
         if ! "$nm_tool" -D --defined-only "$bridge_so" |
                 awk -v expected="$symbol" '$3 == expected { found = 1 }
                     END { exit !found }'; then

@@ -441,6 +441,31 @@ bool cosim_pcie_rc_get_table_target(
     return false;
 }
 
+bool cosim_pcie_rc_bump_table_target_generation(uint32_t instance_id)
+{
+    CosimPCIeRC *entry;
+
+    if (instance_id > UINT16_MAX) {
+        return false;
+    }
+    for (entry = g_table_target_registry; entry != NULL;
+         entry = entry->table_target_next) {
+        uint32_t generation;
+
+        if (entry->instance_id == instance_id) {
+            generation = cosim_table_target_allocate_generation();
+            if (generation == 0) {
+                cosim_table_target_unlink(entry);
+                entry->table_target_snapshot.generation = 0;
+                return false;
+            }
+            entry->table_target_snapshot.generation = generation;
+            return true;
+        }
+    }
+    return false;
+}
+
 /* ---- Per-VF DMA isolation IOMMU (opt-in vf_iommu=on) --------------------
  * Each VF gets an AddressSpace whose IOMMU translate() is identity within the
  * VF's host-assigned window [win_base, win_base+win_size) and rejects (perm=0)

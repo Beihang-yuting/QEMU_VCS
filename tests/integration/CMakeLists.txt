@@ -120,6 +120,11 @@ add_test(NAME test_qemu_table_target_link_closure
                  link $<TARGET_FILE:cosim_bridge>)
 set_tests_properties(test_qemu_table_target_link_closure PROPERTIES TIMEOUT 20)
 
+add_test(NAME test_qemu_table_setup_smoke
+         COMMAND bash
+                 ${CMAKE_CURRENT_SOURCE_DIR}/test_qemu_table_setup_smoke.sh)
+set_tests_properties(test_qemu_table_setup_smoke PROPERTIES TIMEOUT 20)
+
 set(COSIM_QEMU_BUILD_DIR "" CACHE PATH
     "QEMU build tree used by the real QOM legacy-reset registration probe")
 if(COSIM_QEMU_BUILD_DIR)

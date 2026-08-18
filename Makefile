@@ -134,9 +134,14 @@ qemu-device: bridge
 	@cp "$(PROJECT_DIR)/qemu-plugin/cosim_pcie_rc.h" "$(QEMU_SRC_DIR)/include/hw/net/cosim_pcie_rc.h"
 	@cp "$(PROJECT_DIR)/qemu-plugin/cosim_mmio_be.h" "$(QEMU_SRC_DIR)/include/hw/net/cosim_mmio_be.h"
 	@cp "$(PROJECT_DIR)/qemu-plugin/cosim_pcie_request.h" "$(QEMU_SRC_DIR)/include/hw/net/cosim_pcie_request.h"
+	@cp "$(PROJECT_DIR)/qemu-plugin/cosim_table_ctrl.c" "$(QEMU_SRC_DIR)/hw/net/cosim_table_ctrl.c"
+	@cp "$(PROJECT_DIR)/qemu-plugin/cosim_table_ctrl.h" "$(QEMU_SRC_DIR)/include/hw/net/cosim_table_ctrl.h"
 	@cp "$(PROJECT_DIR)/bridge/common/cosim_topology.h" "$(QEMU_SRC_DIR)/include/hw/net/cosim_topology.h"
-	@cp "$(PROJECT_DIR)/bridge/qemu/table_target.h" "$(QEMU_SRC_DIR)/include/hw/net/table_target.h"
-	@cp "$(PROJECT_DIR)/bridge/table/cosim_table_protocol.h" "$(QEMU_SRC_DIR)/include/hw/net/cosim_table_protocol.h"
+	@cp "$(PROJECT_DIR)"/bridge/table/*.h "$(QEMU_SRC_DIR)/include/hw/net/"
+	@cp "$(PROJECT_DIR)"/bridge/qemu/table_*.h "$(QEMU_SRC_DIR)/include/hw/net/"
+	@if ! grep -Fqx "system_ss.add(files('cosim_table_ctrl.c'))" "$(QEMU_SRC_DIR)/hw/net/meson.build"; then \
+		printf '%s\n' "system_ss.add(files('cosim_table_ctrl.c'))" >> "$(QEMU_SRC_DIR)/hw/net/meson.build"; \
+	fi
 	ninja -C $(QEMU_BUILD) qemu-system-x86_64
 	@echo "[BUILD] $(QEMU_BUILD)/qemu-system-x86_64"
 

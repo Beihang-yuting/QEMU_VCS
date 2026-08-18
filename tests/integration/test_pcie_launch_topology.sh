@@ -70,12 +70,15 @@ populate_qemu_injection_project_fixture() {
         cp "$qemu_request_header" \
             "$project_fixture/qemu-plugin/cosim_pcie_request.h"
     fi
+    cp "$project_dir/qemu-plugin/cosim_table_ctrl.c" \
+        "$project_dir/qemu-plugin/cosim_table_ctrl.h" \
+        "$project_fixture/qemu-plugin/"
     cp "$project_dir/bridge/common/cosim_topology.h" \
         "$project_fixture/bridge/common/cosim_topology.h"
-    cp "$project_dir/bridge/qemu/table_target.h" \
-        "$project_fixture/bridge/qemu/table_target.h"
-    cp "$project_dir/bridge/table/cosim_table_protocol.h" \
-        "$project_fixture/bridge/table/cosim_table_protocol.h"
+    cp "$project_dir"/bridge/qemu/table_*.h \
+        "$project_fixture/bridge/qemu/"
+    cp "$project_dir"/bridge/table/*.h \
+        "$project_fixture/bridge/table/"
 }
 
 qemu_device_executes_mmio_sync() {
@@ -92,6 +95,8 @@ qemu_device_executes_mmio_sync() {
     populate_qemu_injection_project_fixture "$project_fixture"
     mkdir -p "$qemu_fixture/hw/net" "$qemu_fixture/include/hw/net" \
         "$qemu_fixture/build" "$make_fixture/bin"
+    printf "system_ss.add(files('cosim_pcie_rc.c'))\n" > \
+        "$qemu_fixture/hw/net/meson.build"
     printf '# isolated qemu-device contract fixture\n' >"$qemu_fixture/build/build.ninja"
     {
         printf '#!/bin/sh\n'
@@ -207,6 +212,8 @@ qemu_device_executes_request_sync() {
     populate_qemu_injection_project_fixture "$project_fixture"
     mkdir -p "$qemu_fixture/hw/net" "$qemu_fixture/include/hw/net" \
         "$qemu_fixture/build" "$make_fixture/bin"
+    printf "system_ss.add(files('cosim_pcie_rc.c'))\n" > \
+        "$qemu_fixture/hw/net/meson.build"
     printf '# isolated qemu-device request-header fixture\n' >"$qemu_fixture/build/build.ninja"
     {
         printf '#!/bin/sh\n'
