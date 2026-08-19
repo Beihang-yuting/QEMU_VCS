@@ -76,11 +76,15 @@ vcs ... -CFLAGS "-I $PWD/bridge/common -I $PWD/bridge/vcs" \
 
 ```bash
 SRCS="bridge/vcs/bridge_vcs.c bridge/vcs/sock_sync_vcs.c
+      bridge/vcs/table_vcs_core.c
       bridge/common/shm_layout.c bridge/common/ring_buffer.c
       bridge/common/dma_manager.c bridge/common/trace_log.c
       bridge/common/transport_shm.c bridge/common/transport_tcp.c
-      bridge/common/eth_shm.c"
-INCS="-I bridge/common -I bridge/vcs -I bridge/qemu -I bridge/eth"
+      bridge/common/eth_shm.c
+      bridge/table/cosim_table_route.c
+      bridge/table/cosim_table_transport.c
+      bridge/table/cosim_table_transport_tcp.c"
+INCS="-I bridge/common -I bridge/vcs -I bridge/qemu -I bridge/table -I bridge/eth"
 mkdir -p build/lib
 gcc -std=gnu11 -D_DEFAULT_SOURCE -O2 -fPIC $INCS -c $SRCS && mv *.o build/lib/
 ar    rcs build/lib/libcosim_bridge.a  build/lib/*.o          # .a
@@ -118,3 +122,38 @@ nm simv 2>/dev/null | grep -E " [Tt] bridge_vcs_init$"
 - 链接期 `usleep` 隐式声明 → 漏了 `-D_DEFAULT_SOURCE`
 - **运行期**「找不到 C 函数 / cannot find DPI-C function」→ 路子 2 漏了 `--whole-archive`(§2),
   或库里根本没这函数(用了 `make bridge` 那个缺 eth/vq 的 `.so`,见文首告示)
+
+---
+
+## 7. 表 sideband 的 C/Guest 闭包
+
+`make cosim-lib` 已包含 `table_vcs_core.c`、route parser 和 table TCP transport；
+不需要新增 DPI 协议或单独的 table 库。用 `nm` 检查表入口：
+
+```bash
+nm build/lib/libcosim_bridge.a | grep -E 'table_vcs_(load_routes|register_handler|init)_rc'
+```
+
+Guest 部分是现有 `dpu_snd1.ko` 的 overlay，不是第二个模块。为避免在 vendor/release
+树上留下半应用 patch，先把干净的 `host-driver-net` 解包或复制到一次性工作目录，
+再运行事务式 overlay：
+
+```bash
+work=$(mktemp -d)
+cp -a /path/to/clean/host-driver-net "$work/host-driver-net"
+./scripts/apply_dpu_table_sideband.sh "$work/host-driver-net"
+make -C "$work/host-driver-net" modules
+```
+
+脚本先在同一文件系统的 staging tree 验证连续 patch、managed path 和全部源文件，
+最后用 directory rename 发布；验证或 staging 失败时，输入 tree 保持不变。重复应用
+是 checksum-preserving no-op。构建成功后仍需显式加载：
+
+```bash
+insmod dpu_snd1.ko table_backdoor=1
+```
+
+完整 buffer 通过 sideband 按原顺序提交。只在请求尚未远端提交的
+`NOT_READY`/`NO_ROUTE`/`UNSUPPORTED`/本地 slot-busy 情况回到 frontdoor；partial
+completion、执行错误、timeout、target loss 与 protocol error 都是不可重放的
+hard error。

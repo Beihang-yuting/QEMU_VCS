@@ -465,3 +465,59 @@ A: 检查防火墙，确认端口 `port_base` 到 `port_base+2` 可达。`instan
 
 **Q: 如何支持 SR-IOV？**
 A: 在 `bridge_vcs_init` 后、仿真主循环前调用 `bridge_vcs_set_pf_topology` 和 `bridge_vcs_finalize_topology`。
+
+---
+
+## 8. 可选的语义表 backdoor
+
+表 backdoor 与 TLP bridge 使用不同端口，但共享 RC/device 身份和 VCS 生命周期。
+生产 handler 与 `bridge/vcs/bridge_vcs.sv`、`vcs-tb/cosim_xrc_pkg.sv` 一次编入
+`simv`，运行时再决定是否启用：
+
+```systemverilog
+cosim_xrc_pkg::cosim_maybe_enable();
+handler[0] = new("vio_notify");
+if (!cosim_table_runtime::register_handler(
+        0, handler[0], COSIM_TABLE_PROTECTION_NONE))
+  `uvm_fatal("TABLE", "RC0 handler registration failed")
+```
+
+多 DUT/多 RC 时用相应的 RC number 分别注册 handler。route map 按 RC、device、
+PF0、逻辑 BAR0/BAR1 和半开地址范围选择 handler；它不依赖 Guest 内核中的
+table 常量。`vcs-tb/examples/table_routes.ini` 给出了两个互不重叠的
+`vio_notify` BAR0 范围和一个 `flat_table` BAR1 范围。
+
+```bash
+TABLE_BACKDOOR=on TABLE_PORT_BASE=10100 make run-qemu
+```
+
+```bash
+./simv \
+  +COSIM \
+  +REMOTE_HOST=<QEMU-host> \
+  +PORT_BASE=9100 \
+  +COSIM_TABLE_ENABLE=1 \
+  +COSIM_TABLE_MAP=/absolute/routes.ini \
+  +TABLE_PORT_BASE=10100 \
+  +COSIM_TABLE_LOG=high \
+  +COSIM_TABLE_PROTECT_vio_notify=none
+```
+
+```bash
+insmod dpu_snd1.ko table_backdoor=1
+```
+
+`COSIM_TABLE_MAP` 必须是 VCS 主机上的绝对可读文件。省略 route 的
+`operations` 就是 write-only；只有 `operations=write,read` 会启用对齐的
+4-byte read callback。`COSIM_TABLE_PROTECT_vio_notify` 只改变该 named handler
+的 codec/packing，不会打开表功能或 read capability。
+
+参考 mock 仅用数组保存 L1/L2/L3 结果，没有 DUT hierarchy。生产 subclass
+覆盖物理 deposit/read task，并可调用项目的
+`` `ST_WRITE_DEPOSIT_RAM(index, value, path_macro)` ``；production handler 自己拥有
+common/custom codec 选择、DUT-specific packing、hierarchy macro 和 read backend。
+VCS runtime 保持 logical-index routing、protection selection 和 completion ownership。
+
+Guest 总是按 complete buffer 和原 writer 顺序提交。只有尚未提交任何远端 entry
+的 safe fallback 状态才能执行原 BAR 路径；partial commit、execution error、
+timeout、target loss 或 protocol error 是 hard error，绝不 frontdoor replay。

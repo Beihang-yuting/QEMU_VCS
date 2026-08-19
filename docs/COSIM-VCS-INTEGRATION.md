@@ -195,3 +195,68 @@ VCS 暂时没有请求而永久冻结 Guest，也不会让启动阶段全局快�
 `MMIO_TIMEOUT_MS` 仍按宿主机时间计时。iCount 只避免把正常 VCS 仿真延迟
 计入驱动看到的 Guest 时间，不会掩盖丢失的 Completion；无响应 DUT 仍会按
 配置的宿主机超时返回错误。
+
+---
+
+## 10. 表 handler、route 与多 RAM 对接
+
+表 sideband 复用同一个 `cosim_xrc_pkg.sv`。用户把 handler 编译进 `simv` 一次，
+再通过 plusarg 选择是否启用、route map 和保护方式。最小注册代码是：
+
+```systemverilog
+cosim_xrc_pkg::cosim_maybe_enable();
+handler[0] = new("vio_notify");
+if (!cosim_table_runtime::register_handler(
+        0, handler[0], COSIM_TABLE_PROTECTION_NONE))
+  `uvm_fatal("TABLE", "RC0 handler registration failed")
+```
+
+注册必须发生在 RC 的 `run_phase` 启动 table service 之前。多 RC/多 DUT 环境为
+每个 RC 创建独立对象并调用 `register_handler(rc, ...)`；RC0 和 RC1 可以使用
+相同名称，但同一 RC 内名称必须唯一且短于 64 bytes。
+
+参考文件 `vcs-tb/examples/table_routes.ini` 演示三个 route：PF0 逻辑 BAR0 上
+两个互不重叠的 `vio_notify` 范围，以及 PF0 逻辑 BAR1 上一个 `flat_table`
+范围。省略 `operations` 时 ABI 默认只允许 write；只有
+`operations=write,read` 才要求 handler 的 `supports_read()` 并开放对齐的
+4-byte callback。保护 plusarg 不改变 route capability。
+
+```bash
+TABLE_BACKDOOR=on TABLE_PORT_BASE=10100 make run-qemu
+```
+
+```bash
+./simv \
+  +COSIM \
+  +REMOTE_HOST=<QEMU-host> \
+  +PORT_BASE=9100 \
+  +COSIM_TABLE_ENABLE=1 \
+  +COSIM_TABLE_MAP=/absolute/routes.ini \
+  +TABLE_PORT_BASE=10100 \
+  +COSIM_TABLE_LOG=high \
+  +COSIM_TABLE_PROTECT_vio_notify=none
+```
+
+```bash
+insmod dpu_snd1.ko table_backdoor=1
+```
+
+`+COSIM_TABLE_PROTECT_<handler>` 只覆盖该名称的运行时 codec/protection 选择，
+不会隐式增加 `+COSIM_TABLE_ENABLE=1`，也不会把 write-only route 变成 readable。
+可选值包括 `none`、`parity_even`、`parity_odd`、`ecc`、`secded` 和已配置 custom
+codec 的 `custom`。
+
+数组 mock 展示索引策略和可观察日志，但没有 DUT hierarchy。实际 handler
+应把物理操作放在可覆盖 task 中；production subclass 可在其中调用
+`` `ST_WRITE_DEPOSIT_RAM(index, value, path_macro)` ``。生产实现自己负责：
+
+- 选择公共或自定义 codec，并定义 data/protection 的 DUT 字宽拼接；
+- 把逻辑索引映射到目标 RAM/bank，调用项目自己的 hierarchy macros；
+- 提供真实 read backend（只有 readable route 才会调用）；
+- 保留 `cosim_table_result_mark_valid()` 和单 entry 成功结果契约。
+
+HIGH 日志会同时给出 incoming raw bytes、选中的 protection、最终 packed value、
+logical index 和每个 mock RAM destination，便于在替换 hierarchy task 前做逐项对照。
+Guest patch 以完整 table buffer 为事务边界并保持原 writer 的 entry/DWORD 顺序；
+只有全部已接受 entry 的结果可安全提交。执行错误、timeout、target loss、protocol
+error 或 partial completion 都是 hard error，不能再走原 BAR writer 重放。

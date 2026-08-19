@@ -96,3 +96,58 @@ QEMU 侧先起(见 [COSIM-ISOLATED-ENVS.md](COSIM-ISOLATED-ENVS.md) 的 `make ru
   MSI 目前是占位(下一增量)。
 - device 身份默认 1af4:1041;不同则加 `+CFG_VENDOR_ID=.. +CFG_DEVICE_ID=.. +CFG_BAR0_SIZE=..`
   (或从 `cosim-conn.json` 的 `device.*` 字段解析后自带,见 [COSIM-ISOLATED-ENVS.md](COSIM-ISOLATED-ENVS.md) §2)。
+
+---
+
+## 可选：语义表 backdoor
+
+表 backdoor 仍采用“编译一次、运行时选择”。把生产 handler 与上述两个 SV
+入口一起编进 `simv`；在 `build_phase` 中、RC driver 启动前注册每个 RC 的
+handler。仓库中的 `vcs-tb/examples/vio_notify_mock_handler.sv` 只保存数组，适合
+作为打包和多 RAM 选址参考，不包含任何 DUT 层次。
+
+```systemverilog
+cosim_xrc_pkg::cosim_maybe_enable();
+handler[0] = new("vio_notify");
+if (!cosim_table_runtime::register_handler(
+        0, handler[0], COSIM_TABLE_PROTECTION_NONE))
+  `uvm_fatal("TABLE", "RC0 handler registration failed")
+```
+
+多 DUT/多 RC 时，每个 RC 分别构造并用对应的 `rc` 参数注册；同一个 handler
+名称可以在不同 RC 上独立存在。生产 handler 负责选择内建或自定义 codec、把
+data/protection bits 打包成 DUT RAM 字宽、调用层次宏，并实现需要的 read backend。
+索引、保护模式选择和完成状态仍由 VCS table runtime 管理。
+
+启动顺序如下：
+
+```bash
+TABLE_BACKDOOR=on TABLE_PORT_BASE=10100 make run-qemu
+```
+
+```bash
+./simv \
+  +COSIM \
+  +REMOTE_HOST=<QEMU-host> \
+  +PORT_BASE=9100 \
+  +COSIM_TABLE_ENABLE=1 \
+  +COSIM_TABLE_MAP=/absolute/routes.ini \
+  +TABLE_PORT_BASE=10100 \
+  +COSIM_TABLE_LOG=high \
+  +COSIM_TABLE_PROTECT_vio_notify=none
+```
+
+```bash
+insmod dpu_snd1.ko table_backdoor=1
+```
+
+`+COSIM_TABLE_ENABLE=1` 才启用表通道，且要求精确的 `+COSIM`；route map 必须
+是 VCS 主机上的绝对可读路径。`+COSIM_TABLE_PROTECT_vio_notify=...` 只改变名为
+`vio_notify` 的 handler 的运行时保护打包，不会启用表功能，也不会开放读取。
+
+示例 route map 使用 PF0 的逻辑 BAR0/BAR1。省略 `operations` 等价于
+`operations=write`；只有显式写成 `operations=write,read` 的 route 才允许一次
+对齐的 4-byte read callback。Guest 仍按完整 buffer 提交，entry 按原顺序提交，
+handler 返回成功后才计为 committed。`NOT_READY`/`NO_ROUTE`/`UNSUPPORTED` 和本地
+slot busy 可安全回到原 MMIO 路径；执行错误、超时、目标消失、协议错误和任何
+部分完成都是 hard error，绝不能通过 frontdoor 重放。

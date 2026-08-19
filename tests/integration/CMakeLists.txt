@@ -207,6 +207,10 @@ add_test(NAME test_cosim_table_runtime
          COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/../sv/run_test_cosim_table_runtime.sh)
 set_tests_properties(test_cosim_table_runtime PROPERTIES TIMEOUT 300)
 
+add_test(NAME test_cosim_table_multiram
+         COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/../sv/run_test_cosim_table_multiram.sh)
+set_tests_properties(test_cosim_table_multiram PROPERTIES TIMEOUT 180)
+
 add_test(NAME test_table_xrc_source_contract
          COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/test_table_xrc_source_contract.sh)
 set_tests_properties(test_table_xrc_source_contract PROPERTIES TIMEOUT 10)
