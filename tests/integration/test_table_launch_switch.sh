@@ -144,6 +144,7 @@ for console in login login-multi file; do
 done
 
 marker="$work/qemu-launched"
+invalid_descriptor="$work/invalid.json"
 fake_qemu="$work/qemu-marker"
 printf '#!/usr/bin/env bash\ntouch "$TABLE_LAUNCH_MARKER"\n' >"$fake_qemu"
 chmod +x "$fake_qemu"
@@ -154,16 +155,29 @@ expect_invalid_before_launch() {
     local accepted=0
     shift
 
-    rm -f "$marker"
+    rm -f "$marker" "$invalid_descriptor"
     if make -s -C "$repo" run-qemu CONSOLE=login NUM_RC=1 \
             QEMU="$fake_qemu" KERNEL=/bin/true ROOTFS=/bin/true \
             MGMT_NET=0 QEMU_TIME_MODE=realtime \
             LOG_DIR="$work/invalid-log" RUN_DIR="$work/invalid-run" \
-            CONN_JSON="$work/invalid.json" "$@" >/dev/null 2>&1; then
+            CONN_JSON="$invalid_descriptor" "$@" >/dev/null 2>&1; then
         accepted=1
     fi
+    [[ ! -e "$invalid_descriptor" ]] ||
+        fail "$label created a descriptor before rejection"
     [[ ! -e "$marker" ]] || fail "$label reached QEMU before rejection"
     ((accepted == 0)) || fail "$label was accepted"
+}
+
+expect_literal_rejected_without_evaluation() {
+    local variable=$1
+    local eval_marker="$work/${variable,,}-evaluated"
+
+    rm -f "$eval_marker"
+    expect_invalid_before_launch "literal $variable Make function" \
+        TABLE_BACKDOOR=on TABLE_PORT_BASE=10100 \
+        "$variable=\$(shell touch $eval_marker)invalid"
+    [[ ! -e "$eval_marker" ]] || fail "$variable evaluated a Make function"
 }
 
 expect_valid_launch() {
@@ -199,6 +213,12 @@ expect_invalid_before_launch "extremely long PORT_BASE" \
     PORT_BASE=999999999999999999999999999999999999
 expect_invalid_before_launch "table port range overflow" \
     TABLE_BACKDOOR=on TABLE_PORT_BASE=65535 NUM_RC=2
+expect_invalid_before_launch "effective default transport collision" \
+    TABLE_BACKDOOR=on TABLE_PORT_BASE=9100 PORT_BASE=0 NUM_RC=1
+expect_invalid_before_launch "main transport port range overflow" \
+    TABLE_BACKDOOR=on TABLE_PORT_BASE=10100 PORT_BASE=65535 NUM_RC=1
+expect_literal_rejected_without_evaluation NUM_RC
+expect_literal_rejected_without_evaluation PORT_BASE
 for collision in 9100 9101 9102; do
     expect_invalid_before_launch "RC0 transport collision at $collision" \
         TABLE_BACKDOOR=on "TABLE_PORT_BASE=$collision" PORT_BASE=9100

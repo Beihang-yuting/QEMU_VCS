@@ -33,6 +33,7 @@ ROOTFS        ?= $(wildcard $(PROJECT_DIR)/guest/images/$(GUEST_TYPE)/rootfs.ext
 # ============================================================
 # TCP 模式
 PORT_BASE     ?= 9100
+override PORT_BASE := $(value PORT_BASE)
 TABLE_BACKDOOR ?= off
 TABLE_PORT_BASE ?= 10100
 override TABLE_BACKDOOR := $(value TABLE_BACKDOOR)
@@ -63,6 +64,8 @@ else
 endif
 # 多 QEMU 实例 + 连接描述符
 NUM_RC         ?= 1
+override NUM_RC := $(value NUM_RC)
+export PORT_BASE NUM_RC
 # 每个 cosim endpoint 的 PF 数量；VCS +NUM_PFS 必须取相同值。
 NUM_PFS        ?= 1
 # Physical VIP/DUT request-tag width. QEMU retains 10-bit software tags and
@@ -223,8 +226,8 @@ validate-table-backdoor:
 		exit 1; \
 	fi
 	@if [ "$$TABLE_BACKDOOR" = on ]; then \
-		num_rc_text='$(NUM_RC)'; \
-		port_base_text='$(PORT_BASE)'; \
+		num_rc_text=$$NUM_RC; \
+		port_base_text=$$PORT_BASE; \
 		if ! printf '%s\n' "$$num_rc_text" | grep -Eq '^[1-9][0-9]*$$' || \
 			[ "$${#num_rc_text}" -gt 5 ] || \
 			{ [ "$${#num_rc_text}" -eq 5 ] && [[ "$$num_rc_text" > 65535 ]]; }; then \
@@ -240,6 +243,15 @@ validate-table-backdoor:
 		table_base=$$((10#$$TABLE_PORT_BASE)); \
 		num_rc=$$((10#$$num_rc_text)); \
 		port_base=$$((10#$$port_base_text)); \
+		if [ "$$port_base" -eq 0 ]; then \
+			effective_port_base=9100; \
+		else \
+			effective_port_base=$$port_base; \
+		fi; \
+		if [ $$((effective_port_base + (num_rc - 1) * 3 + 2)) -gt 65535 ]; then \
+			echo "[错误] 主 transport 端口范围超过 65535" >&2; \
+			exit 1; \
+		fi; \
 		if [ $$((table_base + num_rc - 1)) -gt 65535 ]; then \
 			echo "[错误] table port 范围超过 65535" >&2; \
 			exit 1; \
@@ -247,7 +259,7 @@ validate-table-backdoor:
 		for ((table_rc = 0; table_rc < num_rc; table_rc++)); do \
 			table_port=$$((table_base + table_rc)); \
 			for ((main_rc = 0; main_rc < num_rc; main_rc++)); do \
-				main_port=$$((port_base + main_rc * 3)); \
+				main_port=$$((effective_port_base + main_rc * 3)); \
 				if [ "$$table_port" -ge "$$main_port" ] && \
 				   [ "$$table_port" -le $$((main_port + 2)) ]; then \
 					echo "[错误] table port $$table_port 与 RC$$main_rc 主 transport 端口冲突" >&2; \
