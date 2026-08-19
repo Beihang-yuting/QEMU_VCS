@@ -104,6 +104,10 @@ add_test(NAME test_pcie_launch_topology
          COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/test_pcie_launch_topology.sh)
 set_tests_properties(test_pcie_launch_topology PROPERTIES TIMEOUT 10)
 
+add_test(NAME test_table_launch_switch
+         COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/test_table_launch_switch.sh)
+set_tests_properties(test_table_launch_switch PROPERTIES TIMEOUT 20)
+
 add_test(NAME test_qemu_request_routing_source
          COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/test_qemu_request_routing_source.sh)
 set_tests_properties(test_qemu_request_routing_source PROPERTIES TIMEOUT 10)

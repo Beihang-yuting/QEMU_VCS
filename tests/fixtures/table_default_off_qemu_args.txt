@@ -1,0 +1,34 @@
+[login]
+LD_LIBRARY_PATH=/usr/local/lib:/usr/local/lib/x86_64-linux-gnu:<PROJECT>/build/bridge:${LD_LIBRARY_PATH:-} <PROJECT>/.table-launch-fixture/qemu -accel tcg -icount shift=auto,align=off,sleep=on -M q35 -m 256M -smp 1 -snapshot \
+	-kernel <PROJECT>/.table-launch-fixture/bzImage -drive file=<PROJECT>/.table-launch-fixture/rootfs.ext4,format=raw,if=none,id=rootdisk0 \
+	-device virtio-blk-pci,drive=rootdisk0,addr=0x10 \
+	-append "console=ttyS0 root=/dev/vda rw guest_ip=10.0.0.10" \
+	-netdev user,id=mgmtnet0,hostfwd=tcp:127.0.0.1:2222-:22 -device e1000e,netdev=mgmtnet0,mac=52:54:00:53:00:01 \
+	-device "pcie-root-port,id=cosim_rp0,bus=pcie.0,addr=0x3,slot=3,chassis=1,mem-reserve=64M,pref64-reserve=$PCIE_PREF64_RESERVE" \
+	-device "cosim-pcie-rc,bus=cosim_rp0,addr=0x0,num_pfs=1,transport=tcp,port_base=9100,instance_id=0,mmio_timeout_ms=180000" \
+	-display none \
+	-chardev stdio,id=cons0,mux=on,signal=off,logfile=<PROJECT>/logs/qemu_rc0.log \
+	-serial chardev:cons0 -mon chardev=cons0,mode=readline
+[login-multi]
+	LD_LIBRARY_PATH=/usr/local/lib:/usr/local/lib/x86_64-linux-gnu:<PROJECT>/build/bridge:${LD_LIBRARY_PATH:-} <PROJECT>/.table-launch-fixture/qemu -accel tcg -icount shift=auto,align=off,sleep=on -M q35 -m 256M -smp 1 -snapshot \
+		-kernel <PROJECT>/.table-launch-fixture/bzImage -drive file=<PROJECT>/.table-launch-fixture/rootfs.ext4,format=raw,if=none,id=rootdisk$r \
+		-device virtio-blk-pci,drive=rootdisk$r,addr=0x10 \
+		-append "console=ttyS0 root=/dev/vda rw guest_ip=10.0.0.$((10+r))" \
+		-netdev user,id=mgmtnet$r,hostfwd=tcp:127.0.0.1:$(( 2222 + r ))-:22 -device e1000e,netdev=mgmtnet$r,mac=52:54:00:53:$(printf '%02x:%02x' $(( (r + 1) / 256 )) $(( (r + 1) % 256 ))) \
+		-device "pcie-root-port,id=cosim_rp$r,bus=pcie.0,addr=0x3,slot=3,chassis=$((r+1)),mem-reserve=64M,pref64-reserve=$PCIE_PREF64_RESERVE" \
+		-device "cosim-pcie-rc,bus=cosim_rp$r,addr=0x0,num_pfs=1,transport=tcp,port_base=9100,instance_id=$r,mmio_timeout_ms=180000" \
+		-display none \
+		-chardev socket,id=cons$r,path=<PROJECT>/run/console_rc$r.sock,server=on,wait=off,logfile=<PROJECT>/logs/qemu_rc$r.log \
+		-serial chardev:cons$r \
+		-monitor unix:<PROJECT>/run/monitor_rc$r.sock,server=on,wait=off \
+		> <PROJECT>/logs/qemu_rc$r.boot 2>&1 & \
+[file]
+	LD_LIBRARY_PATH=/usr/local/lib:/usr/local/lib/x86_64-linux-gnu:<PROJECT>/build/bridge:${LD_LIBRARY_PATH:-} <PROJECT>/.table-launch-fixture/qemu -accel tcg -icount shift=auto,align=off,sleep=on -M q35 -m 256M -smp 1 -snapshot \
+		-kernel <PROJECT>/.table-launch-fixture/bzImage -drive file=<PROJECT>/.table-launch-fixture/rootfs.ext4,format=raw,if=none,id=rootdisk$r \
+		-device virtio-blk-pci,drive=rootdisk$r,addr=0x10 \
+		-append "console=ttyS0 root=/dev/vda rw guest_ip=10.0.0.$((10+r))" \
+		-netdev user,id=mgmtnet$r,hostfwd=tcp:127.0.0.1:$(( 2222 + r ))-:22 -device e1000e,netdev=mgmtnet$r,mac=52:54:00:53:$(printf '%02x:%02x' $(( (r + 1) / 256 )) $(( (r + 1) % 256 ))) \
+		-device "pcie-root-port,id=cosim_rp$r,bus=pcie.0,addr=0x3,slot=3,chassis=$((r+1)),mem-reserve=64M,pref64-reserve=$PCIE_PREF64_RESERVE" \
+		-device "cosim-pcie-rc,bus=cosim_rp$r,addr=0x0,num_pfs=1,transport=tcp,port_base=9100,instance_id=$r,mmio_timeout_ms=180000" \
+		-nographic -serial file:<PROJECT>/logs/qemu_rc$r.log -monitor none \
+		> <PROJECT>/logs/qemu_rc$r.boot 2>&1 & \

@@ -6,7 +6,7 @@
 SHELL := /bin/bash
 
 .PHONY: all help bridge cosim-lib cosim-lib-eth qemu-device run-qemu \
-        validate-pcie-pref64-reserve validate-qemu-time-mode validate-mgmt-net validate-tag-bit \
+        validate-pcie-pref64-reserve validate-qemu-time-mode validate-mgmt-net validate-tag-bit validate-table-backdoor \
         test-unit test-integration test \
         clean clean-logs clean-run clean-all info
 
@@ -33,6 +33,27 @@ ROOTFS        ?= $(wildcard $(PROJECT_DIR)/guest/images/$(GUEST_TYPE)/rootfs.ext
 # ============================================================
 # TCP 模式
 PORT_BASE     ?= 9100
+TABLE_BACKDOOR ?= off
+TABLE_PORT_BASE ?= 10100
+override TABLE_BACKDOOR := $(value TABLE_BACKDOOR)
+override TABLE_PORT_BASE := $(value TABLE_PORT_BASE)
+export TABLE_BACKDOOR TABLE_PORT_BASE
+empty :=
+space := $(empty) $(empty)
+TABLE_QEMU_ARGS_RC0 :=
+TABLE_QEMU_ARGS_LOOP =
+TABLE_KERNEL_ARG :=
+TABLE_CONN_JSON_FIELDS = :
+TABLE_RC0_JSON = echo "  \"rcs\": [ {\"rc\": 0, \"instance_id\": 0, \"port\": $(PORT_BASE)} ],"
+TABLE_LOOP_JSON = printf " {\"rc\": %d, \"instance_id\": %d, \"port\": %d}" $$r $$r $$(($(PORT_BASE)+r*3))
+ifeq ($(TABLE_BACKDOOR),on)
+TABLE_QEMU_ARGS_RC0 := $(space)-device "cosim-table-ctrl,bus=pcie.0,addr=0x6,table_port_base=$(TABLE_PORT_BASE),instance_id=0,rc_id=0,device_instance=0"
+TABLE_QEMU_ARGS_LOOP = $(space)-device "cosim-table-ctrl,bus=pcie.0,addr=0x6,table_port_base=$(TABLE_PORT_BASE),instance_id=$$r,rc_id=$$r,device_instance=0"
+TABLE_KERNEL_ARG := $(space)dpu_snd1.table_backdoor=1
+TABLE_CONN_JSON_FIELDS = echo "  \"table_backdoor\": true,"; echo "  \"table_port_base\": $(TABLE_PORT_BASE),"; echo "  \"table_port_formula\": \"port = table_port_base + instance_id\","
+TABLE_RC0_JSON = echo "  \"rcs\": [ {\"rc\": 0, \"instance_id\": 0, \"port\": $(PORT_BASE), \"table_port\": $(TABLE_PORT_BASE)} ],"
+TABLE_LOOP_JSON = printf " {\"rc\": %d, \"instance_id\": %d, \"port\": %d, \"table_port\": %d}" $$r $$r $$(($(PORT_BASE)+r*3)) $$(($(TABLE_PORT_BASE)+r))
+endif
 ifeq ($(GUEST_TYPE),ubuntu-server)
   GUEST_MEMORY  ?= 2G
 else ifeq ($(GUEST_TYPE),debian)
@@ -190,7 +211,46 @@ validate-tag-bit:
 		exit 1; \
 	fi
 
-run-qemu: validate-pcie-pref64-reserve validate-qemu-time-mode validate-mgmt-net validate-tag-bit
+validate-table-backdoor:
+	@if ! printf '%s\n' "$$TABLE_BACKDOOR" | grep -Eq '^(off|on)$$'; then \
+		echo "[错误] TABLE_BACKDOOR 必须是 off 或 on" >&2; \
+		exit 1; \
+	fi
+	@if ! printf '%s\n' "$$TABLE_PORT_BASE" | grep -Eq '^[0-9]+$$' || \
+		[ "$$TABLE_PORT_BASE" -lt 1 ] || [ "$$TABLE_PORT_BASE" -gt 65535 ]; then \
+		echo "[错误] TABLE_PORT_BASE 必须是 1..65535" >&2; \
+		exit 1; \
+	fi
+	@if [ "$$TABLE_BACKDOOR" = on ]; then \
+		if ! printf '%s\n' '$(NUM_RC)' | grep -Eq '^[1-9][0-9]*$$'; then \
+			echo "[错误] TABLE_BACKDOOR=on 要求 NUM_RC 是正整数" >&2; \
+			exit 1; \
+		fi; \
+		if ! printf '%s\n' '$(PORT_BASE)' | grep -Eq '^[0-9]+$$'; then \
+			echo "[错误] TABLE_BACKDOOR=on 要求 PORT_BASE 是非负整数" >&2; \
+			exit 1; \
+		fi; \
+		table_base=$$((10#$$TABLE_PORT_BASE)); \
+		num_rc=$$((10#$(NUM_RC))); \
+		port_base=$$((10#$(PORT_BASE))); \
+		if [ $$((table_base + num_rc - 1)) -gt 65535 ]; then \
+			echo "[错误] table port 范围超过 65535" >&2; \
+			exit 1; \
+		fi; \
+		for ((table_rc = 0; table_rc < num_rc; table_rc++)); do \
+			table_port=$$((table_base + table_rc)); \
+			for ((main_rc = 0; main_rc < num_rc; main_rc++)); do \
+				main_port=$$((port_base + main_rc * 3)); \
+				if [ "$$table_port" -ge "$$main_port" ] && \
+				   [ "$$table_port" -le $$((main_port + 2)) ]; then \
+					echo "[错误] table port $$table_port 与 RC$$main_rc 主 transport 端口冲突" >&2; \
+					exit 1; \
+				fi; \
+			done; \
+		done; \
+	fi
+
+run-qemu: validate-pcie-pref64-reserve validate-qemu-time-mode validate-mgmt-net validate-tag-bit validate-table-backdoor
 	@case '$(NUM_PFS)' in 1|2|3|4|5|6|7|8|9|10|11|12|13|14|15|16) ;; *) echo "[错误] NUM_PFS 必须是 1..16，当前值: $(NUM_PFS)"; exit 1;; esac
 	@[ -f '$(QEMU)' ] || { echo "[错误] QEMU 未找到: $(QEMU)（先 ./setup.sh 建 QEMU）"; exit 1; }
 	@[ -n '$(KERNEL)' ] && [ -f '$(KERNEL)' ] || { echo "[错误] Kernel 未找到 (GUEST_TYPE=$(GUEST_TYPE))"; exit 1; }
@@ -204,7 +264,8 @@ ifeq ($(CONSOLE),login)
 	  echo "  \"port_base\": $(PORT_BASE),"; \
 	  echo "  \"num_rc\": 1,"; \
 	  echo "  \"port_formula\": \"port = port_base + instance_id*3\","; \
-	  echo "  \"rcs\": [ {\"rc\": 0, \"instance_id\": 0, \"port\": $(PORT_BASE)} ],"; \
+	  $(TABLE_CONN_JSON_FIELDS); \
+	  $(TABLE_RC0_JSON); \
 	  echo "  \"device\": { \"vendor\": \"$(DEV_VENDOR)\", \"device\": \"$(DEV_DEVICE)\", \"bar0_size\": \"$(DEV_BAR0_SIZE)\", \"num_pfs\": $(NUM_PFS), \"tag_bit\": $(TAG_BIT) }"; \
 	  echo "}"; } > $(CONN_JSON)
 	@echo "[cosim] 描述符: $(CONN_JSON)"; cat $(CONN_JSON)
@@ -212,10 +273,10 @@ ifeq ($(CONSOLE),login)
 	@$(_QEMU_LD_PATH) $(QEMU)$(if $(QEMU_TIME_ARGS), $(QEMU_TIME_ARGS)) -M q35 -m $(GUEST_MEMORY) -smp 1 -snapshot \
 		-kernel $(KERNEL) -drive file=$(ROOTFS),format=raw,if=none,id=rootdisk0 \
 		-device virtio-blk-pci,drive=rootdisk0,addr=0x10 \
-		-append "console=ttyS0 root=/dev/vda rw guest_ip=10.0.0.10" \
+		-append "console=ttyS0 root=/dev/vda rw guest_ip=10.0.0.10$(TABLE_KERNEL_ARG)" \
 		$(MGMT_NET_ARGS_RC0) \
 		-device "pcie-root-port,id=cosim_rp0,bus=pcie.0,addr=0x3,slot=3,chassis=1,mem-reserve=64M,pref64-reserve=$$PCIE_PREF64_RESERVE" \
-		-device "cosim-pcie-rc,bus=cosim_rp0,addr=0x0,num_pfs=$(NUM_PFS),transport=tcp,port_base=$(PORT_BASE),instance_id=0,mmio_timeout_ms=$(MMIO_TIMEOUT_MS)" \
+		-device "cosim-pcie-rc,bus=cosim_rp0,addr=0x0,num_pfs=$(NUM_PFS),transport=tcp,port_base=$(PORT_BASE),instance_id=0,mmio_timeout_ms=$(MMIO_TIMEOUT_MS)"$(TABLE_QEMU_ARGS_RC0) \
 		-display none \
 		-chardev stdio,id=cons0,mux=on,signal=off,logfile=$(LOG_DIR)/qemu_rc0.log \
 		-serial chardev:cons0 -mon chardev=cons0,mode=readline
@@ -228,10 +289,10 @@ else ifeq ($(CONSOLE),login-multi)
 		$(_QEMU_LD_PATH) $(QEMU)$(if $(QEMU_TIME_ARGS), $(QEMU_TIME_ARGS)) -M q35 -m $(GUEST_MEMORY) -smp 1 -snapshot \
 			-kernel $(KERNEL) -drive file=$(ROOTFS),format=raw,if=none,id=rootdisk$$r \
 			-device virtio-blk-pci,drive=rootdisk$$r,addr=0x10 \
-			-append "console=ttyS0 root=/dev/vda rw guest_ip=10.0.0.$$((10+r))" \
+			-append "console=ttyS0 root=/dev/vda rw guest_ip=10.0.0.$$((10+r))$(TABLE_KERNEL_ARG)" \
 			$(MGMT_NET_ARGS_LOOP) \
 			-device "pcie-root-port,id=cosim_rp$$r,bus=pcie.0,addr=0x3,slot=3,chassis=$$((r+1)),mem-reserve=64M,pref64-reserve=$$PCIE_PREF64_RESERVE" \
-			-device "cosim-pcie-rc,bus=cosim_rp$$r,addr=0x0,num_pfs=$(NUM_PFS),transport=tcp,port_base=$(PORT_BASE),instance_id=$$r,mmio_timeout_ms=$(MMIO_TIMEOUT_MS)" \
+			-device "cosim-pcie-rc,bus=cosim_rp$$r,addr=0x0,num_pfs=$(NUM_PFS),transport=tcp,port_base=$(PORT_BASE),instance_id=$$r,mmio_timeout_ms=$(MMIO_TIMEOUT_MS)"$(TABLE_QEMU_ARGS_LOOP) \
 			-display none \
 			-chardev socket,id=cons$$r,path=$(RUN_DIR)/console_rc$$r.sock,server=on,wait=off,logfile=$(LOG_DIR)/qemu_rc$$r.log \
 			-serial chardev:cons$$r \
@@ -246,8 +307,9 @@ else ifeq ($(CONSOLE),login-multi)
 	  echo "  \"port_base\": $(PORT_BASE),"; \
 	  echo "  \"num_rc\": $(NUM_RC),"; \
 	  echo "  \"port_formula\": \"port = port_base + instance_id*3\","; \
+	  $(TABLE_CONN_JSON_FIELDS); \
 	  printf "  \"rcs\": ["; \
-	  for r in $$(seq 0 $$(($(NUM_RC)-1))); do [ $$r -gt 0 ] && printf ","; printf " {\"rc\": %d, \"instance_id\": %d, \"port\": %d}" $$r $$r $$(($(PORT_BASE)+r*3)); done; \
+	  for r in $$(seq 0 $$(($(NUM_RC)-1))); do [ $$r -gt 0 ] && printf ","; $(TABLE_LOOP_JSON); done; \
 	  echo " ],"; \
 	  echo "  \"device\": { \"vendor\": \"$(DEV_VENDOR)\", \"device\": \"$(DEV_DEVICE)\", \"bar0_size\": \"$(DEV_BAR0_SIZE)\", \"num_pfs\": $(NUM_PFS), \"tag_bit\": $(TAG_BIT) }"; \
 	  echo "}"; } > $(CONN_JSON); \
@@ -264,10 +326,10 @@ else
 		$(_QEMU_LD_PATH) $(QEMU)$(if $(QEMU_TIME_ARGS), $(QEMU_TIME_ARGS)) -M q35 -m $(GUEST_MEMORY) -smp 1 -snapshot \
 			-kernel $(KERNEL) -drive file=$(ROOTFS),format=raw,if=none,id=rootdisk$$r \
 			-device virtio-blk-pci,drive=rootdisk$$r,addr=0x10 \
-			-append "console=ttyS0 root=/dev/vda rw guest_ip=10.0.0.$$((10+r))" \
+			-append "console=ttyS0 root=/dev/vda rw guest_ip=10.0.0.$$((10+r))$(TABLE_KERNEL_ARG)" \
 			$(MGMT_NET_ARGS_LOOP) \
 			-device "pcie-root-port,id=cosim_rp$$r,bus=pcie.0,addr=0x3,slot=3,chassis=$$((r+1)),mem-reserve=64M,pref64-reserve=$$PCIE_PREF64_RESERVE" \
-			-device "cosim-pcie-rc,bus=cosim_rp$$r,addr=0x0,num_pfs=$(NUM_PFS),transport=tcp,port_base=$(PORT_BASE),instance_id=$$r,mmio_timeout_ms=$(MMIO_TIMEOUT_MS)" \
+			-device "cosim-pcie-rc,bus=cosim_rp$$r,addr=0x0,num_pfs=$(NUM_PFS),transport=tcp,port_base=$(PORT_BASE),instance_id=$$r,mmio_timeout_ms=$(MMIO_TIMEOUT_MS)"$(TABLE_QEMU_ARGS_LOOP) \
 			-nographic -serial file:$(LOG_DIR)/qemu_rc$$r.log -monitor none \
 			> $(LOG_DIR)/qemu_rc$$r.boot 2>&1 & \
 		PIDS="$$PIDS $$!"; \
@@ -279,8 +341,9 @@ else
 	  echo "  \"port_base\": $(PORT_BASE),"; \
 	  echo "  \"num_rc\": $(NUM_RC),"; \
 	  echo "  \"port_formula\": \"port = port_base + instance_id*3\","; \
+	  $(TABLE_CONN_JSON_FIELDS); \
 	  printf "  \"rcs\": ["; \
-	  for r in $$(seq 0 $$(($(NUM_RC)-1))); do [ $$r -gt 0 ] && printf ","; printf " {\"rc\": %d, \"instance_id\": %d, \"port\": %d}" $$r $$r $$(($(PORT_BASE)+r*3)); done; \
+	  for r in $$(seq 0 $$(($(NUM_RC)-1))); do [ $$r -gt 0 ] && printf ","; $(TABLE_LOOP_JSON); done; \
 	  echo " ],"; \
 	  echo "  \"device\": { \"vendor\": \"$(DEV_VENDOR)\", \"device\": \"$(DEV_DEVICE)\", \"bar0_size\": \"$(DEV_BAR0_SIZE)\", \"num_pfs\": $(NUM_PFS), \"tag_bit\": $(TAG_BIT) }"; \
 	  echo "}"; } > $(CONN_JSON); \

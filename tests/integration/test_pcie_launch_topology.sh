@@ -433,6 +433,23 @@ if ! grep -Eq '^run-qemu:[[:space:]]+validate-pcie-pref64-reserve([[:space:]]|$)
     exit 1
 fi
 
+if ! grep -Eq '^[[:space:]]*TABLE_BACKDOOR[[:space:]]*\?=[[:space:]]*off[[:space:]]*$' "$makefile"; then
+    echo "FAIL: Makefile has no dormant TABLE_BACKDOOR=off default" >&2
+    exit 1
+fi
+if ! grep -Eq '^[[:space:]]*TABLE_PORT_BASE[[:space:]]*\?=[[:space:]]*10100[[:space:]]*$' "$makefile"; then
+    echo "FAIL: Makefile has no TABLE_PORT_BASE=10100 default" >&2
+    exit 1
+fi
+if ! grep -Eq '^[[:space:]]*export[[:space:]]+TABLE_BACKDOOR[[:space:]]+TABLE_PORT_BASE[[:space:]]*$' "$makefile"; then
+    echo "FAIL: Makefile does not export the table launch controls" >&2
+    exit 1
+fi
+if ! grep -Eq '^run-qemu:.*validate-table-backdoor([[:space:]]|$)' "$makefile"; then
+    echo "FAIL: run-qemu does not validate table launch controls before launch" >&2
+    exit 1
+fi
+
 qemu_device_body=$(sed -n '/^qemu-device:/,/^# host_mem/p' "$makefile")
 if ! setup_qemu_injection_body=$(extract_unique_setup_qemu_injection_body); then
     echo "FAIL: setup.sh must contain exactly one initial QEMU injection block" >&2
