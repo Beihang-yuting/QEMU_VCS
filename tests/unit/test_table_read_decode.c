@@ -2,7 +2,6 @@
 #include "table_ctrl_core.h"
 #include "table_target.h"
 
-#include <stdatomic.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
@@ -164,17 +163,12 @@ static int test_route_capability_stride_and_boundary(void)
     return 0;
 }
 
-static int test_inactive_controller_and_stale_generation(void)
+static int test_stale_generation(void)
 {
     const cosim_table_target_snapshot_t snapshot = make_snapshot();
-    cosim_table_ctrl_core_t core;
     cosim_table_target_t target;
     uint64_t aligned;
     uint8_t byte_offset;
-
-    memset(&core, 0, sizeof(core));
-    atomic_init(&core.ready, 0);
-    CHECK(!atomic_load_explicit(&core.ready, memory_order_acquire));
 
     CHECK(cosim_table_decode_read(snapshot.bar_sizes, snapshot.rc_id,
                                   snapshot.device_instance, 0, 0, 0, 0, 4,
@@ -192,7 +186,7 @@ int main(void)
     CHECK(test_eligible_sizes_alignment_and_extraction() == 0);
     CHECK(test_ineligible_accesses() == 0);
     CHECK(test_route_capability_stride_and_boundary() == 0);
-    CHECK(test_inactive_controller_and_stale_generation() == 0);
+    CHECK(test_stale_generation() == 0);
     puts("PASS: table PF0 read decode policy");
     return 0;
 }

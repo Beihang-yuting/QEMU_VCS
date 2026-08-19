@@ -84,6 +84,17 @@ static CosimTableCtrl *cosim_table_ctrl_registry_find(
     return NULL;
 }
 
+static CosimTableCtrl *cosim_table_ctrl_registry_find_ready(
+    uint16_t rc_id, uint16_t device_instance)
+{
+    CosimTableCtrl *s =
+        cosim_table_ctrl_registry_find(rc_id, device_instance);
+
+    if (s == NULL || !cosim_table_ctrl_lifecycle_is_ready(&s->lifecycle))
+        return NULL;
+    return s;
+}
+
 static int cosim_table_ctrl_registry_add(CosimTableCtrl *s)
 {
     g_assert(bql_locked());
@@ -205,8 +216,8 @@ cosim_table_status_t cosim_table_ctrl_try_read(
     if (target == NULL || returned_dword == NULL ||
         (aligned_bar_offset & UINT64_C(3)) != 0)
         return COSIM_TABLE_ST_PROTOCOL;
-    s = cosim_table_ctrl_registry_find(rc_id, device_instance);
-    if (s == NULL || !cosim_table_ctrl_lifecycle_is_ready(&s->lifecycle))
+    s = cosim_table_ctrl_registry_find_ready(rc_id, device_instance);
+    if (s == NULL)
         return COSIM_TABLE_ST_NOT_READY;
 
     /* The doorbell lock owns client lifetime across the blocking RPC.  State

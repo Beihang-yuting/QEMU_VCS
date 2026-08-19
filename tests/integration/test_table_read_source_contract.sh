@@ -107,6 +107,18 @@ require(write, "cosim_mmio_do_write(s, pcie_addr, target_bdf, val, size);",
 if re.search(r"(?:cosim_)?table", write, re.I):
     fail("cosim_mmio_write must contain zero table references")
 
+ready_lookup = function_body(ctrl_source,
+                             "cosim_table_ctrl_registry_find_ready")
+ready_lookup_compact = compact(ready_lookup)
+require(ready_lookup, "cosim_table_ctrl_registry_find",
+        "controller ready lookup")
+require(ready_lookup, "cosim_table_ctrl_lifecycle_is_ready",
+        "controller ready lookup")
+require(ready_lookup_compact,
+        "if(s==NULL||!cosim_table_ctrl_lifecycle_is_ready(&s->lifecycle))"
+        "returnNULL;",
+        "controller ready lookup")
+
 try_read = function_body(ctrl_source, "cosim_table_ctrl_try_read")
 for token in ("cosim_pcie_rc_get_table_target", "cosim_table_target_matches",
               "COSIM_TABLE_OP_READ_DWORD", "COSIM_TABLE_OP_WRITE",
@@ -117,6 +129,10 @@ require(try_read, "COSIM_TABLE_ST_NOT_READY", "cosim_table_ctrl_try_read")
 require(try_read, "COSIM_TABLE_ST_TARGET_GONE", "cosim_table_ctrl_try_read")
 require(try_read, "COSIM_TABLE_ST_NO_ROUTE", "cosim_table_ctrl_try_read")
 require(try_read, "COSIM_TABLE_ST_UNSUPPORTED", "cosim_table_ctrl_try_read")
+require(compact(try_read),
+        "s=cosim_table_ctrl_registry_find_ready(rc_id,device_instance);"
+        "if(s==NULL)returnCOSIM_TABLE_ST_NOT_READY;",
+        "cosim_table_ctrl_try_read inactive controller path")
 
 realize = function_body(ctrl_source, "cosim_table_ctrl_realize")
 exit_body = function_body(ctrl_source, "cosim_table_ctrl_exit")
