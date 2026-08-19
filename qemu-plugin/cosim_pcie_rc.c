@@ -8,6 +8,8 @@
  * 编译时需要链接 libcosim_bridge.so
  */
 #include "hw/net/cosim_pcie_rc.h"
+#include "hw/net/cosim_table_ctrl.h"
+#include "hw/net/table_ctrl_core.h"
 #include "qemu/log.h"
 #include "qemu/module.h"
 #include "qemu/main-loop.h"   /* qemu_bh_new / qemu_bh_schedule */
@@ -190,6 +192,55 @@ static uint64_t cosim_mmio_read(void *opaque, hwaddr addr, unsigned size)
 {
     CosimBarContext *bc = (CosimBarContext *)opaque;
     CosimPCIeRC *s = bc->dev;
+    cosim_table_target_snapshot_t snapshot;
+    cosim_table_target_t table_target;
+    cosim_table_status_t table_status;
+    uint64_t aligned_bar_offset;
+    uint32_t returned_dword;
+    uint8_t byte_offset;
+
+    /* Eight-byte reads bypass even target/controller lookup.  The decoder
+     * additionally restricts interception to PF0, the first two dense owner
+     * BARs, and 1/2/4-byte accesses contained in one DWORD. */
+    if (size != 8 && s->pf_index == 0 &&
+        cosim_pcie_rc_get_table_target(s->instance_id, &snapshot) &&
+        cosim_table_decode_read(snapshot.bar_sizes, snapshot.rc_id,
+                                snapshot.device_instance, (uint8_t)s->pf_index,
+                                (uint8_t)bc->bar_index, bc->is_aperture,
+                                addr, size, &table_target,
+                                &aligned_bar_offset, &byte_offset)) {
+        table_target.pci_domain =
+            cosim_table_cpu_to_le16(snapshot.pci_domain);
+        table_target.target_bdf =
+            cosim_table_cpu_to_le16(snapshot.target_bdf);
+        table_target.generation =
+            cosim_table_cpu_to_le32(snapshot.generation);
+        table_status = cosim_table_ctrl_try_read(
+            snapshot.rc_id, snapshot.device_instance, &table_target,
+            aligned_bar_offset, &returned_dword);
+        switch (table_status) {
+        case COSIM_TABLE_ST_SUCCESS:
+            return cosim_table_extract_read(returned_dword, byte_offset, size);
+        case COSIM_TABLE_ST_NOT_READY:
+        case COSIM_TABLE_ST_NO_ROUTE:
+        case COSIM_TABLE_ST_UNSUPPORTED:
+            break;
+        case COSIM_TABLE_ST_TIMEOUT:
+        case COSIM_TABLE_ST_TARGET_GONE:
+        case COSIM_TABLE_ST_PROTOCOL:
+        case COSIM_TABLE_ST_UNKNOWN:
+        case COSIM_TABLE_ST_EXEC_ERROR:
+        default:
+            qemu_log_mask(LOG_GUEST_ERROR,
+                          "cosim: table MRd failed status=%u bar%d "
+                          "off=0x%lx size=%u -> all ones\n",
+                          (unsigned int)table_status, bc->bar_index,
+                          (unsigned long)addr, size);
+            return size == 1 ? UINT8_MAX
+                 : size == 2 ? UINT16_MAX
+                             : UINT32_MAX;
+        }
+    }
     if (!s->bridge_ctx) {
         qemu_log_mask(LOG_GUEST_ERROR, "cosim: read before bridge connected\n");
         return 0xFFFFFFFF;

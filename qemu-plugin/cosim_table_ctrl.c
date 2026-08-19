@@ -10,6 +10,7 @@
 #include "hw/qdev-properties.h"
 #include "qapi/error.h"
 #include "qemu/log.h"
+#include "qemu/main-loop.h"
 #include "qemu/module.h"
 
 #include <errno.h>
@@ -52,6 +53,8 @@ struct CosimTableCtrl {
     bool doorbell_lock_initialized;
     bool worker_wakeup_initialized;
     bool bar_initialized;
+    struct CosimTableCtrl *registry_next;
+    bool registry_registered;
 };
 
 #define TABLE_DEBUG(s, format, ...)                                            \
@@ -61,6 +64,54 @@ struct CosimTableCtrl {
                      ##__VA_ARGS__);                                           \
         }                                                                      \
     } while (0)
+
+/* Minimal BQL-only endpoint registry.  It indexes controller lifetimes and
+ * deliberately carries no PF/VF or BAR topology. */
+static CosimTableCtrl *g_cosim_table_ctrl_registry;
+
+static CosimTableCtrl *cosim_table_ctrl_registry_find(
+    uint16_t rc_id, uint16_t device_instance)
+{
+    CosimTableCtrl *entry;
+
+    g_assert(bql_locked());
+    for (entry = g_cosim_table_ctrl_registry; entry != NULL;
+         entry = entry->registry_next) {
+        if (entry->rc_id == rc_id &&
+            entry->device_instance == device_instance)
+            return entry;
+    }
+    return NULL;
+}
+
+static int cosim_table_ctrl_registry_add(CosimTableCtrl *s)
+{
+    g_assert(bql_locked());
+    if (s->registry_registered ||
+        cosim_table_ctrl_registry_find((uint16_t)s->rc_id,
+                                       (uint16_t)s->device_instance) != NULL)
+        return -1;
+    s->registry_next = g_cosim_table_ctrl_registry;
+    g_cosim_table_ctrl_registry = s;
+    s->registry_registered = true;
+    return 0;
+}
+
+static void cosim_table_ctrl_registry_remove(CosimTableCtrl *s)
+{
+    CosimTableCtrl **link;
+
+    g_assert(bql_locked());
+    if (!s->registry_registered)
+        return;
+    link = &g_cosim_table_ctrl_registry;
+    while (*link != NULL && *link != s)
+        link = &(*link)->registry_next;
+    if (*link == s)
+        *link = s->registry_next;
+    s->registry_next = NULL;
+    s->registry_registered = false;
+}
 
 static ssize_t cosim_table_dma_read(void *opaque, uint64_t address,
                                     void *buffer, size_t bytes)
@@ -136,6 +187,73 @@ static cosim_table_status_t cosim_table_read_dword(
     status = cosim_table_client_read_dword(s->client, request, completion,
                                            timeout_ms);
     return cosim_table_ctrl_lifecycle_complete_rpc(&s->lifecycle, status);
+}
+
+cosim_table_status_t cosim_table_ctrl_try_read(
+    uint16_t rc_id, uint16_t device_instance,
+    const cosim_table_target_t *target, uint64_t aligned_bar_offset,
+    uint32_t *returned_dword)
+{
+    cosim_table_target_snapshot_t snapshot;
+    cosim_table_completion_t completion;
+    cosim_table_read_dword_t request;
+    cosim_table_client_t *client;
+    CosimTableCtrl *s;
+    cosim_table_status_t status;
+
+    g_assert(bql_locked());
+    if (target == NULL || returned_dword == NULL ||
+        (aligned_bar_offset & UINT64_C(3)) != 0)
+        return COSIM_TABLE_ST_PROTOCOL;
+    s = cosim_table_ctrl_registry_find(rc_id, device_instance);
+    if (s == NULL || !cosim_table_ctrl_lifecycle_is_ready(&s->lifecycle))
+        return COSIM_TABLE_ST_NOT_READY;
+
+    /* The doorbell lock owns client lifetime across the blocking RPC.  State
+     * is inspected only briefly, preserving doorbell -> state -> transport. */
+    (void)pthread_mutex_lock(&s->doorbell_lock);
+    if (!cosim_table_ctrl_lifecycle_is_ready(&s->lifecycle)) {
+        status = COSIM_TABLE_ST_NOT_READY;
+        goto done;
+    }
+    (void)pthread_mutex_lock(&s->state_lock);
+    client = s->client;
+    (void)pthread_mutex_unlock(&s->state_lock);
+    if (client == NULL) {
+        status = COSIM_TABLE_ST_NOT_READY;
+        goto done;
+    }
+
+    /* Route entries intentionally contain zero placeholders for dynamic
+     * domain/BDF/generation.  Validate live identity against Task 9 state
+     * independently before asking the route map about static ownership. */
+    if (!cosim_pcie_rc_get_table_target(s->instance_id, &snapshot) ||
+        !cosim_table_target_matches(&snapshot, target)) {
+        status = COSIM_TABLE_ST_TARGET_GONE;
+        goto done;
+    }
+    if (cosim_table_client_match(client, target, aligned_bar_offset,
+                                 COSIM_TABLE_OP_READ_DWORD) == NULL) {
+        status = cosim_table_client_match(client, target, aligned_bar_offset,
+                                          COSIM_TABLE_OP_WRITE) != NULL
+                     ? COSIM_TABLE_ST_UNSUPPORTED
+                     : COSIM_TABLE_ST_NO_ROUTE;
+        goto done;
+    }
+
+    memset(&request, 0, sizeof(request));
+    request.target = *target;
+    request.bar_offset = cosim_table_cpu_to_le64(aligned_bar_offset);
+    memset(&completion, 0, sizeof(completion));
+    status = cosim_table_client_read_dword(client, &request, &completion,
+                                           (int)s->timeout_ms);
+    status = cosim_table_ctrl_lifecycle_complete_rpc(&s->lifecycle, status);
+    if (status == COSIM_TABLE_ST_SUCCESS)
+        *returned_dword = completion.returned_dword;
+
+done:
+    (void)pthread_mutex_unlock(&s->doorbell_lock);
+    return status;
 }
 
 static void cosim_table_ready_changed(void *opaque, int ready)
@@ -474,12 +592,20 @@ static void cosim_table_ctrl_realize(PCIDevice *pdev, Error **errp)
         error_setg(errp, "cosim-table: worker start failed");
         goto fail;
     }
+    if (cosim_table_ctrl_registry_add(s) != 0) {
+        error_setg(errp,
+                   "cosim-table: duplicate controller for rc_id=%u "
+                   "device_instance=%u",
+                   s->rc_id, s->device_instance);
+        goto fail;
+    }
     TABLE_DEBUG(s, "listening at %s:%u\n",
                 s->listen_addr != NULL ? s->listen_addr : "0.0.0.0",
                 (unsigned int)port);
     return;
 
 fail:
+    cosim_table_ctrl_registry_remove(s);
     cosim_table_ctrl_lifecycle_destroy(&s->lifecycle);
     cosim_table_ctrl_release_runtime(s);
     /* bar0 is an embedded child of the QOM device and is finalized with it. */
@@ -502,6 +628,7 @@ static void cosim_table_ctrl_exit(PCIDevice *pdev)
 {
     CosimTableCtrl *s = COSIM_TABLE_CTRL(pdev);
 
+    cosim_table_ctrl_registry_remove(s);
     (void)cosim_table_ctrl_lifecycle_stop(&s->lifecycle);
     cosim_table_ctrl_lifecycle_destroy(&s->lifecycle);
     /* bar0 is an embedded child of the QOM device and is finalized with it. */

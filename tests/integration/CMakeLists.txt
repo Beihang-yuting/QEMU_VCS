@@ -108,6 +108,10 @@ add_test(NAME test_qemu_request_routing_source
          COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/test_qemu_request_routing_source.sh)
 set_tests_properties(test_qemu_request_routing_source PROPERTIES TIMEOUT 10)
 
+add_test(NAME test_table_read_source_contract
+         COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/test_table_read_source_contract.sh)
+set_tests_properties(test_table_read_source_contract PROPERTIES TIMEOUT 10)
+
 add_test(NAME test_qemu_table_target_header_closure
          COMMAND bash
                  ${CMAKE_CURRENT_SOURCE_DIR}/test_qemu_table_target_build_closure.sh

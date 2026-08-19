@@ -62,6 +62,15 @@ target_link_libraries(test_table_ctrl_core cosim_bridge_common pthread)
 add_test(NAME test_table_ctrl_core COMMAND test_table_ctrl_core)
 set_tests_properties(test_table_ctrl_core PROPERTIES TIMEOUT 10)
 
+add_executable(test_table_read_decode test_table_read_decode.c)
+target_include_directories(test_table_read_decode PRIVATE
+    ${CMAKE_SOURCE_DIR}/bridge/qemu
+    ${CMAKE_SOURCE_DIR}/bridge/table
+)
+target_link_libraries(test_table_read_decode cosim_bridge_common pthread)
+add_test(NAME test_table_read_decode COMMAND test_table_read_decode)
+set_tests_properties(test_table_read_decode PROPERTIES TIMEOUT 10)
+
 add_executable(test_table_lifecycle test_table_lifecycle.c)
 target_include_directories(test_table_lifecycle PRIVATE
     ${CMAKE_SOURCE_DIR}/bridge/qemu
