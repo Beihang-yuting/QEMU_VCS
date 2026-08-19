@@ -68,6 +68,17 @@ if ! cmp -s "$baseline" "$work/off.txt"; then
     diff -u "$baseline" "$work/off.txt" >&2 || true
     fail "explicit off QEMU recipes differ from the default-off baseline"
 fi
+capture_qemu_recipes TABLE_PORT_BASE=0 >"$work/default-invalid-port.txt"
+if ! cmp -s "$baseline" "$work/default-invalid-port.txt"; then
+    diff -u "$baseline" "$work/default-invalid-port.txt" >&2 || true
+    fail "default-off QEMU recipes depend on dormant TABLE_PORT_BASE"
+fi
+capture_qemu_recipes TABLE_BACKDOOR=off TABLE_PORT_BASE=not-a-port \
+    >"$work/off-invalid-port.txt"
+if ! cmp -s "$baseline" "$work/off-invalid-port.txt"; then
+    diff -u "$baseline" "$work/off-invalid-port.txt" >&2 || true
+    fail "explicit-off QEMU recipes depend on dormant TABLE_PORT_BASE"
+fi
 
 for console in login login-multi file; do
     enabled=$(dry_run "$console" TABLE_BACKDOOR=on TABLE_PORT_BASE=10100)
@@ -194,6 +205,10 @@ expect_valid_launch() {
     [[ -e "$marker" ]] || fail "$label did not reach QEMU"
 }
 
+expect_valid_launch "default-off with zero dormant table port" \
+    TABLE_PORT_BASE=0
+expect_valid_launch "explicit off with nonnumeric dormant table port" \
+    TABLE_BACKDOOR=off TABLE_PORT_BASE=not-a-port
 expect_invalid_before_launch "unknown TABLE_BACKDOOR" \
     TABLE_BACKDOOR=maybe TABLE_PORT_BASE=10100
 expect_invalid_before_launch "zero TABLE_PORT_BASE" \

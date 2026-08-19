@@ -219,13 +219,13 @@ validate-table-backdoor:
 		echo "[错误] TABLE_BACKDOOR 必须是 off 或 on" >&2; \
 		exit 1; \
 	fi
-	@if ! printf '%s\n' "$$TABLE_PORT_BASE" | grep -Eq '^[1-9][0-9]*$$' || \
-		[ "$${#TABLE_PORT_BASE}" -gt 5 ] || \
-		{ [ "$${#TABLE_PORT_BASE}" -eq 5 ] && [[ "$$TABLE_PORT_BASE" > 65535 ]]; }; then \
-		echo "[错误] TABLE_PORT_BASE 必须是 1..65535" >&2; \
-		exit 1; \
-	fi
 	@if [ "$$TABLE_BACKDOOR" = on ]; then \
+		if ! printf '%s\n' "$$TABLE_PORT_BASE" | grep -Eq '^[1-9][0-9]*$$' || \
+			[ "$${#TABLE_PORT_BASE}" -gt 5 ] || \
+			{ [ "$${#TABLE_PORT_BASE}" -eq 5 ] && [[ "$$TABLE_PORT_BASE" > 65535 ]]; }; then \
+			echo "[错误] TABLE_PORT_BASE 必须是 1..65535" >&2; \
+			exit 1; \
+		fi; \
 		num_rc_text=$$NUM_RC; \
 		port_base_text=$$PORT_BASE; \
 		if ! printf '%s\n' "$$num_rc_text" | grep -Eq '^[1-9][0-9]*$$' || \
