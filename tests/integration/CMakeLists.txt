@@ -108,6 +108,10 @@ add_test(NAME test_table_launch_switch
          COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/test_table_launch_switch.sh)
 set_tests_properties(test_table_launch_switch PROPERTIES TIMEOUT 20)
 
+add_test(NAME test_dpu_table_overlay_apply
+         COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/test_dpu_table_overlay_apply.sh)
+set_tests_properties(test_dpu_table_overlay_apply PROPERTIES TIMEOUT 30)
+
 add_test(NAME test_qemu_request_routing_source
          COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/test_qemu_request_routing_source.sh)
 set_tests_properties(test_qemu_request_routing_source PROPERTIES TIMEOUT 10)

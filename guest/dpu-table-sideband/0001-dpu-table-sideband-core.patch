@@ -1,0 +1,62 @@
+--- a/Makefile
++++ b/Makefile
+@@ -54,7 +54,9 @@
+ 
+ obj-m += dpu_snd1.o
+ 
++# COSIM_TABLE_SIDEBAND_PATCH_0001
+ dpu_snd1-objs += main.o \
++	cosim_table_ctrl.o \
+ 	adapter_ops.o \
+ 	af_mng.o \
+ 	interrupt.o \
+--- a/main.c
++++ b/main.c
+@@ -39,6 +39,16 @@
+ #include "uart.h"
+ #include "tool_genl_com.h"
+ #include "deinit_restore.h"
++#include "cosim_table_ctrl.h"
++
++static bool table_backdoor;
++module_param(table_backdoor, bool, 0444);
++MODULE_PARM_DESC(table_backdoor, "Enable CoSim semantic table sideband");
++
++bool dpu_table_backdoor_enabled(void)
++{
++	return table_backdoor;
++}
+ 
+ static bool af_mode = true;
+ module_param(af_mode, bool, 0444);
+@@ -2652,6 +2662,13 @@ static int __init dpu_module_init(void)
+ 		goto workqueue_init_err;
+ 	}
+ 
++	err = dpu_table_ctrl_register();
++	if (err) {
++		pr_err("Failed to register table control PCI driver, err = %d\n",
++		       err);
++		goto table_ctrl_register_err;
++	}
++
+ 	err = pci_register_driver(&dpu_driver);
+ 	if (err) {
+ 		pr_err("Failed to register PCI driver, err = %d\n", err);
+@@ -2667,6 +2684,8 @@ netevent_register_err:
+ netevent_register_err:
+ 	pci_unregister_driver(&dpu_driver);
+ pci_register_err:
++	dpu_table_ctrl_unregister();
++table_ctrl_register_err:
+ 	dpu_destroy_workqueue();
+ workqueue_init_err:
+ 	dpu_debugfs_exit();
+@@ -2680,6 +2699,7 @@ static void __exit dpu_module_exit(void)
+ 	dpu_arp_cache_cleanup();
+ 
+ 	pci_unregister_driver(&dpu_driver);
++	dpu_table_ctrl_unregister();
+ 	dpu_destroy_workqueue();
+ 	dpu_uart_exit();
+ 	dpu_debugfs_exit();

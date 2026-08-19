@@ -31,6 +31,13 @@ add_executable(test_table_protocol test_table_protocol.c)
 target_include_directories(test_table_protocol PRIVATE ${CMAKE_SOURCE_DIR}/bridge/table)
 add_test(NAME test_table_protocol COMMAND test_table_protocol)
 
+add_executable(test_dpu_table_policy test_dpu_table_policy.c)
+target_include_directories(test_dpu_table_policy PRIVATE
+    ${CMAKE_SOURCE_DIR}/guest/dpu-table-sideband
+    ${CMAKE_SOURCE_DIR}/bridge/table
+)
+add_test(NAME test_dpu_table_policy COMMAND test_dpu_table_policy)
+
 add_executable(test_table_target test_table_target.c)
 target_include_directories(test_table_target PRIVATE
     ${CMAKE_SOURCE_DIR}/bridge/qemu
