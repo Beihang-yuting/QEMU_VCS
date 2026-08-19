@@ -135,7 +135,58 @@ expect_symlink_rejection()
         fail "$label left a transaction directory"
 }
 
+make_unsafe_overlay()
+{
+    local test_repo=$1 patch_path=$2
+
+    mkdir -p "$test_repo/scripts" "$test_repo/guest/dpu-table-sideband" \
+        "$test_repo/bridge/table"
+    cp "$apply_script" "$test_repo/scripts/apply_dpu_table_sideband.sh"
+    cp "$repo/guest/dpu-table-sideband/cosim_table_ctrl.c" \
+        "$repo/guest/dpu-table-sideband/cosim_table_ctrl.h" \
+        "$test_repo/guest/dpu-table-sideband/"
+    cp "$repo/bridge/table/cosim_table_ctrl_uapi.h" \
+        "$repo/bridge/table/cosim_table_protocol.h" \
+        "$test_repo/bridge/table/"
+    {
+        printf '%s\n' "--- $patch_path"
+        printf '%s\n' '+++ b/Makefile'
+        printf '%s\n' '@@ -1 +1 @@' '-old' '+new'
+    } >"$test_repo/guest/dpu-table-sideband/0001-unsafe-path.patch"
+}
+
+expect_unsafe_patch_rejection()
+{
+    local label=$1 patch_path=$2
+    local case_dir="$work/$label" test_repo tree before after output status
+
+    test_repo="$case_dir/repo"
+    tree="$case_dir/host-driver-net"
+    make_unsafe_overlay "$test_repo" "$patch_path"
+    make_driver "$tree"
+    before=$(snapshot "$tree")
+    set +e
+    output=$("$test_repo/scripts/apply_dpu_table_sideband.sh" "$tree" 2>&1)
+    status=$?
+    set -e
+    after=$(snapshot "$tree")
+    ((status != 0)) || fail "$label unexpectedly accepted an unsafe path"
+    [[ "$output" == *"error: unsafe path in overlay patch: $patch_path"* ]] ||
+        fail "$label was not rejected by path validation"
+    [[ "$before" == "$after" ]] || fail "$label changed the live tree"
+    [[ $(<"$tree/original.txt") == original-sentinel ]] ||
+        fail "$label changed the live sentinel"
+    [[ -z $(find "$case_dir" -maxdepth 1 -type d \
+        -name '.cosim-table-transaction.*' -print -quit) ]] ||
+        fail "$label left a transaction directory"
+}
+
 [[ -x "$apply_script" ]] || fail "apply script is absent"
+
+expect_unsafe_patch_rejection "trailing-empty-path-component" \
+    'a/Makefile/'
+expect_unsafe_patch_rejection "doubled-path-separator" \
+    'a//Makefile'
 
 missing="$work/missing-anchor/host-driver-net"
 make_driver "$missing"

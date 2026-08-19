@@ -62,7 +62,8 @@ path_is_safe()
 	local path=$1 component
 	local -a components
 
-	if [[ -z "$path" || "$path" == /* || "$path" =~ [[:space:]] ]]; then
+	if [[ -z "$path" || "$path" == /* || "$path" == */ ||
+	      "$path" == *//* || "$path" =~ [[:space:]] ]]; then
 		return 1
 	fi
 	IFS=/ read -r -a components <<<"$path"
