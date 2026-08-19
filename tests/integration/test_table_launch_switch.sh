@@ -213,6 +213,8 @@ expect_invalid_before_launch "extremely long PORT_BASE" \
     PORT_BASE=999999999999999999999999999999999999
 expect_invalid_before_launch "table port range overflow" \
     TABLE_BACKDOOR=on TABLE_PORT_BASE=65535 NUM_RC=2
+expect_invalid_before_launch "zero main transport base" \
+    TABLE_BACKDOOR=on TABLE_PORT_BASE=10100 PORT_BASE=0 NUM_RC=1
 expect_invalid_before_launch "effective default transport collision" \
     TABLE_BACKDOOR=on TABLE_PORT_BASE=9100 PORT_BASE=0 NUM_RC=1
 expect_invalid_before_launch "main transport port range overflow" \

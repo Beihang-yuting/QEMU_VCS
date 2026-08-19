@@ -234,21 +234,16 @@ validate-table-backdoor:
 			echo "[错误] TABLE_BACKDOOR=on 要求 NUM_RC 是 1..65535" >&2; \
 			exit 1; \
 		fi; \
-		if ! printf '%s\n' "$$port_base_text" | grep -Eq '^(0|[1-9][0-9]*)$$' || \
+		if ! printf '%s\n' "$$port_base_text" | grep -Eq '^[1-9][0-9]*$$' || \
 			[ "$${#port_base_text}" -gt 5 ] || \
 			{ [ "$${#port_base_text}" -eq 5 ] && [[ "$$port_base_text" > 65535 ]]; }; then \
-			echo "[错误] TABLE_BACKDOOR=on 要求 PORT_BASE 是 0..65535" >&2; \
+			echo "[错误] TABLE_BACKDOOR=on 要求 PORT_BASE 是 1..65535" >&2; \
 			exit 1; \
 		fi; \
 		table_base=$$((10#$$TABLE_PORT_BASE)); \
 		num_rc=$$((10#$$num_rc_text)); \
 		port_base=$$((10#$$port_base_text)); \
-		if [ "$$port_base" -eq 0 ]; then \
-			effective_port_base=9100; \
-		else \
-			effective_port_base=$$port_base; \
-		fi; \
-		if [ $$((effective_port_base + (num_rc - 1) * 3 + 2)) -gt 65535 ]; then \
+		if [ $$((port_base + (num_rc - 1) * 3 + 2)) -gt 65535 ]; then \
 			echo "[错误] 主 transport 端口范围超过 65535" >&2; \
 			exit 1; \
 		fi; \
@@ -259,7 +254,7 @@ validate-table-backdoor:
 		for ((table_rc = 0; table_rc < num_rc; table_rc++)); do \
 			table_port=$$((table_base + table_rc)); \
 			for ((main_rc = 0; main_rc < num_rc; main_rc++)); do \
-				main_port=$$((effective_port_base + main_rc * 3)); \
+				main_port=$$((port_base + main_rc * 3)); \
 				if [ "$$table_port" -ge "$$main_port" ] && \
 				   [ "$$table_port" -le $$((main_port + 2)) ]; then \
 					echo "[错误] table port $$table_port 与 RC$$main_rc 主 transport 端口冲突" >&2; \
