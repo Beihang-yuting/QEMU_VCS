@@ -128,7 +128,8 @@ EOF
     cp "$repo/tests/fixtures/dpu_qid_reference/af_mng.c" \
         "$repo/tests/fixtures/dpu_qid_reference/af_mng.h" \
         "$repo/tests/fixtures/dpu_qid_reference/deinit_restore.c" \
-        "$repo/tests/fixtures/dpu_qid_reference/mailbox.c" "$tree/"
+        "$repo/tests/fixtures/dpu_qid_reference/mailbox.c" \
+        "$repo/tests/fixtures/dpu_qid_reference/mailbox.h" "$tree/"
     cat "$repo/tests/fixtures/dpu_qid_reference/main.c" >>"$tree/main.c"
     printf '%s\n' original-sentinel >"$tree/original.txt"
 }

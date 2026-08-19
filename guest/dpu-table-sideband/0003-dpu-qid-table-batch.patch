@@ -396,7 +396,42 @@
  static void af_rmmod_mailbox_disable_iqr(struct dpu_hw *hw, u16 srcid)
 --- a/mailbox.c
 +++ b/mailbox.c
-@@ -1362,6 +1362,7 @@
+@@ -1306,11 +1306,12 @@
+ 	dpu_mailbox_send_ack_msg(hw, mailbox, srcid, err, req_msg_type);
+ }
+ 
+-void dpu_mailbox_req_clear_qid_map(struct dpu_hw *hw, u64 notify_addr)
++int dpu_mailbox_req_clear_qid_map(struct dpu_hw *hw, u64 notify_addr)
+ {
+ 	struct dpu_mailbox_clear_qid_map_arg arg;
+ 	struct dpu_mailbox_info *mailbox = &hw->mailbox;
+ 	struct dpu_adapter *adapter = hw->adapter;
++	int err;
+ 	int i;
+ 	u16 destid;
+ 
+@@ -1342,14 +1343,19 @@
+ 			pr_warn("Wait clear qid map ack message timeout\n");
+ 			mailbox_timeout_counter++;
+ 			mutex_unlock(&mailbox->send_normal_msg_lock);
+-			return;
++			return -ETIMEDOUT;
+ 		}
+ 		usleep_range(100, 200);
+ 	}
+ 	mailbox_timeout_counter = 0;
++	/* Make sure ack_err read in order */
++	rmb();
++	err = mailbox->ack_err;
+ 	mailbox->acked = 0;
+ 	mailbox->ack_req_msg_type = 0;
+ 	mutex_unlock(&mailbox->send_normal_msg_lock);
++
++	return err;
+ }
+ 
+ static void dpu_mailbox_resp_clear_qid_map(struct dpu_hw *hw, void *data,
+@@ -1362,6 +1368,7 @@
  	u16 srcid;
  	u64 notify_addr;
  	unsigned int req_msg_type;
@@ -404,7 +439,7 @@
  
  	tx_desc = data;
  
-@@ -1382,11 +1383,11 @@
+@@ -1382,11 +1389,11 @@
  
  	srcid = tx_desc->srcid;
  	notify_addr = arg->notify_addr;
@@ -418,16 +453,33 @@
  }
  
  void dpu_mailbox_req_disable_promisc(struct dpu_hw *hw, u8 eth_port_id)
+--- a/mailbox.h
++++ b/mailbox.h
+@@ -690,7 +690,7 @@
+ int dpu_mailbox_req_get_vsi_id(struct dpu_hw *hw);
+ int dpu_mailbox_req_cfg_qid_map(struct dpu_hw *hw, u8 num_queues,
+ 				u64 notify_addr);
+-void dpu_mailbox_req_clear_qid_map(struct dpu_hw *hw, u64 notify_addr);
++int dpu_mailbox_req_clear_qid_map(struct dpu_hw *hw, u64 notify_addr);
+ void dpu_af_disable_mailbox_irq(struct dpu_hw *hw, u16 srcid,
+ 				       u16 vector_id);
+ void dpu_mailbox_req_disable_promisc(struct dpu_hw *hw, u8 eth_port_id);
 --- a/main.c
 +++ b/main.c
-@@ -1002,7 +1002,9 @@
+@@ -1002,10 +1002,14 @@
  			adapter->pfvf_id;
  		notify_addr = real_addr + VIO_NOTIFY_BASE;
  
 -		dpu_af_clear_qid_map(hw, srcid, notify_addr);
 +		err = dpu_af_clear_qid_map(hw, srcid, notify_addr);
-+		if (err)
-+			pr_err("Failed to clear qid map, err = %d\n", err);
  	} else {
  		notify_addr = real_addr;
- 		dpu_mailbox_req_clear_qid_map(hw, notify_addr);
+-		dpu_mailbox_req_clear_qid_map(hw, notify_addr);
++		err = dpu_mailbox_req_clear_qid_map(hw, notify_addr);
++	}
++	if (err) {
++		pr_err("Failed to clear qid map, err = %d\n", err);
++		return;
+ 	}
+ }
+ 

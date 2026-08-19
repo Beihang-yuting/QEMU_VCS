@@ -12,7 +12,7 @@ trap 'rm -rf -- "$work"' EXIT
     echo "missing QID batch patch: $patch_file" >&2
     exit 1
 }
-expected_paths=$'af_mng.c\naf_mng.h\ndeinit_restore.c\nmailbox.c\nmain.c'
+expected_paths=$'af_mng.c\naf_mng.h\ndeinit_restore.c\nmailbox.c\nmailbox.h\nmain.c'
 [[ $(sed -n -e 's/^--- //p' -e 's/^+++ //p' "$patch_file" |
     sed '/^\/dev\/null$/d;s,^[ab]/,,' | sort -u) == "$expected_paths" ]] || {
     echo "QID batch patch must modify the complete QID error-return chain" >&2
@@ -118,13 +118,38 @@ assert "int dpu_af_clear_qid_map(" in header
 
 main = function((root / "main.c").read_text(), "dpu_clear_notify_addr")
 assert "err = dpu_af_clear_qid_map(" in main
+assert "err = dpu_mailbox_req_clear_qid_map(" in main
 assert "Failed to clear qid map" in main
+af_branch = main.index("err = dpu_af_clear_qid_map(")
+mailbox_branch = main.index("err = dpu_mailbox_req_clear_qid_map(")
+shared_error = main.index("if (err)", mailbox_branch)
+shared_log = main.index("Failed to clear qid map", shared_error)
+shared_return = main.index("return;", shared_log)
+assert af_branch < mailbox_branch < shared_error < shared_log < shared_return
 
 mailbox = function((root / "mailbox.c").read_text(),
                    "dpu_mailbox_resp_clear_qid_map")
 assert "int err;" in mailbox
 assert "err = dpu_af_clear_qid_map(" in mailbox
 assert "srcid, err, req_msg_type" in mailbox
+
+mailbox_request = function((root / "mailbox.c").read_text(),
+                           "dpu_mailbox_req_clear_qid_map")
+assert mailbox_request.startswith("int ")
+assert "int err;" in mailbox_request
+timeout = mailbox_request.index("Wait clear qid map ack message timeout")
+timeout_return = mailbox_request.index("return -ETIMEDOUT;", timeout)
+barrier = mailbox_request.index("rmb();", timeout_return)
+read_error = mailbox_request.index("err = mailbox->ack_err;", barrier)
+clear_acked = mailbox_request.index("mailbox->acked = 0;", read_error)
+clear_type = mailbox_request.index("mailbox->ack_req_msg_type = 0;", clear_acked)
+unlock = mailbox_request.index("mutex_unlock", clear_type)
+return_error = mailbox_request.index("return err;", unlock)
+assert timeout < timeout_return < barrier < read_error
+assert read_error < clear_acked < clear_type < unlock < return_error
+
+mailbox_header = (root / "mailbox.h").read_text()
+assert "int dpu_mailbox_req_clear_qid_map(" in mailbox_header
 
 deinit = function((root / "deinit_restore.c").read_text(),
                   "af_rmmod_clear_notify_addr")
