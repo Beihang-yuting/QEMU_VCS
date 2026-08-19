@@ -216,23 +216,30 @@ validate-table-backdoor:
 		echo "[错误] TABLE_BACKDOOR 必须是 off 或 on" >&2; \
 		exit 1; \
 	fi
-	@if ! printf '%s\n' "$$TABLE_PORT_BASE" | grep -Eq '^[0-9]+$$' || \
-		[ "$$TABLE_PORT_BASE" -lt 1 ] || [ "$$TABLE_PORT_BASE" -gt 65535 ]; then \
+	@if ! printf '%s\n' "$$TABLE_PORT_BASE" | grep -Eq '^[1-9][0-9]*$$' || \
+		[ "$${#TABLE_PORT_BASE}" -gt 5 ] || \
+		{ [ "$${#TABLE_PORT_BASE}" -eq 5 ] && [[ "$$TABLE_PORT_BASE" > 65535 ]]; }; then \
 		echo "[错误] TABLE_PORT_BASE 必须是 1..65535" >&2; \
 		exit 1; \
 	fi
 	@if [ "$$TABLE_BACKDOOR" = on ]; then \
-		if ! printf '%s\n' '$(NUM_RC)' | grep -Eq '^[1-9][0-9]*$$'; then \
-			echo "[错误] TABLE_BACKDOOR=on 要求 NUM_RC 是正整数" >&2; \
+		num_rc_text='$(NUM_RC)'; \
+		port_base_text='$(PORT_BASE)'; \
+		if ! printf '%s\n' "$$num_rc_text" | grep -Eq '^[1-9][0-9]*$$' || \
+			[ "$${#num_rc_text}" -gt 5 ] || \
+			{ [ "$${#num_rc_text}" -eq 5 ] && [[ "$$num_rc_text" > 65535 ]]; }; then \
+			echo "[错误] TABLE_BACKDOOR=on 要求 NUM_RC 是 1..65535" >&2; \
 			exit 1; \
 		fi; \
-		if ! printf '%s\n' '$(PORT_BASE)' | grep -Eq '^[0-9]+$$'; then \
-			echo "[错误] TABLE_BACKDOOR=on 要求 PORT_BASE 是非负整数" >&2; \
+		if ! printf '%s\n' "$$port_base_text" | grep -Eq '^(0|[1-9][0-9]*)$$' || \
+			[ "$${#port_base_text}" -gt 5 ] || \
+			{ [ "$${#port_base_text}" -eq 5 ] && [[ "$$port_base_text" > 65535 ]]; }; then \
+			echo "[错误] TABLE_BACKDOOR=on 要求 PORT_BASE 是 0..65535" >&2; \
 			exit 1; \
 		fi; \
 		table_base=$$((10#$$TABLE_PORT_BASE)); \
-		num_rc=$$((10#$(NUM_RC))); \
-		port_base=$$((10#$(PORT_BASE))); \
+		num_rc=$$((10#$$num_rc_text)); \
+		port_base=$$((10#$$port_base_text)); \
 		if [ $$((table_base + num_rc - 1)) -gt 65535 ]; then \
 			echo "[错误] table port 范围超过 65535" >&2; \
 			exit 1; \

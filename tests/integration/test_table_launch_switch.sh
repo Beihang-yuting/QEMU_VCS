@@ -151,6 +151,7 @@ export TABLE_LAUNCH_MARKER="$marker"
 
 expect_invalid_before_launch() {
     local label=$1
+    local accepted=0
     shift
 
     rm -f "$marker"
@@ -159,9 +160,24 @@ expect_invalid_before_launch() {
             MGMT_NET=0 QEMU_TIME_MODE=realtime \
             LOG_DIR="$work/invalid-log" RUN_DIR="$work/invalid-run" \
             CONN_JSON="$work/invalid.json" "$@" >/dev/null 2>&1; then
-        fail "$label was accepted"
+        accepted=1
     fi
     [[ ! -e "$marker" ]] || fail "$label reached QEMU before rejection"
+    ((accepted == 0)) || fail "$label was accepted"
+}
+
+expect_valid_launch() {
+    local label=$1
+    shift
+
+    rm -f "$marker"
+    make -s -C "$repo" run-qemu CONSOLE=login NUM_RC=1 \
+        QEMU="$fake_qemu" KERNEL=/bin/true ROOTFS=/bin/true \
+        MGMT_NET=0 QEMU_TIME_MODE=realtime \
+        LOG_DIR="$work/valid-log" RUN_DIR="$work/valid-run" \
+        CONN_JSON="$work/valid.json" "$@" >/dev/null 2>&1 ||
+        fail "$label was rejected"
+    [[ -e "$marker" ]] || fail "$label did not reach QEMU"
 }
 
 expect_invalid_before_launch "unknown TABLE_BACKDOOR" \
@@ -170,6 +186,17 @@ expect_invalid_before_launch "zero TABLE_PORT_BASE" \
     TABLE_BACKDOOR=on TABLE_PORT_BASE=0
 expect_invalid_before_launch "TABLE_PORT_BASE above TCP range" \
     TABLE_BACKDOOR=on TABLE_PORT_BASE=65536
+expect_invalid_before_launch "extremely long TABLE_PORT_BASE" \
+    TABLE_BACKDOOR=on \
+    TABLE_PORT_BASE=999999999999999999999999999999999999
+expect_invalid_before_launch "TABLE_PORT_BASE above signed shell range" \
+    TABLE_BACKDOOR=on TABLE_PORT_BASE=9223372036854775808
+expect_invalid_before_launch "extremely long NUM_RC" \
+    TABLE_BACKDOOR=on TABLE_PORT_BASE=10100 \
+    NUM_RC=999999999999999999999999999999999999
+expect_invalid_before_launch "extremely long PORT_BASE" \
+    TABLE_BACKDOOR=on TABLE_PORT_BASE=10100 \
+    PORT_BASE=999999999999999999999999999999999999
 expect_invalid_before_launch "table port range overflow" \
     TABLE_BACKDOOR=on TABLE_PORT_BASE=65535 NUM_RC=2
 for collision in 9100 9101 9102; do
@@ -182,5 +209,7 @@ for collision in 9103 9104 9105; do
 done
 expect_invalid_before_launch "cross-instance transport collision" \
     TABLE_BACKDOOR=on TABLE_PORT_BASE=9099 PORT_BASE=9100 NUM_RC=2
+expect_valid_launch "maximum single-RC table port" \
+    TABLE_BACKDOOR=on TABLE_PORT_BASE=65535 PORT_BASE=9100 NUM_RC=1
 
 echo "PASS: default-off and enabled table launch switch"
