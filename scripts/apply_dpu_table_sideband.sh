@@ -36,7 +36,7 @@ sources=(
 	"$repo/bridge/table/cosim_table_protocol.h"
 )
 for source in "${sources[@]}"; do
-	if [[ ! -f "$source" ]]; then
+	if [[ -L "$source" || ! -f "$source" ]]; then
 		echo "error: overlay source is missing: $source" >&2
 		exit 1
 	fi
@@ -56,6 +56,132 @@ for index in "${!patches[@]}"; do
 		exit 1
 	fi
 done
+
+path_is_safe()
+{
+	local path=$1 component
+	local -a components
+
+	if [[ -z "$path" || "$path" == /* || "$path" =~ [[:space:]] ]]; then
+		return 1
+	fi
+	IFS=/ read -r -a components <<<"$path"
+	for component in "${components[@]}"; do
+		if [[ -z "$component" || "$component" == . || "$component" == .. ]]; then
+			return 1
+		fi
+	done
+}
+
+declare -A managed_path_set=()
+for source in "${sources[@]}"; do
+	managed_path_set["$(basename "$source")"]=1
+done
+marker_rel=.cosim-table-sideband-applied
+managed_path_set["$marker_rel"]=1
+for patch_file in "${patches[@]}"; do
+	patch_name=$(basename "$patch_file")
+	marker_path="$marker_rel/$patch_name.applied"
+	path_is_safe "$marker_path" || {
+		echo "error: unsafe overlay marker path: $marker_path" >&2
+		exit 1
+	}
+	managed_path_set["$marker_path"]=1
+	while IFS= read -r header; do
+		case "$header" in
+			'--- '*|'+++ '*) patch_path=${header:4} ;;
+			*) continue ;;
+		esac
+		if [[ "$patch_path" == /dev/null ]]; then
+			continue
+		fi
+		if ! path_is_safe "$patch_path" || [[ "$patch_path" != */* ]]; then
+			echo "error: unsafe path in overlay patch: $patch_path" >&2
+			exit 1
+		fi
+		managed_path=${patch_path#*/}
+		if ! path_is_safe "$managed_path"; then
+			echo "error: unsafe managed path in overlay patch: $patch_path" >&2
+			exit 1
+		fi
+		managed_path_set["$managed_path"]=1
+	done <"$patch_file"
+done
+managed_paths=("${!managed_path_set[@]}")
+
+validate_managed_path()
+{
+	local root=$1 relative=$2 root_real target cursor component index
+	local -a components
+
+	if ! path_is_safe "$relative"; then
+		echo "error: unsafe managed path: $relative" >&2
+		return 1
+	fi
+	if [[ -L "$root" || ! -d "$root" ]]; then
+		echo "error: managed root is not a real directory: $root" >&2
+		return 1
+	fi
+	root_real=$(realpath -e -- "$root") || return 1
+	target=$(realpath -m -- "$root/$relative") || return 1
+	case "$target" in
+		"$root_real"/*) ;;
+		*)
+			echo "error: managed path escapes its root: $relative" >&2
+			return 1
+			;;
+	esac
+
+	cursor=$root
+	IFS=/ read -r -a components <<<"$relative"
+	for index in "${!components[@]}"; do
+		component=${components[$index]}
+		cursor="$cursor/$component"
+		if [[ -L "$cursor" ]]; then
+			echo "error: managed path contains a symlink: $relative" >&2
+			return 1
+		fi
+		if ((index + 1 < ${#components[@]})) &&
+		   [[ -e "$cursor" && ! -d "$cursor" ]]; then
+			echo "error: managed path parent is not a directory: $relative" >&2
+			return 1
+		fi
+	done
+}
+
+validate_managed_tree()
+{
+	local root=$1 relative
+
+	for relative in "${managed_paths[@]}"; do
+		validate_managed_path "$root" "$relative"
+	done
+}
+
+atomic_copy()
+{
+	local source=$1 root=$2 relative=$3 parent temporary
+
+	validate_managed_path "$root" "$relative"
+	parent="$root/$(dirname "$relative")"
+	temporary=$(mktemp "$parent/.cosim-table-write.XXXXXX")
+	cp -p -- "$source" "$temporary"
+	validate_managed_path "$root" "$relative"
+	mv -T -- "$temporary" "$root/$relative"
+}
+
+atomic_empty_file()
+{
+	local root=$1 relative=$2 parent temporary
+
+	validate_managed_path "$root" "$relative"
+	parent="$root/$(dirname "$relative")"
+	temporary=$(mktemp "$parent/.cosim-table-write.XXXXXX")
+	validate_managed_path "$root" "$relative"
+	mv -T -- "$temporary" "$root/$relative"
+}
+
+validate_managed_tree "$driver_dir"
 
 rename_bin=${COSIM_TABLE_RENAME_BIN:-mv}
 if ! command -v "$rename_bin" >/dev/null 2>&1; then
@@ -107,9 +233,10 @@ trap 'exit 130' INT
 trap 'exit 143' TERM
 
 cp -a -- "$driver_dir" "$stage"
+validate_managed_tree "$stage"
 staged_files=0
 for source in "${sources[@]}"; do
-	cp -p -- "$source" "$stage/$(basename "$source")"
+	atomic_copy "$source" "$stage" "$(basename "$source")"
 	staged_files=$((staged_files + 1))
 	if [[ ${COSIM_TABLE_FAIL_AFTER_STAGE_FILE:-0} -eq $staged_files ]]; then
 		echo "error: injected failure after staged file $staged_files" >&2
@@ -118,10 +245,20 @@ for source in "${sources[@]}"; do
 done
 
 marker_dir="$stage/.cosim-table-sideband-applied"
-mkdir -p "$marker_dir"
+validate_managed_path "$stage" "$marker_rel"
+if [[ -e "$marker_dir" ]]; then
+	if [[ ! -d "$marker_dir" ]]; then
+		echo "error: overlay marker path is not a directory: $marker_rel" >&2
+		exit 1
+	fi
+else
+	mkdir -- "$marker_dir"
+fi
 for patch_file in "${patches[@]}"; do
 	patch_name=$(basename "$patch_file")
 	marker="$marker_dir/$patch_name.applied"
+	marker_path="$marker_rel/$patch_name.applied"
+	validate_managed_tree "$stage"
 	if [[ -f "$marker" ]]; then
 		if ! patch --batch --binary --fuzz=0 --reverse --dry-run -p1 \
 			-d "$stage" <"$patch_file" >/dev/null 2>&1; then
@@ -132,6 +269,7 @@ for patch_file in "${patches[@]}"; do
 	fi
 	if patch --batch --binary --fuzz=0 --forward --dry-run -p1 \
 		-d "$stage" <"$patch_file" >/dev/null 2>&1; then
+		validate_managed_tree "$stage"
 		patch --batch --binary --fuzz=0 --forward -p1 \
 			-d "$stage" <"$patch_file" >/dev/null
 	elif patch --batch --binary --fuzz=0 --reverse --dry-run -p1 \
@@ -141,7 +279,7 @@ for patch_file in "${patches[@]}"; do
 		echo "error: patch is partially applied or has a missing anchor: $patch_name" >&2
 		exit 1
 	fi
-	: >"$marker"
+	atomic_empty_file "$stage" "$marker_path"
 done
 
 if diff -qr -- "$driver_dir" "$stage" >/dev/null; then

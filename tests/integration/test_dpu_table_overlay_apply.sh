@@ -19,7 +19,10 @@ snapshot()
 
     (
         cd "$tree"
-        find . -type f -print0 | sort -z | xargs -0 sha256sum
+        {
+            find -P . -printf '%y %P %m %l\n'
+            find -P . -type f -print0 | sort -z | xargs -0 sha256sum
+        } | sort
     )
 }
 
@@ -106,6 +109,32 @@ expect_failure_without_change()
     [[ "$before" == "$after" ]] || fail "$label changed the live tree"
 }
 
+expect_symlink_rejection()
+{
+    local label=$1
+    local tree=$2
+    local external=$3
+    shift 3
+    local tree_before tree_after external_before external_after status
+
+    tree_before=$(snapshot "$tree")
+    external_before=$(snapshot "$external")
+    set +e
+    "$@" >/dev/null 2>&1
+    status=$?
+    set -e
+    tree_after=$(snapshot "$tree")
+    external_after=$(snapshot "$external")
+    [[ "$external_before" == "$external_after" ]] ||
+        fail "$label modified an external target"
+    [[ "$tree_before" == "$tree_after" ]] ||
+        fail "$label changed the live tree"
+    ((status != 0)) || fail "$label unexpectedly accepted a symlink"
+    [[ -z $(find "$(dirname "$tree")" -maxdepth 1 -type d \
+        -name '.cosim-table-transaction.*' -print -quit) ]] ||
+        fail "$label left a transaction directory"
+}
+
 [[ -x "$apply_script" ]] || fail "apply script is absent"
 
 missing="$work/missing-anchor/host-driver-net"
@@ -152,6 +181,46 @@ injected="$work/injected/host-driver-net"
 make_driver "$injected"
 expect_failure_without_change "injected first-stage failure" "$injected" \
     env COSIM_TABLE_FAIL_AFTER_STAGE_FILE=1 "$apply_script" "$injected"
+
+managed_link="$work/managed-link/host-driver-net"
+managed_external="$work/managed-link/external"
+make_driver "$managed_link"
+mkdir -p "$managed_external"
+printf '%s\n' managed-sentinel >"$managed_external/controller.c"
+ln -s "$managed_external/controller.c" "$managed_link/cosim_table_ctrl.c"
+expect_symlink_rejection "managed-file symlink" "$managed_link" \
+    "$managed_external" "$apply_script" "$managed_link"
+
+patch_link="$work/patch-link/host-driver-net"
+patch_external="$work/patch-link/external"
+make_driver "$patch_link"
+mkdir -p "$patch_external"
+mv "$patch_link/Makefile" "$patch_external/Makefile"
+ln -s "$patch_external/Makefile" "$patch_link/Makefile"
+expect_symlink_rejection "patch-target symlink" "$patch_link" \
+    "$patch_external" "$apply_script" "$patch_link"
+
+marker_dir_link="$work/marker-dir-link/host-driver-net"
+marker_dir_external="$work/marker-dir-link/external"
+make_driver "$marker_dir_link"
+mkdir -p "$marker_dir_external"
+printf '%s\n' marker-dir-sentinel >"$marker_dir_external/sentinel"
+ln -s "$marker_dir_external" \
+    "$marker_dir_link/.cosim-table-sideband-applied"
+expect_symlink_rejection "marker-directory symlink" "$marker_dir_link" \
+    "$marker_dir_external" "$apply_script" "$marker_dir_link"
+
+marker_file_link="$work/marker-file-link/host-driver-net"
+marker_file_external="$work/marker-file-link/external"
+make_driver "$marker_file_link"
+"$apply_script" "$marker_file_link"
+mkdir -p "$marker_file_external"
+printf '%s\n' marker-file-sentinel >"$marker_file_external/marker"
+marker_file="$marker_file_link/.cosim-table-sideband-applied/0001-dpu-table-sideband-core.patch.applied"
+rm -f "$marker_file"
+ln -s "$marker_file_external/marker" "$marker_file"
+expect_symlink_rejection "marker-file symlink" "$marker_file_link" \
+    "$marker_file_external" "$apply_script" "$marker_file_link"
 
 rename_driver="$work/rename-failure/host-driver-net"
 rename_wrapper="$work/rename-failure/rename-wrapper"
