@@ -2,7 +2,7 @@
 set -euo pipefail
 
 if [[ $# -gt 1 ]]; then
-    echo "Usage: $0 [REFERENCE_HOST_DRIVER_NET]" >&2
+    echo "Usage: $0 [REFERENCE_HOST_DRIVER_NET_OR_ARCHIVE]" >&2
     exit 2
 fi
 
@@ -23,12 +23,98 @@ trap 'rm -rf -- "$work"' EXIT
 }
 
 if [[ $# -eq 1 ]]; then
-    reference=$(cd "$1" && pwd)
-    low_calls=$(grep -R --include='*.c' -h -E \
-        '(^|[^[:alnum:]_])wr32_for_each\(' "$reference" | wc -l)
-    high_calls=$(grep -R --include='*.c' -h -E \
-        '(^|[^[:alnum:]_])wr32_for_high_order\(' "$reference" | wc -l)
-    [[ $low_calls -eq 75 && $high_calls -eq 8 ]] || {
+    reference_arg=$1
+    if [[ -d "$reference_arg" ]]; then
+        reference=$(cd "$reference_arg" && pwd)
+    elif [[ -f "$reference_arg" ]]; then
+        mkdir "$work/reference-extract"
+        tar -xf "$reference_arg" -C "$work/reference-extract"
+        mapfile -t common_headers < <(find "$work/reference-extract" \
+            -type f -name common.h -print)
+        [[ ${#common_headers[@]} -eq 1 ]] || {
+            echo "reference archive must contain exactly one common.h" >&2
+            exit 1
+        }
+        reference=$(dirname "${common_headers[0]}")
+    else
+        echo "reference driver tree/archive does not exist: $reference_arg" >&2
+        exit 1
+    fi
+
+    read -r low_calls high_calls < <(python3 - "$reference" <<'PY'
+from pathlib import Path
+import re
+import sys
+
+def without_comments_and_literals(text):
+    result = []
+    index = 0
+    state = "code"
+    while index < len(text):
+        char = text[index]
+        following = text[index + 1] if index + 1 < len(text) else ""
+        if state == "code":
+            if char == "/" and following == "*":
+                state = "block"
+                result.extend("  ")
+                index += 2
+                continue
+            if char == "/" and following == "/":
+                state = "line"
+                result.extend("  ")
+                index += 2
+                continue
+            if char == '"':
+                state = "string"
+                result.append(" ")
+            elif char == "'":
+                state = "character"
+                result.append(" ")
+            else:
+                result.append(char)
+            index += 1
+            continue
+        if state == "block":
+            if char == "*" and following == "/":
+                state = "code"
+                result.extend("  ")
+                index += 2
+            else:
+                result.append("\n" if char == "\n" else " ")
+                index += 1
+            continue
+        if state == "line":
+            result.append("\n" if char == "\n" else " ")
+            if char == "\n":
+                state = "code"
+            index += 1
+            continue
+        result.append("\n" if char == "\n" else " ")
+        if char == "\\":
+            if following:
+                result.append("\n" if following == "\n" else " ")
+                index += 2
+            else:
+                index += 1
+        elif (state == "string" and char == '"') or \
+             (state == "character" and char == "'"):
+            state = "code"
+            index += 1
+        else:
+            index += 1
+    return "".join(result)
+
+source = "\n".join(
+    path.read_text(errors="ignore") for path in Path(sys.argv[1]).rglob("*.c")
+)
+source = without_comments_and_literals(source)
+counts = []
+for name in ("wr32_for_each", "wr32_for_high_order"):
+    counts.append(len(re.findall(rf"(?<![A-Za-z0-9_]){name}\s*\(", source)))
+print(*counts)
+PY
+    )
+    [[ $low_calls -eq 70 && $high_calls -eq 8 ]] || {
         echo "reference DWORD wrapper call-site count changed: $low_calls/$high_calls" >&2
         exit 1
     }

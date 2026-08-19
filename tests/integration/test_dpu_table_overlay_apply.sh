@@ -125,7 +125,11 @@ EOF
 #endif
 EOF
     sed -i 's/$/\r/' "$tree/common.h"
-    cp "$repo/tests/fixtures/dpu_qid_reference/af_mng.c" "$tree/af_mng.c"
+    cp "$repo/tests/fixtures/dpu_qid_reference/af_mng.c" \
+        "$repo/tests/fixtures/dpu_qid_reference/af_mng.h" \
+        "$repo/tests/fixtures/dpu_qid_reference/deinit_restore.c" \
+        "$repo/tests/fixtures/dpu_qid_reference/mailbox.c" "$tree/"
+    cat "$repo/tests/fixtures/dpu_qid_reference/main.c" >>"$tree/main.c"
     printf '%s\n' original-sentinel >"$tree/original.txt"
 }
 

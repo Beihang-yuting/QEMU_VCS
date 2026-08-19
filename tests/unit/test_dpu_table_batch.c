@@ -58,7 +58,7 @@ static void expect_chunks(uint32_t entry_bytes, uint32_t stride_bytes,
     fill_payload(payload, (size_t)entry_bytes * entry_count);
     assert(dpu_table_batch_core(&fixture, 0x1000, payload, entry_bytes,
                                 stride_bytes, entry_count, order, slot_bytes,
-                                submit_once) ==
+                                submit_once, NULL) ==
            DPU_TABLE_BATCH_CORE_SUCCESS);
     assert(fixture.call_count ==
            (entry_count + entries_per_call - 1) / entries_per_call);
@@ -100,7 +100,7 @@ static void test_payload_larger_than_slot_uses_multiple_requests(void)
     fill_payload(payload, sizeof(payload));
     assert(dpu_table_batch_core(
                &fixture, 0x8000, payload, 128, 192, 17,
-               DPU_TABLE_BATCH_CORE_LOW_TO_HIGH, 512, submit_once) ==
+               DPU_TABLE_BATCH_CORE_LOW_TO_HIGH, 512, submit_once, NULL) ==
            DPU_TABLE_BATCH_CORE_SUCCESS);
     assert(fixture.call_count == 5);
     for (call = 0; call < 4; ++call)
@@ -120,7 +120,7 @@ static void test_errors_stop_without_later_requests(void)
     fixture.result_count = 2;
     assert(dpu_table_batch_core(
                &fixture, 0, payload, 16, 32, 10,
-               DPU_TABLE_BATCH_CORE_LOW_TO_HIGH, 32, submit_once) ==
+               DPU_TABLE_BATCH_CORE_LOW_TO_HIGH, 32, submit_once, NULL) ==
            DPU_TABLE_BATCH_CORE_ERROR);
     assert(fixture.call_count == 2);
 
@@ -130,7 +130,7 @@ static void test_errors_stop_without_later_requests(void)
     fixture.result_count = 2;
     assert(dpu_table_batch_core(
                &fixture, 0, payload, 16, 32, 10,
-               DPU_TABLE_BATCH_CORE_LOW_TO_HIGH, 32, submit_once) ==
+               DPU_TABLE_BATCH_CORE_LOW_TO_HIGH, 32, submit_once, NULL) ==
            DPU_TABLE_BATCH_CORE_ERROR);
     assert(fixture.call_count == 2);
 
@@ -139,9 +139,43 @@ static void test_errors_stop_without_later_requests(void)
     fixture.result_count = 1;
     assert(dpu_table_batch_core(
                &fixture, 0, payload, 16, 32, 10,
-               DPU_TABLE_BATCH_CORE_LOW_TO_HIGH, 32, submit_once) ==
+               DPU_TABLE_BATCH_CORE_LOW_TO_HIGH, 32, submit_once, NULL) ==
            DPU_TABLE_BATCH_CORE_FRONTDOOR);
     assert(fixture.call_count == 1);
+}
+
+static void test_hard_and_partial_frontdoor_errors_report_progress(void)
+{
+    unsigned char payload[16 * 10] = {0};
+    struct fixture fixture = {0};
+    struct dpu_table_batch_progress progress;
+
+    fixture.results[0] = DPU_TABLE_BATCH_CORE_SUCCESS;
+    fixture.results[1] = DPU_TABLE_BATCH_CORE_ERROR;
+    fixture.result_count = 2;
+    assert(dpu_table_batch_core(
+               &fixture, 0x1000, payload, 16, 32, 10,
+               DPU_TABLE_BATCH_CORE_LOW_TO_HIGH, 32, submit_once,
+               &progress) == DPU_TABLE_BATCH_CORE_ERROR);
+    assert(progress.committed_entries == 2);
+    assert(progress.failed_index == 2);
+    assert(progress.failed_offset == 0x1040);
+    assert(progress.original_result == DPU_TABLE_BATCH_CORE_ERROR);
+    assert(progress.final_result == DPU_TABLE_BATCH_CORE_ERROR);
+
+    memset(&fixture, 0, sizeof(fixture));
+    fixture.results[0] = DPU_TABLE_BATCH_CORE_SUCCESS;
+    fixture.results[1] = DPU_TABLE_BATCH_CORE_FRONTDOOR;
+    fixture.result_count = 2;
+    assert(dpu_table_batch_core(
+               &fixture, 0x2000, payload, 16, 32, 10,
+               DPU_TABLE_BATCH_CORE_LOW_TO_HIGH, 32, submit_once,
+               &progress) == DPU_TABLE_BATCH_CORE_ERROR);
+    assert(progress.committed_entries == 2);
+    assert(progress.failed_index == 2);
+    assert(progress.failed_offset == 0x2040);
+    assert(progress.original_result == DPU_TABLE_BATCH_CORE_FRONTDOOR);
+    assert(progress.final_result == DPU_TABLE_BATCH_CORE_ERROR);
 }
 
 static void test_invalid_and_overflow_inputs_do_not_submit(void)
@@ -151,40 +185,40 @@ static void test_invalid_and_overflow_inputs_do_not_submit(void)
 
     assert(dpu_table_batch_core(&fixture, 0, payload, 64, 64, 1,
                                 DPU_TABLE_BATCH_CORE_LOW_TO_HIGH, 63,
-                                submit_once) ==
+                                submit_once, NULL) ==
            DPU_TABLE_BATCH_CORE_FRONTDOOR);
     assert(dpu_table_batch_core(&fixture, UINT64_MAX - 15, payload,
                                 16, 32, 2,
                                 DPU_TABLE_BATCH_CORE_LOW_TO_HIGH, 64,
-                                submit_once) ==
+                                submit_once, NULL) ==
            DPU_TABLE_BATCH_CORE_FRONTDOOR);
     assert(dpu_table_batch_core(&fixture, UINT64_MAX - 15, payload,
                                 16, 32, 1,
                                 DPU_TABLE_BATCH_CORE_LOW_TO_HIGH, 64,
-                                submit_once) ==
+                                submit_once, NULL) ==
            DPU_TABLE_BATCH_CORE_SUCCESS);
     assert(fixture.call_count == 1);
     memset(&fixture, 0, sizeof(fixture));
     assert(dpu_table_batch_core(&fixture, UINT64_MAX - 14, payload,
                                 16, 32, 1,
                                 DPU_TABLE_BATCH_CORE_LOW_TO_HIGH, 64,
-                                submit_once) ==
+                                submit_once, NULL) ==
            DPU_TABLE_BATCH_CORE_FRONTDOOR);
     assert(dpu_table_batch_core(&fixture, UINT64_MAX, payload, UINT32_MAX,
                                 UINT32_MAX, UINT32_MAX,
                                 DPU_TABLE_BATCH_CORE_LOW_TO_HIGH, UINT32_MAX,
-                                submit_once) ==
+                                submit_once, NULL) ==
            DPU_TABLE_BATCH_CORE_FRONTDOOR);
     assert(dpu_table_batch_core(&fixture, 0, payload, 16, 15, 1,
                                 DPU_TABLE_BATCH_CORE_LOW_TO_HIGH, 64,
-                                submit_once) ==
+                                submit_once, NULL) ==
            DPU_TABLE_BATCH_CORE_FRONTDOOR);
     assert(dpu_table_batch_core(&fixture, 0, payload, 16, 16, 0,
                                 DPU_TABLE_BATCH_CORE_LOW_TO_HIGH, 64,
-                                submit_once) ==
+                                submit_once, NULL) ==
            DPU_TABLE_BATCH_CORE_FRONTDOOR);
     assert(dpu_table_batch_core(&fixture, 0, payload, 16, 16, 1, 7, 64,
-                                submit_once) ==
+                                submit_once, NULL) ==
            DPU_TABLE_BATCH_CORE_FRONTDOOR);
     assert(fixture.call_count == 0);
 }
@@ -194,6 +228,7 @@ int main(void)
     test_entry_aligned_chunking();
     test_payload_larger_than_slot_uses_multiple_requests();
     test_errors_stop_without_later_requests();
+    test_hard_and_partial_frontdoor_errors_report_progress();
     test_invalid_and_overflow_inputs_do_not_submit();
     return 0;
 }

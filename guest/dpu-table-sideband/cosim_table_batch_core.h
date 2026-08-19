@@ -28,6 +28,14 @@ enum dpu_table_batch_core_order {
 	DPU_TABLE_BATCH_CORE_HIGH_TO_LOW = 1,
 };
 
+struct dpu_table_batch_progress {
+	dpu_table_batch_u32 committed_entries;
+	dpu_table_batch_u32 failed_index;
+	dpu_table_batch_u64 failed_offset;
+	int original_result;
+	int final_result;
+};
+
 typedef int (*dpu_table_batch_submit_once_fn)(
 	void *context, dpu_table_batch_u64 offset, const void *data,
 	dpu_table_batch_u32 payload_bytes, int order);
@@ -37,7 +45,8 @@ static inline int dpu_table_batch_core(
 	dpu_table_batch_u32 entry_bytes, dpu_table_batch_u32 stride_bytes,
 	dpu_table_batch_u32 entry_count, int order,
 	dpu_table_batch_u32 max_payload_bytes,
-	dpu_table_batch_submit_once_fn submit_once)
+	dpu_table_batch_submit_once_fn submit_once,
+	struct dpu_table_batch_progress *progress)
 {
 	const unsigned char *entry_data = entries;
 	dpu_table_batch_u64 total_bytes;
@@ -45,6 +54,14 @@ static inline int dpu_table_batch_core(
 	dpu_table_batch_u64 last_byte_delta;
 	dpu_table_batch_u32 entries_per_request;
 	dpu_table_batch_u32 submitted = 0;
+
+	if (progress) {
+		progress->committed_entries = 0;
+		progress->failed_index = 0;
+		progress->failed_offset = first_offset;
+		progress->original_result = DPU_TABLE_BATCH_CORE_FRONTDOOR;
+		progress->final_result = DPU_TABLE_BATCH_CORE_FRONTDOOR;
+	}
 
 	if (!context || !entry_data || !entry_bytes || !entry_count ||
 	    !max_payload_bytes || !submit_once || stride_bytes < entry_bytes ||
@@ -82,13 +99,31 @@ static inline int dpu_table_batch_core(
 			entry_data + (size_t)submitted * entry_bytes,
 			payload_bytes, order);
 
+		if (progress) {
+			progress->failed_index = submitted;
+			progress->failed_offset = offset;
+			progress->original_result = result;
+			progress->final_result = result;
+		}
+
 		if (result == DPU_TABLE_BATCH_CORE_SUCCESS) {
 			submitted += request_entries;
+			if (progress)
+				progress->committed_entries = submitted;
 			continue;
 		}
-		if (result == DPU_TABLE_BATCH_CORE_FRONTDOOR && submitted != 0)
+		if (result == DPU_TABLE_BATCH_CORE_FRONTDOOR && submitted != 0) {
+			if (progress)
+				progress->final_result = DPU_TABLE_BATCH_CORE_ERROR;
 			return DPU_TABLE_BATCH_CORE_ERROR;
+		}
 		return result;
+	}
+	if (progress) {
+		progress->failed_index = entry_count;
+		progress->failed_offset = 0;
+		progress->original_result = DPU_TABLE_BATCH_CORE_SUCCESS;
+		progress->final_result = DPU_TABLE_BATCH_CORE_SUCCESS;
 	}
 	return DPU_TABLE_BATCH_CORE_SUCCESS;
 }

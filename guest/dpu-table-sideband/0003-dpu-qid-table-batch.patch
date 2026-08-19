@@ -1,77 +1,433 @@
 --- a/af_mng.c
 +++ b/af_mng.c
-@@ -1042,6 +1042,7 @@ static void dpu_af_fill_qid_map_table(struct dpu_hw *hw, u16 srcid,
+@@ -1026,26 +1026,35 @@
+ }
+ #endif
+ 
+-static void dpu_af_fill_qid_map_table(struct dpu_hw *hw, u16 srcid,
+-				      u64 notify_addr, u8 notify_type, struct dpu_virtio_device *virtio_dev)
++static int dpu_af_fill_qid_map_table(struct dpu_hw *hw, u16 srcid,
++				     u64 notify_addr, u8 notify_type, struct dpu_virtio_device *virtio_dev)
+ {
+ 	struct dpu_af_res_info *af_res = hw->af_res;
+ 	struct dpu_func_res *func_res =
+ 		af_res->res_record[SRCID_2_INDEX(srcid)];
+ 	struct dpu_vio_notify_tbl qid_map = {0};
++	struct dpu_vio_notify_tbl *staged_table;
+ 	struct cfg_vio_notify_tab_reg queue_cfg;
+ 	unsigned long flags;
+ 	u32 *global_queue_ids;
+ 	u64 key;
++	size_t table_bytes;
+ 	u16 qid_map_entries;
+ 	u16 qid_map_base;
  	u16 i;
  	u16 j;
  	u8 host_id;
 +	enum dpu_table_submit_result result;
++	int err = 0;
  
  	host_id = srcid >> ID_FIELD_HOST_ID_SHIFT;
++	table_bytes = sizeof(*staged_table) * DPU_QID_MAP_TABLE_ENTRIES(hw);
++	staged_table = kmalloc(table_bytes, GFP_ATOMIC);
++	if (!staged_table)
++		return -ENOMEM;
  
-@@ -1109,6 +1110,21 @@ static void dpu_af_fill_qid_map_table(struct dpu_hw *hw, u16 srcid,
- 		memcpy(&af_res->vio_notify_table[qid_map_base + i], &qid_map, sizeof(struct dpu_vio_notify_tbl));
+ 	spin_lock_irqsave(&af_res->func_res_lock, flags);
++	memcpy(staged_table, af_res->vio_notify_table, table_bytes);
+ 
+ 	qid_map_base = DPU_QID_MAP_TABLE_ENTRIES(hw);
+ 
+@@ -1054,8 +1063,8 @@
+ 
+ 	for (i = 0; i < DPU_QID_MAP_TABLE_ENTRIES(hw); i++) {
+ 		WARN_ON(key ==
+-			dpu_get_qid_map_key(&(af_res->vio_notify_table[i])));
+-		if (key < dpu_get_qid_map_key(&(af_res->vio_notify_table[i]))) {
++			dpu_get_qid_map_key(&staged_table[i]));
++		if (key < dpu_get_qid_map_key(&staged_table[i])) {
+ 			qid_map_base = i;
+ 			break;
+ 		}
+@@ -1065,8 +1074,8 @@
+ 		pr_alert(
+ 			"Can not insert key corresponding to notify addr %llx\n",
+ 			notify_addr);
+-		spin_unlock_irqrestore(&af_res->func_res_lock, flags);
+-		return;
++		err = -ENOSPC;
++		goto qid_table_out;
  	}
  
+ 	switch(notify_type) {
+@@ -1076,19 +1085,21 @@
+ 			break;
+ 		case VIO_NOTIFY_TYPE_CTRLQ:
+ 			pr_alert("Error not support CTRLQ\n");
+-			return;
++			err = -EOPNOTSUPP;
++			goto qid_table_out;
+ 		case VIO_NOTIFY_TYPE_BLK:
+ 			qid_map_entries = virtio_dev->common.total_queue_num;
+ 			global_queue_ids = virtio_dev->common.global_queue_ids;
+ 			break;
+ 		default:
+ 			pr_alert("Error not support\n");
+-			return;
++			err = -EOPNOTSUPP;
++			goto qid_table_out;
+ 	}
+ 
+ 	for (i = DPU_QID_MAP_TABLE_ENTRIES(hw) - qid_map_entries; i > qid_map_base; i--)
+-		memcpy(&af_res->vio_notify_table[i - 1 + qid_map_entries],
+-			&af_res->vio_notify_table[i - 1],sizeof(struct dpu_vio_notify_tbl));
++		memcpy(&staged_table[i - 1 + qid_map_entries],
++			&staged_table[i - 1], sizeof(struct dpu_vio_notify_tbl));
+ 
+ 	for (i = 0; i < qid_map_entries; i++) {
+ 		if ((VIO_NOTIFY_TYPE_NET == notify_type) || (VIO_NOTIFY_TYPE_CTRLQ == notify_type)) {
+@@ -1107,7 +1118,23 @@
+ 		qid_map.notify_addr_h =
+ 			(notify_addr & 0x1fffffff00000000) >> 32;
+ 		qid_map.global_qid = global_queue_ids[i];
+-		memcpy(&af_res->vio_notify_table[qid_map_base + i], &qid_map, sizeof(struct dpu_vio_notify_tbl));
++		memcpy(&staged_table[qid_map_base + i], &qid_map,
++		       sizeof(struct dpu_vio_notify_tbl));
++	}
++
 +	/* COSIM_TABLE_SIDEBAND_PATCH_0003 */
 +	result = dpu_table_submit_batch(
 +		hw, DPU_MEMORY_BAR,
 +		VIO_NOTIFY_TBL_E_ADDR(af_res->vio_notify_tbl_select, 0),
-+		af_res->vio_notify_table, sizeof(struct dpu_vio_notify_tbl),
++		staged_table, sizeof(struct dpu_vio_notify_tbl),
 +		VIO_NOTIFY_TBL_E_ADDR(af_res->vio_notify_tbl_select, 1) -
 +			VIO_NOTIFY_TBL_E_ADDR(af_res->vio_notify_tbl_select, 0),
 +		DPU_QID_MAP_TABLE_ENTRIES(hw), DPU_TABLE_HIGH_TO_LOW);
 +	if (result == DPU_TABLE_SUCCESS)
-+		goto qid_table_done;
++		goto qid_table_commit;
 +	if (result == DPU_TABLE_ERROR) {
-+		spin_unlock_irqrestore(&af_res->func_res_lock, flags);
-+		return;
-+	}
-+
- 	for (i = 0; i < DPU_QID_MAP_TABLE_ENTRIES(hw); i++) {
- 		j = 0;
++		err = -EIO;
++		goto qid_table_out;
+ 	}
  
-@@ -1137,6 +1154,7 @@ static void dpu_af_fill_qid_map_table(struct dpu_hw *hw, u16 srcid,
+ 	for (i = 0; i < DPU_QID_MAP_TABLE_ENTRIES(hw); i++) {
+@@ -1117,7 +1144,7 @@
+ 			wr32_for_high_order(hw,
+ 				      VIO_NOTIFY_TBL_E_ADDR(
+ 					      af_res->vio_notify_tbl_select, i),
+-				      (u32 *)(af_res->vio_notify_table + i),
++				      (u32 *)(staged_table + i),
+ 				      sizeof(qid_map));
+ 			wmb();
+ 			udelay(5);
+@@ -1125,8 +1152,7 @@
+ 				      VIO_NOTIFY_TBL_E_ADDR(
+ 					      af_res->vio_notify_tbl_select, i),
+ 				      (u32 *)&qid_map, sizeof(qid_map));
+-			if (likely(!memcmp(&qid_map,
+-					   af_res->vio_notify_table + i,
++			if (likely(!memcmp(&qid_map, staged_table + i,
+ 					   sizeof(qid_map))))
+ 				break;
+ 			j++;
+@@ -1136,6 +1162,8 @@
  			pr_err("Write to qid map table entry %hhu failed\n", i);
  	}
  
-+qid_table_done:
++qid_table_commit:
++	memcpy(af_res->vio_notify_table, staged_table, table_bytes);
  	af_res->vio_notify_tbl_ready += qid_map_entries;
  	memset(&queue_cfg, 0, sizeof(queue_cfg));
  	queue_cfg.cfg_vio_notify_sel = af_res->vio_notify_tbl_select;
-@@ -1166,6 +1184,7 @@ static void dpu_af_remove_qid_map_table(struct dpu_hw *hw, u16 srcid,
+@@ -1147,36 +1175,48 @@
+ 			*(u32 *)&queue_cfg);
+ 	af_res->vio_notify_tbl_select = !af_res->vio_notify_tbl_select;
+ 
++
++qid_table_out:
+ 	spin_unlock_irqrestore(&af_res->func_res_lock, flags);
++	kfree(staged_table);
++	return err;
+ }
+ 
+-static void dpu_af_remove_qid_map_table(struct dpu_hw *hw, u16 srcid,
+-					u64 notify_addr, u8 notify_type, struct dpu_virtio_device *virtio_dev)
++static int dpu_af_remove_qid_map_table(struct dpu_hw *hw, u16 srcid,
++			       u64 notify_addr, u8 notify_type, struct dpu_virtio_device *virtio_dev)
+ {
+ 	struct dpu_af_res_info *af_res = hw->af_res;
+ 	struct dpu_func_res *func_res =
+ 		af_res->res_record[SRCID_2_INDEX(srcid)];
+ 	struct dpu_vio_notify_tbl qid_map;
+ 	struct dpu_vio_notify_tbl invalid_qid_map;
++	struct dpu_vio_notify_tbl *staged_table;
+ 	struct cfg_vio_notify_tab_reg queue_cfg;
+ 	unsigned long flags;
+ 	u64 key;
++	size_t table_bytes;
+ 	u16 qid_map_entries;
+ 	u16 qid_map_base;
  	u32 i;
  	u32 j;
  	u8 host_id;
 +	enum dpu_table_submit_result result;
++	int err = 0;
  
  	host_id = srcid >> ID_FIELD_HOST_ID_SHIFT;
++	table_bytes = sizeof(*staged_table) * DPU_QID_MAP_TABLE_ENTRIES(hw);
++	staged_table = kmalloc(table_bytes, GFP_ATOMIC);
++	if (!staged_table)
++		return -ENOMEM;
  
-@@ -1219,6 +1238,20 @@ static void dpu_af_remove_qid_map_table(struct dpu_hw *hw, u16 srcid,
+ 	spin_lock_irqsave(&af_res->func_res_lock, flags);
++	memcpy(staged_table, af_res->vio_notify_table, table_bytes);
+ 
+ 	qid_map_base = DPU_QID_MAP_TABLE_ENTRIES(hw);
+ 	key = ((u64)host_id << 61) | (notify_addr & 0x1fffffffffffff80);
+ 
+ 	for (i = 0; i < DPU_QID_MAP_TABLE_ENTRIES(hw); i++) {
+-		if (key ==
+-			dpu_get_qid_map_key(&(af_res->vio_notify_table[i]))) {
++		if (key == dpu_get_qid_map_key(&staged_table[i])) {
+ 			qid_map_base = i;
+ 			break;
+ 		}
+@@ -1185,8 +1225,8 @@
+ 	if (unlikely(qid_map_base == DPU_QID_MAP_TABLE_ENTRIES(hw))) {
+ 		pr_alert("Can not find key corresponding to notify addr %llx\n",
+ 			 notify_addr);
+-		spin_unlock_irqrestore(&af_res->func_res_lock, flags);
+-		return;
++		err = -ENOENT;
++		goto qid_table_out;
+ 	}
+ 
+ 	switch(notify_type) {
+@@ -1195,14 +1235,21 @@
+ 			break;
+ 		case VIO_NOTIFY_TYPE_CTRLQ:
+ 			pr_alert("Error not support CTRLQ\n");
+-			return;
++			err = -EOPNOTSUPP;
++			goto qid_table_out;
+ 		case VIO_NOTIFY_TYPE_BLK:
+ 			qid_map_entries = virtio_dev->common.total_queue_num;
+ 			break;
+ 		default:
+-			spin_unlock_irqrestore(&af_res->func_res_lock, flags);
+ 			pr_alert("Error not support\n");
+-			return;
++			err = -EOPNOTSUPP;
++			goto qid_table_out;
++	}
++	if (qid_map_entries > af_res->vio_notify_tbl_ready) {
++		pr_err("Invalid qid map ready count %hu for %hu entries\n",
++		       af_res->vio_notify_tbl_ready, qid_map_entries);
++		err = -EINVAL;
++		goto qid_table_out;
+ 	}
+ 
+ 	memset(&invalid_qid_map, 0xff, sizeof(invalid_qid_map));
+@@ -1212,10 +1259,23 @@
+ 	invalid_qid_map.rsv2 = 0;
+ 	for (i = qid_map_base; i < DPU_QID_MAP_TABLE_ENTRIES(hw) - qid_map_entries;
+ 	     i++)
+-		af_res->vio_notify_table[i] =
+-			af_res->vio_notify_table[i + qid_map_entries];
++		staged_table[i] = staged_table[i + qid_map_entries];
  	for (; i < DPU_QID_MAP_TABLE_ENTRIES(hw); i++)
- 		af_res->vio_notify_table[i] = invalid_qid_map;
- 
+-		af_res->vio_notify_table[i] = invalid_qid_map;
++		staged_table[i] = invalid_qid_map;
++
 +	result = dpu_table_submit_batch(
 +		hw, DPU_MEMORY_BAR,
 +		VIO_NOTIFY_TBL_E_ADDR(af_res->vio_notify_tbl_select, 0),
-+		af_res->vio_notify_table, sizeof(struct dpu_vio_notify_tbl),
++		staged_table, sizeof(struct dpu_vio_notify_tbl),
 +		VIO_NOTIFY_TBL_E_ADDR(af_res->vio_notify_tbl_select, 1) -
 +			VIO_NOTIFY_TBL_E_ADDR(af_res->vio_notify_tbl_select, 0),
 +		DPU_QID_MAP_TABLE_ENTRIES(hw), DPU_TABLE_HIGH_TO_LOW);
 +	if (result == DPU_TABLE_SUCCESS)
-+		goto qid_table_done;
++		goto qid_table_commit;
 +	if (result == DPU_TABLE_ERROR) {
-+		spin_unlock_irqrestore(&af_res->func_res_lock, flags);
-+		return;
++		err = -EIO;
++		goto qid_table_out;
 +	}
-+
+ 
  	for (i = 0; i < DPU_QID_MAP_TABLE_ENTRIES(hw); i++) {
  		j = 0;
- 
-@@ -1246,6 +1280,7 @@ static void dpu_af_remove_qid_map_table(struct dpu_hw *hw, u16 srcid,
+@@ -1224,7 +1284,7 @@
+ 			wr32_for_high_order(hw,
+ 				      VIO_NOTIFY_TBL_E_ADDR(
+ 					      af_res->vio_notify_tbl_select, i),
+-				      (u32 *)(af_res->vio_notify_table + i),
++				      (u32 *)(staged_table + i),
+ 				      sizeof(qid_map));
+ 			wmb();
+ 			udelay(5);
+@@ -1232,8 +1292,7 @@
+ 				      VIO_NOTIFY_TBL_E_ADDR(
+ 					      af_res->vio_notify_tbl_select, i),
+ 				      (u32 *)&qid_map, sizeof(qid_map));
+-			if (likely(!memcmp(&qid_map,
+-					   af_res->vio_notify_table + i,
++			if (likely(!memcmp(&qid_map, staged_table + i,
+ 					   sizeof(qid_map))))
+ 				break;
+ 			j++;
+@@ -1244,6 +1303,8 @@
  			       i);
  	}
  
-+qid_table_done:
++qid_table_commit:
++	memcpy(af_res->vio_notify_table, staged_table, table_bytes);
  	af_res->vio_notify_tbl_ready -= qid_map_entries;
  	memset(&queue_cfg, 0, sizeof(queue_cfg));
  	queue_cfg.cfg_vio_notify_sel = af_res->vio_notify_tbl_select;
+@@ -1255,7 +1316,11 @@
+ 			*(u32 *)&queue_cfg);
+ 	af_res->vio_notify_tbl_select = !af_res->vio_notify_tbl_select;
+ 
++
++qid_table_out:
+ 	spin_unlock_irqrestore(&af_res->func_res_lock, flags);
++	kfree(staged_table);
++	return err;
+ }
+ 
+ static void dpu_configure_eth_port_table_p2(struct dpu_hw *hw, u16 srcid)
+@@ -1388,7 +1453,10 @@
+ 
+ 	spin_unlock_irqrestore(&af_res->func_res_lock, flags);
+ 
+-	dpu_af_fill_qid_map_table(hw, srcid, notify_addr, notify_type, NULL);
++	err = dpu_af_fill_qid_map_table(hw, srcid, notify_addr,
++					notify_type, NULL);
++	if (err)
++		goto fill_qid_map_err;
+ 
+ 	/* TODO: Move queue schedule and packet processing
+ 	 *       related code to different places to improve
+@@ -1406,6 +1474,9 @@
+ 
+ 	return 0;
+ 
++fill_qid_map_err:
++	spin_lock_irqsave(&af_res->func_res_lock, flags);
++	i = num_queues;
+ get_txrx_queue_err:
+ 	while (i--) {
+ 		queue_index = txrx_queues[i];
+@@ -1416,11 +1487,12 @@
+ 	kfree(txrx_queues);
+ 	func_res->num_txrx_queues = 0;
+ 	func_res->txrx_queues = NULL;
++	func_res->vio_notifiy_addr |= 1;
+ 
+ 	return err;
+ }
+ 
+-void dpu_af_clear_qid_map(struct dpu_hw *hw, u16 srcid, u64 notify_addr)
++int dpu_af_clear_qid_map(struct dpu_hw *hw, u16 srcid, u64 notify_addr)
+ {
+ 	struct dpu_af_res_info *af_res = hw->af_res;
+ 	struct dpu_func_res *func_res =
+@@ -1431,11 +1503,15 @@
+ 	u32 *txrx_queues;
+ 	u8 notify_type = VIO_NOTIFY_TYPE_NET;
+ 	u8 i;
++	int err;
+ 
+ 	WARN_ON(!func_res || !func_res->num_txrx_queues);
+ 	num_queues = func_res->num_txrx_queues;
+ 
+-	dpu_af_remove_qid_map_table(hw, srcid, notify_addr, notify_type, NULL);
++	err = dpu_af_remove_qid_map_table(hw, srcid, notify_addr,
++					  notify_type, NULL);
++	if (err)
++		return err;
+ 	func_res->vio_notifiy_addr |= 1;
+ 
+ 	for (i = 0; i < num_queues; i++)
+@@ -1459,6 +1535,8 @@
+ 	kfree(txrx_queues);
+ 	func_res->txrx_queues = NULL;
+ 	func_res->num_txrx_queues = 0;
++
++	return 0;
+ }
+ 
+ void dpu_af_clear_eth_netdev_mac_addr(struct dpu_hw *hw, u16 port_index)
+--- a/af_mng.h
++++ b/af_mng.h
+@@ -209,7 +209,7 @@
+ 				u64 notify_addr);
+ void dpu_af_disable_promisc(struct dpu_hw *hw);
+ void dpu_af_enable_promisc(struct dpu_hw *hw);
+-void dpu_af_clear_qid_map(struct dpu_hw *hw, u16 srcid, u64 notify_addr);
++int dpu_af_clear_qid_map(struct dpu_hw *hw, u16 srcid, u64 notify_addr);
+ 
+ 
+ void dpu_af_configure_eth_netdev_rss_group_table(struct dpu_hw *hw, u16 port_index);
+--- a/deinit_restore.c
++++ b/deinit_restore.c
+@@ -143,6 +143,7 @@
+ 	struct dpu_af_res_info *af_res = hw->af_res;
+ 	struct dpu_func_res *func_res =
+ 		af_res->res_record[SRCID_2_INDEX(srcid)];
++	int err;
+ 
+ 	if(unlikely(!func_res)) {
+ 		pr_err(
+@@ -151,8 +152,13 @@
+ 		return;
+ 	}
+ 
+-	if (!(func_res->vio_notifiy_addr & 1))
+-		dpu_af_clear_qid_map(hw, srcid, func_res->vio_notifiy_addr);
++	if (!(func_res->vio_notifiy_addr & 1)) {
++		err = dpu_af_clear_qid_map(hw, srcid,
++					   func_res->vio_notifiy_addr);
++		if (err)
++			pr_err("Failed to clear qid map for srcid %x, err = %d\n",
++			       srcid, err);
++	}
+ }
+ 
+ static void af_rmmod_mailbox_disable_iqr(struct dpu_hw *hw, u16 srcid)
+--- a/mailbox.c
++++ b/mailbox.c
+@@ -1362,6 +1362,7 @@
+ 	u16 srcid;
+ 	u64 notify_addr;
+ 	unsigned int req_msg_type;
++	int err;
+ 
+ 	tx_desc = data;
+ 
+@@ -1382,11 +1383,11 @@
+ 
+ 	srcid = tx_desc->srcid;
+ 	notify_addr = arg->notify_addr;
+-	dpu_af_clear_qid_map(hw, srcid, notify_addr);
++	err = dpu_af_clear_qid_map(hw, srcid, notify_addr);
+ 
+ 	mailbox = &hw->mailbox;
+ 	req_msg_type = tx_desc->msg_type;
+-	dpu_mailbox_send_ack_msg(hw, mailbox, srcid, 0, req_msg_type);
++	dpu_mailbox_send_ack_msg(hw, mailbox, srcid, err, req_msg_type);
+ }
+ 
+ void dpu_mailbox_req_disable_promisc(struct dpu_hw *hw, u8 eth_port_id)
+--- a/main.c
++++ b/main.c
+@@ -1002,7 +1002,9 @@
+ 			adapter->pfvf_id;
+ 		notify_addr = real_addr + VIO_NOTIFY_BASE;
+ 
+-		dpu_af_clear_qid_map(hw, srcid, notify_addr);
++		err = dpu_af_clear_qid_map(hw, srcid, notify_addr);
++		if (err)
++			pr_err("Failed to clear qid map, err = %d\n", err);
+ 	} else {
+ 		notify_addr = real_addr;
+ 		dpu_mailbox_req_clear_qid_map(hw, notify_addr);

@@ -264,15 +264,28 @@ enum dpu_table_submit_result dpu_table_submit_batch(
 	const void *entries, u32 entry_bytes, u32 stride_bytes,
 	u32 entry_count, enum dpu_table_write_order order)
 {
+	struct dpu_adapter *adapter;
 	struct dpu_table_batch_context context = {
 		.hw = hw,
 		.logical_bar = logical_bar,
 	};
+	struct dpu_table_batch_progress progress;
+	enum dpu_table_submit_result result;
 
-	return dpu_table_batch_core(
+	result = dpu_table_batch_core(
 		&context, first_offset, entries, entry_bytes, stride_bytes,
 		entry_count, order, DPU_TABLE_SLOT_PAYLOAD_BYTES,
-		dpu_table_submit_once);
+		dpu_table_submit_once, &progress);
+	if (result == DPU_TABLE_ERROR) {
+		adapter = (struct dpu_adapter *)hw->adapter;
+		dev_err(&adapter->pdev->dev,
+			"table sideband batch error: committed=%u failed_index=%u failed_offset=%#llx original=%d final=%d\n",
+			progress.committed_entries, progress.failed_index,
+			(unsigned long long)progress.failed_offset,
+			progress.original_result, progress.final_result);
+	}
+
+	return result;
 }
 
 static int dpu_table_ctrl_probe(struct pci_dev *pdev,

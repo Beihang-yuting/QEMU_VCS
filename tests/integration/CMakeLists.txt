@@ -116,9 +116,32 @@ add_test(NAME test_dpu_complete_buffer_patch
          COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/test_dpu_complete_buffer_patch.sh)
 set_tests_properties(test_dpu_complete_buffer_patch PROPERTIES TIMEOUT 10)
 
+set(DPU_TABLE_REFERENCE_ARCHIVE "" CACHE FILEPATH
+    "Clean host-driver-net archive used to validate DPU release call sites")
+if(DPU_TABLE_REFERENCE_ARCHIVE)
+    if(NOT EXISTS "${DPU_TABLE_REFERENCE_ARCHIVE}")
+        message(FATAL_ERROR
+                "DPU_TABLE_REFERENCE_ARCHIVE does not exist: ${DPU_TABLE_REFERENCE_ARCHIVE}")
+    endif()
+    add_test(NAME test_dpu_complete_buffer_release_patch
+             COMMAND bash
+                     ${CMAKE_CURRENT_SOURCE_DIR}/test_dpu_complete_buffer_patch.sh
+                     ${DPU_TABLE_REFERENCE_ARCHIVE})
+    set_tests_properties(test_dpu_complete_buffer_release_patch
+                         PROPERTIES TIMEOUT 30)
+else()
+    message(STATUS
+            "DPU release call-site CTest disabled: set DPU_TABLE_REFERENCE_ARCHIVE")
+endif()
+
 add_test(NAME test_dpu_qid_batch_patch
          COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/test_dpu_qid_batch_patch.sh)
 set_tests_properties(test_dpu_qid_batch_patch PROPERTIES TIMEOUT 10)
+
+add_test(NAME test_dpu_table_batch_source_contract
+         COMMAND bash
+                 ${CMAKE_CURRENT_SOURCE_DIR}/test_dpu_table_batch_source_contract.sh)
+set_tests_properties(test_dpu_table_batch_source_contract PROPERTIES TIMEOUT 10)
 
 add_test(NAME test_qemu_request_routing_source
          COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/test_qemu_request_routing_source.sh)
