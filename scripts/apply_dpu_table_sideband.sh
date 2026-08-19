@@ -32,6 +32,7 @@ overlay_dir="$repo/guest/dpu-table-sideband"
 sources=(
 	"$overlay_dir/cosim_table_ctrl.c"
 	"$overlay_dir/cosim_table_ctrl.h"
+	"$overlay_dir/cosim_table_batch_core.h"
 	"$repo/bridge/table/cosim_table_ctrl_uapi.h"
 	"$repo/bridge/table/cosim_table_protocol.h"
 )

@@ -12,6 +12,7 @@
 
 #include "common.h"
 #include "adapter.h"
+#include "cosim_table_batch_core.h"
 #include "cosim_table_ctrl.h"
 #include "cosim_table_ctrl_uapi.h"
 
@@ -243,45 +244,35 @@ enum dpu_table_submit_result dpu_table_submit(
 					order);
 }
 
+struct dpu_table_batch_context {
+	struct dpu_hw *hw;
+	unsigned int logical_bar;
+};
+
+static int dpu_table_submit_once(void *opaque, dpu_table_batch_u64 offset,
+				 const void *data,
+				 dpu_table_batch_u32 payload_bytes, int order)
+{
+	struct dpu_table_batch_context *context = opaque;
+
+	return dpu_table_submit_request(context->hw, context->logical_bar,
+					offset, data, payload_bytes, order);
+}
+
 enum dpu_table_submit_result dpu_table_submit_batch(
 	struct dpu_hw *hw, unsigned int logical_bar, u64 first_offset,
 	const void *entries, u32 entry_bytes, u32 stride_bytes,
 	u32 entry_count, enum dpu_table_write_order order)
 {
-	const u8 *entry_data = entries;
-	u32 submitted;
+	struct dpu_table_batch_context context = {
+		.hw = hw,
+		.logical_bar = logical_bar,
+	};
 
-	if (!entry_data || !entry_bytes || !entry_count ||
-	    entry_bytes > DPU_TABLE_SLOT_PAYLOAD_BYTES ||
-	    stride_bytes < entry_bytes || logical_bar > 1 ||
-	    (order != DPU_TABLE_LOW_TO_HIGH &&
-	     order != DPU_TABLE_HIGH_TO_LOW) ||
-	    (u64)(entry_count - 1) * stride_bytes > U64_MAX - first_offset)
-		return DPU_TABLE_FRONTDOOR;
-
-	for (submitted = 0; submitted < entry_count; ++submitted) {
-		u32 index = order == DPU_TABLE_HIGH_TO_LOW ?
-			entry_count - 1 - submitted : submitted;
-		enum dpu_table_submit_result result = dpu_table_submit_request(
-			hw, logical_bar, first_offset + (u64)index * stride_bytes,
-			entry_data + (size_t)index * entry_bytes, entry_bytes,
-			order);
-
-		if (result == DPU_TABLE_SUCCESS)
-			continue;
-		if (result == DPU_TABLE_FRONTDOOR && submitted) {
-			struct dpu_adapter *adapter = hw && hw->adapter ?
-				(struct dpu_adapter *)hw->adapter : NULL;
-
-			if (adapter && adapter->pdev)
-				dev_err(&adapter->pdev->dev,
-					"table sideband batch partially committed: failed_index=%u committed=%u\n",
-					index, submitted);
-			return DPU_TABLE_ERROR;
-		}
-		return result;
-	}
-	return DPU_TABLE_SUCCESS;
+	return dpu_table_batch_core(
+		&context, first_offset, entries, entry_bytes, stride_bytes,
+		entry_count, order, DPU_TABLE_SLOT_PAYLOAD_BYTES,
+		dpu_table_submit_once);
 }
 
 static int dpu_table_ctrl_probe(struct pci_dev *pdev,

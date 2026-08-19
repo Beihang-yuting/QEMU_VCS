@@ -26,3 +26,17 @@ mode returns to the frontdoor before controller lookup or MMIO. Enabled mode
 supports physical PF0 and logical BAR0/BAR1. Missing/not-ready routing and slot
 contention fall back before publication; execution, timeout, target-loss and
 other hard errors are not replayed through the frontdoor.
+
+The numbered patch stack routes complete table buffers through the semantic
+sideband before executing the original DWORD loops. Patch 0002 wraps the
+central low-to-high and high-to-low writers: success skips the MMIO loop, a
+hard error returns without replay, and an unavailable route executes the
+original loop in its original order. The route map, rather than guest address
+constants, decides whether a buffer is a semantic table write.
+
+Patch 0003 batches the complete 128-entry VIO notification table after insert
+or remove/compaction. Entries are packed contiguously in each DMA payload;
+the table stride advances logical BAR offsets only. Requests split only
+between entries when the complete payload exceeds one controller slot. A
+frontdoor result is replayable only before the first successful request;
+partial completion or a hard error stops the batch without MMIO replay.

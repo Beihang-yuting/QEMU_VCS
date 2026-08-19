@@ -38,6 +38,12 @@ target_include_directories(test_dpu_table_policy PRIVATE
 )
 add_test(NAME test_dpu_table_policy COMMAND test_dpu_table_policy)
 
+add_executable(test_dpu_table_batch test_dpu_table_batch.c)
+target_include_directories(test_dpu_table_batch PRIVATE
+    ${CMAKE_SOURCE_DIR}/guest/dpu-table-sideband
+)
+add_test(NAME test_dpu_table_batch COMMAND test_dpu_table_batch)
+
 add_executable(test_table_target test_table_target.c)
 target_include_directories(test_table_target PRIVATE
     ${CMAKE_SOURCE_DIR}/bridge/qemu

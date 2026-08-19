@@ -1,0 +1,61 @@
+--- a/common.h
++++ b/common.h
+@@ -27,6 +27,7 @@
+ #include "hw.h"
+ #include "register.h"
+ #include "compat.h"
++#include "cosim_table_ctrl.h"
+ 
+ 
+ #define __FILENAME__ (strrchr(__FILE__, '/') ? strrchr(__FILE__, '/') + 1 : __FILE__)
+@@ -876,18 +877,38 @@ struct devlink_private_data {
+ #define wr32(hw, reg, value) writel((value), ((hw)->hw_addr + (reg)))
+ #define rd32(hw, reg) readl((hw)->hw_addr + (reg))
+ 
+-#define wr32_for_each(hw, reg, value, size)                                    \
+-	do {                                                                   \
+-		int __n;                                                       \
+-		for (__n = 0; __n < (size); __n += 4)                          \
+-			wr32((hw), (reg) + __n, ((u32 *)(value))[__n >> 2]);   \
+-	} while (0)
+-#define wr32_for_high_order(hw, reg, value, size)                              \
+-	do {                                                                   \
+-		int __n;                                                       \
+-		for (__n = (size - 4); __n >= 0; __n -= 4)                     \
+-			wr32((hw), (reg) + __n, ((u32 *)(value))[__n >> 2]);   \
+-	} while (0)
++/* COSIM_TABLE_SIDEBAND_PATCH_0002 */
++static inline void wr32_for_each(struct dpu_hw *hw, u64 reg,
++				 const void *value, u32 size)
++{
++	enum dpu_table_submit_result result;
++	int __n;
++
++	result = dpu_table_submit(hw, DPU_MEMORY_BAR, reg, value, size,
++				  DPU_TABLE_LOW_TO_HIGH);
++	if (result == DPU_TABLE_SUCCESS)
++		return;
++	if (result == DPU_TABLE_ERROR)
++		return;
++	for (__n = 0; __n < size; __n += 4)
++		wr32(hw, reg + __n, ((const u32 *)value)[__n >> 2]);
++}
++
++static inline void wr32_for_high_order(struct dpu_hw *hw, u64 reg,
++				       const void *value, u32 size)
++{
++	enum dpu_table_submit_result result;
++	int __n;
++
++	result = dpu_table_submit(hw, DPU_MEMORY_BAR, reg, value, size,
++				  DPU_TABLE_HIGH_TO_LOW);
++	if (result == DPU_TABLE_SUCCESS)
++		return;
++	if (result == DPU_TABLE_ERROR)
++		return;
++	for (__n = size - 4; __n >= 0; __n -= 4)
++		wr32(hw, reg + __n, ((const u32 *)value)[__n >> 2]);
++}
+ #define rd32_for_each(hw, reg, value, size)                                    \
+ 	do {                                                                   \
+ 		int __n;                                                       \

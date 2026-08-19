@@ -91,6 +91,41 @@ static void __exit dpu_module_exit(void)
 	dpu_debugfs_exit();
 }
 EOF
+    cat >"$tree/common.h" <<'EOF'
+#ifndef __DPU_COMMON_H
+#define __DPU_COMMON_H
+#include "hw.h"
+#include "register.h"
+#include "compat.h"
+
+
+#define __FILENAME__ (strrchr(__FILE__, '/') ? strrchr(__FILE__, '/') + 1 : __FILE__)
+
+#define wr32(hw, reg, value) writel((value), ((hw)->hw_addr + (reg)))
+#define rd32(hw, reg) readl((hw)->hw_addr + (reg))
+
+#define wr32_for_each(hw, reg, value, size)                                    \
+	do {                                                                   \
+		int __n;                                                       \
+		for (__n = 0; __n < (size); __n += 4)                          \
+			wr32((hw), (reg) + __n, ((u32 *)(value))[__n >> 2]);   \
+	} while (0)
+#define wr32_for_high_order(hw, reg, value, size)                              \
+	do {                                                                   \
+		int __n;                                                       \
+		for (__n = (size - 4); __n >= 0; __n -= 4)                     \
+			wr32((hw), (reg) + __n, ((u32 *)(value))[__n >> 2]);   \
+	} while (0)
+#define rd32_for_each(hw, reg, value, size)                                    \
+	do {                                                                   \
+		int __n;                                                       \
+		for (__n = 0; __n < (size); __n += 4)                          \
+			((u32 *)(value))[__n >> 2] = rd32((hw), (reg) + __n);  \
+	} while (0)
+#endif
+EOF
+    sed -i 's/$/\r/' "$tree/common.h"
+    cp "$repo/tests/fixtures/dpu_qid_reference/af_mng.c" "$tree/af_mng.c"
     printf '%s\n' original-sentinel >"$tree/original.txt"
 }
 
@@ -144,6 +179,7 @@ make_unsafe_overlay()
     cp "$apply_script" "$test_repo/scripts/apply_dpu_table_sideband.sh"
     cp "$repo/guest/dpu-table-sideband/cosim_table_ctrl.c" \
         "$repo/guest/dpu-table-sideband/cosim_table_ctrl.h" \
+        "$repo/guest/dpu-table-sideband/cosim_table_batch_core.h" \
         "$test_repo/guest/dpu-table-sideband/"
     cp "$repo/bridge/table/cosim_table_ctrl_uapi.h" \
         "$repo/bridge/table/cosim_table_protocol.h" \
@@ -197,7 +233,7 @@ expect_failure_without_change "missing anchor" "$missing" \
 valid="$work/valid/host-driver-net"
 make_driver "$valid"
 "$apply_script" "$valid"
-for copied in cosim_table_ctrl.c cosim_table_ctrl.h \
+for copied in cosim_table_ctrl.c cosim_table_ctrl.h cosim_table_batch_core.h \
               cosim_table_ctrl_uapi.h cosim_table_protocol.h; do
     [[ -f "$valid/$copied" ]] || fail "valid apply omitted $copied"
 done
@@ -207,6 +243,9 @@ cmp "$valid/cosim_table_ctrl.c" \
 cmp "$valid/cosim_table_ctrl.h" \
     "$repo/guest/dpu-table-sideband/cosim_table_ctrl.h" ||
     fail "controller header was not copied byte-for-byte"
+cmp "$valid/cosim_table_batch_core.h" \
+    "$repo/guest/dpu-table-sideband/cosim_table_batch_core.h" ||
+    fail "batch core header was not copied byte-for-byte"
 cmp "$valid/cosim_table_ctrl_uapi.h" \
     "$repo/bridge/table/cosim_table_ctrl_uapi.h" ||
     fail "controller UAPI was not copied byte-for-byte"

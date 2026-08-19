@@ -112,6 +112,14 @@ add_test(NAME test_dpu_table_overlay_apply
          COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/test_dpu_table_overlay_apply.sh)
 set_tests_properties(test_dpu_table_overlay_apply PROPERTIES TIMEOUT 30)
 
+add_test(NAME test_dpu_complete_buffer_patch
+         COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/test_dpu_complete_buffer_patch.sh)
+set_tests_properties(test_dpu_complete_buffer_patch PROPERTIES TIMEOUT 10)
+
+add_test(NAME test_dpu_qid_batch_patch
+         COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/test_dpu_qid_batch_patch.sh)
+set_tests_properties(test_dpu_qid_batch_patch PROPERTIES TIMEOUT 10)
+
 add_test(NAME test_qemu_request_routing_source
          COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/test_qemu_request_routing_source.sh)
 set_tests_properties(test_qemu_request_routing_source PROPERTIES TIMEOUT 10)
