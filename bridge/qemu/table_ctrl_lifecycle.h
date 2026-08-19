@@ -1,9 +1,13 @@
 #ifndef COSIM_TABLE_CTRL_LIFECYCLE_H
 #define COSIM_TABLE_CTRL_LIFECYCLE_H
 
+#include "cosim_table_protocol.h"
+
 #include <pthread.h>
 #include <stdatomic.h>
 #include <string.h>
+
+#define COSIM_TABLE_CTRL_LIFECYCLE_HAS_RPC_STATUS 1
 
 typedef struct cosim_table_ctrl_lifecycle cosim_table_ctrl_lifecycle_t;
 
@@ -41,6 +45,25 @@ static inline void cosim_table_ctrl_lifecycle_set_ready(
     atomic_store_explicit(&lifecycle->ready, published, memory_order_release);
     lifecycle->ops.ready_changed(lifecycle->opaque, published);
     (void)pthread_mutex_unlock(&lifecycle->ready_lock);
+}
+
+static inline int cosim_table_ctrl_rpc_status_is_terminal(
+    cosim_table_status_t status)
+{
+    return status == COSIM_TABLE_ST_PROTOCOL ||
+           status == COSIM_TABLE_ST_TIMEOUT ||
+           status == COSIM_TABLE_ST_TARGET_GONE;
+}
+
+static inline cosim_table_status_t cosim_table_ctrl_lifecycle_complete_rpc(
+    cosim_table_ctrl_lifecycle_t *lifecycle, cosim_table_status_t status)
+{
+    if (cosim_table_ctrl_rpc_status_is_terminal(status) &&
+        lifecycle != NULL && lifecycle->initialized) {
+        cosim_table_ctrl_lifecycle_set_ready(lifecycle, 0);
+        lifecycle->ops.interrupt(lifecycle->opaque);
+    }
+    return status;
 }
 
 static inline int cosim_table_ctrl_lifecycle_is_ready(

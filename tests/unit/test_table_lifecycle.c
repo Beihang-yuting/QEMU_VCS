@@ -1,5 +1,6 @@
 #define _POSIX_C_SOURCE 200809L
 
+#include "cosim_table_protocol.h"
 #include "table_ctrl_lifecycle.h"
 
 #include <errno.h>
@@ -49,6 +50,20 @@ typedef struct {
     atomic_int entered;
     int result;
 } stop_context_t;
+
+/* Model the pre-fix controller callbacks, which returned RPC status directly.
+ * Once the production lifecycle helper exists, every assertion below runs
+ * against that helper instead of this legacy compatibility path. */
+#ifdef COSIM_TABLE_CTRL_LIFECYCLE_HAS_RPC_STATUS
+#define complete_rpc_status cosim_table_ctrl_lifecycle_complete_rpc
+#else
+static cosim_table_status_t complete_rpc_status(
+    cosim_table_ctrl_lifecycle_t *lifecycle, cosim_table_status_t status)
+{
+    (void)lifecycle;
+    return status;
+}
+#endif
 
 static void pause_milliseconds(unsigned int milliseconds)
 {
@@ -333,12 +348,74 @@ static int test_stop_serializes_ready_clear_before_interrupt(void)
     return 0;
 }
 
+static int run_rpc_status_case(cosim_table_status_t status, int terminal)
+{
+    cosim_table_ctrl_lifecycle_t lifecycle;
+    fake_service_t fake;
+
+    CHECK(fake_init(&fake, &lifecycle) == 0);
+    CHECK(cosim_table_ctrl_lifecycle_start(&lifecycle) == 0);
+    CHECK(wait_atomic(&fake.worker_entered, 1) == 0);
+    CHECK(set_command(&fake, COMMAND_ROUTES) == 0);
+    CHECK(wait_atomic(&fake.ready_callback, 1) == 0);
+    CHECK(cosim_table_ctrl_lifecycle_is_ready(&lifecycle));
+
+    CHECK(complete_rpc_status(&lifecycle, status) == status);
+    if (terminal) {
+        CHECK(!cosim_table_ctrl_lifecycle_is_ready(&lifecycle));
+        CHECK(!atomic_load_explicit(&fake.ready_callback,
+                                    memory_order_acquire));
+        CHECK(atomic_load_explicit(&fake.interrupt_called,
+                                   memory_order_acquire));
+        CHECK(wait_atomic(&fake.worker_exited, 1) == 0);
+    } else {
+        CHECK(cosim_table_ctrl_lifecycle_is_ready(&lifecycle));
+        CHECK(atomic_load_explicit(&fake.ready_callback,
+                                   memory_order_acquire));
+        CHECK(!atomic_load_explicit(&fake.interrupt_called,
+                                    memory_order_acquire));
+        CHECK(set_command(&fake, COMMAND_DISCONNECT) == 0);
+        CHECK(wait_atomic(&fake.worker_exited, 1) == 0);
+    }
+    CHECK(cosim_table_ctrl_lifecycle_stop(&lifecycle) == 0);
+    CHECK(fake_finish(&fake, &lifecycle) == 0);
+    return 0;
+}
+
+static int test_rpc_terminal_status_clears_ready_and_interrupts(void)
+{
+    static const cosim_table_status_t terminal_statuses[] = {
+        COSIM_TABLE_ST_PROTOCOL,
+        COSIM_TABLE_ST_TIMEOUT,
+        COSIM_TABLE_ST_TARGET_GONE,
+    };
+    static const cosim_table_status_t nonterminal_statuses[] = {
+        COSIM_TABLE_ST_SUCCESS,
+        COSIM_TABLE_ST_NOT_READY,
+        COSIM_TABLE_ST_NO_ROUTE,
+        COSIM_TABLE_ST_UNSUPPORTED,
+        COSIM_TABLE_ST_SLOT_BUSY,
+        COSIM_TABLE_ST_EXEC_ERROR,
+        COSIM_TABLE_ST_UNKNOWN,
+    };
+    size_t i;
+
+    for (i = 0; i < sizeof(terminal_statuses) /
+                        sizeof(terminal_statuses[0]); i++)
+        CHECK(run_rpc_status_case(terminal_statuses[i], 1) == 0);
+    for (i = 0; i < sizeof(nonterminal_statuses) /
+                        sizeof(nonterminal_statuses[0]); i++)
+        CHECK(run_rpc_status_case(nonterminal_statuses[i], 0) == 0);
+    return 0;
+}
+
 int main(void)
 {
     CHECK(test_start_is_nonblocking_and_routes_control_ready() == 0);
     CHECK(test_protocol_failure_clears_ready() == 0);
     CHECK(test_stop_interrupts_before_joining_blocked_accept() == 0);
     CHECK(test_stop_serializes_ready_clear_before_interrupt() == 0);
+    CHECK(test_rpc_terminal_status_clears_ready_and_interrupts() == 0);
     puts("PASS: asynchronous table control lifecycle");
     return 0;
 }

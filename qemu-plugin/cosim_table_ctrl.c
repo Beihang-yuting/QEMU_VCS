@@ -119,9 +119,11 @@ static cosim_table_status_t cosim_table_write(
     int timeout_ms)
 {
     CosimTableCtrl *s = opaque;
+    cosim_table_status_t status;
 
-    return cosim_table_client_write(s->client, request, payload, completion,
-                                    timeout_ms);
+    status = cosim_table_client_write(s->client, request, payload, completion,
+                                      timeout_ms);
+    return cosim_table_ctrl_lifecycle_complete_rpc(&s->lifecycle, status);
 }
 
 static cosim_table_status_t cosim_table_read_dword(
@@ -129,9 +131,11 @@ static cosim_table_status_t cosim_table_read_dword(
     cosim_table_completion_t *completion, int timeout_ms)
 {
     CosimTableCtrl *s = opaque;
+    cosim_table_status_t status;
 
-    return cosim_table_client_read_dword(s->client, request, completion,
-                                         timeout_ms);
+    status = cosim_table_client_read_dword(s->client, request, completion,
+                                           timeout_ms);
+    return cosim_table_ctrl_lifecycle_complete_rpc(&s->lifecycle, status);
 }
 
 static void cosim_table_ready_changed(void *opaque, int ready)
