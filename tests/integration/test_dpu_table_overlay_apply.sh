@@ -4,6 +4,7 @@ set -euo pipefail
 script_dir=$(cd "$(dirname "$0")" && pwd)
 repo=$(cd "$script_dir/../.." && pwd)
 apply_script="$repo/scripts/apply_dpu_table_sideband.sh"
+overlay_patches=("$repo/guest/dpu-table-sideband"/[0-9][0-9][0-9][0-9]-*.patch)
 work=$(mktemp -d "${TMPDIR:-/tmp}/dpu-table-overlay.XXXXXX")
 trap 'rm -rf -- "$work"' EXIT
 
@@ -163,6 +164,38 @@ EOF
     printf '%s\n' original-sentinel >"$tree/original.txt"
 }
 
+apply_fixture_patch()
+{
+    local tree=$1 number=$2
+    local patch_file=${overlay_patches[$((number - 1))]}
+
+    patch --batch --binary --fuzz=0 --no-backup-if-mismatch --forward \
+        -p1 -d "$tree" <"$patch_file" >/dev/null
+}
+
+apply_fixture_prefix()
+{
+    local tree=$1 count=$2 number
+
+    for ((number = 1; number <= count; number++)); do
+        apply_fixture_patch "$tree" "$number"
+    done
+}
+
+make_fixture_markers()
+{
+    local tree=$1 count=$2 index marker_dir patch_name marker
+
+    marker_dir="$tree/.cosim-table-sideband-applied"
+    mkdir -p "$marker_dir"
+    for ((index = 0; index < count; index++)); do
+        patch_name=$(basename "${overlay_patches[$index]}")
+        marker="$marker_dir/$patch_name.applied"
+        : >"$marker"
+        chmod 600 "$marker"
+    done
+}
+
 expect_failure_without_change()
 {
     local label=$1
@@ -275,6 +308,9 @@ expect_failure_without_change "marker without applied patch" "$marker_mismatch" 
 valid="$work/valid/host-driver-net"
 make_driver "$valid"
 "$apply_script" "$valid"
+[[ -z $(find -P "$valid" -type f \
+    \( -name '*.orig' -o -name '*.rej' \) -print -quit) ]] ||
+    fail "valid apply left patch backup or reject files"
 for copied in cosim_table_ctrl.c cosim_table_ctrl.h cosim_table_batch_core.h \
               cosim_table_frontdoor_throttle_core.h cosim_table_ctrl_uapi.h \
               cosim_table_protocol.h; do
@@ -320,6 +356,40 @@ rm -rf -- "$valid/.cosim-table-sideband-applied"
 after_marker_import=$(snapshot "$valid")
 [[ "$before_second" == "$after_marker_import" ]] ||
     fail "pre-applied tree marker import changed file checksums"
+
+canonical=$after_marker_import
+for prefix in 1 2 3; do
+    prefix_tree="$work/applied-prefix-$prefix/host-driver-net"
+    make_driver "$prefix_tree"
+    apply_fixture_prefix "$prefix_tree" "$prefix"
+    if [[ $prefix -ne 2 ]]; then
+        make_fixture_markers "$prefix_tree" "$prefix"
+    fi
+    "$apply_script" "$prefix_tree"
+    [[ $(snapshot "$prefix_tree") == "$canonical" ]] ||
+        fail "applied prefix $prefix did not converge to the canonical tree"
+done
+
+noncontiguous="$work/noncontiguous-patch/host-driver-net"
+make_driver "$noncontiguous"
+apply_fixture_patch "$noncontiguous" 1
+apply_fixture_patch "$noncontiguous" 3
+expect_failure_without_change "noncontiguous applied patch" "$noncontiguous" \
+    "$apply_script" "$noncontiguous"
+
+partial="$work/partial-patch/host-driver-net"
+make_driver "$partial"
+apply_fixture_patch "$partial" 1
+sed -i '/cosim_table_ctrl\.o/d' "$partial/Makefile"
+expect_failure_without_change "partially applied patch" "$partial" \
+    "$apply_script" "$partial"
+
+prefix_marker_mismatch="$work/prefix-marker-mismatch/host-driver-net"
+make_driver "$prefix_marker_mismatch"
+apply_fixture_prefix "$prefix_marker_mismatch" 1
+make_fixture_markers "$prefix_marker_mismatch" 2
+expect_failure_without_change "prefix marker mismatch" \
+    "$prefix_marker_mismatch" "$apply_script" "$prefix_marker_mismatch"
 
 injected="$work/injected/host-driver-net"
 make_driver "$injected"

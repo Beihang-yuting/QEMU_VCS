@@ -267,7 +267,8 @@ for ((index = ${#patches[@]} - 1; index >= 0; index--)); do
 	validate_managed_tree "$audit"
 	if patch --batch --force --binary --fuzz=0 --reverse --dry-run -p1 \
 		-d "$audit" <"$patch_file" >/dev/null 2>&1; then
-		patch --batch --force --binary --fuzz=0 --reverse -p1 \
+		patch --batch --force --binary --fuzz=0 \
+			--no-backup-if-mismatch --reverse -p1 \
 			-d "$audit" <"$patch_file" >/dev/null
 		patch_applied[$index]=true
 	else
@@ -303,7 +304,7 @@ for index in "${!patches[@]}"; do
 		echo "error: patch is partially applied or has a missing anchor: $patch_name" >&2
 		exit 1
 	fi
-	patch --batch --binary --fuzz=0 --forward -p1 \
+	patch --batch --binary --fuzz=0 --no-backup-if-mismatch --forward -p1 \
 		-d "$audit" <"$patch_file" >/dev/null
 	validate_managed_tree "$audit"
 done
@@ -325,7 +326,7 @@ for index in "${!patches[@]}"; do
 		echo "error: audited patch state changed before apply: $patch_name" >&2
 		exit 1
 	fi
-	patch --batch --binary --fuzz=0 --forward -p1 \
+	patch --batch --binary --fuzz=0 --no-backup-if-mismatch --forward -p1 \
 		-d "$stage" <"$patch_file" >/dev/null
 	validate_managed_tree "$stage"
 	atomic_empty_file "$stage" "$marker_path"
