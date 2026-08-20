@@ -1590,7 +1590,7 @@ for legacy_guest in ubuntu debian; do
         fail "legacy $legacy_guest offline packaging failed"
     fi
     zipinfo -1 "$legacy_archive" | \
-        grep -Eq '^driver/cosim_nic_.*\.ko$' || \
+        grep -E '^driver/cosim_nic_.*\.ko$' >/dev/null || \
         fail "legacy $legacy_guest package lost direct cosim_nic.ko"
 done
 
