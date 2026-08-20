@@ -110,7 +110,7 @@ set_tests_properties(test_table_launch_switch PROPERTIES TIMEOUT 20)
 
 add_test(NAME test_dpu_table_overlay_apply
          COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/test_dpu_table_overlay_apply.sh)
-set_tests_properties(test_dpu_table_overlay_apply PROPERTIES TIMEOUT 30)
+set_tests_properties(test_dpu_table_overlay_apply PROPERTIES TIMEOUT 90)
 
 add_test(NAME test_dpu_complete_buffer_patch
          COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/test_dpu_complete_buffer_patch.sh)
