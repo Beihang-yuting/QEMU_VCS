@@ -44,6 +44,16 @@ target_include_directories(test_dpu_table_batch PRIVATE
 )
 add_test(NAME test_dpu_table_batch COMMAND test_dpu_table_batch)
 
+add_executable(test_dpu_table_frontdoor_throttle
+    test_dpu_table_frontdoor_throttle.c
+)
+target_include_directories(test_dpu_table_frontdoor_throttle PRIVATE
+    ${CMAKE_SOURCE_DIR}/guest/dpu-table-sideband
+)
+add_test(NAME test_dpu_table_frontdoor_throttle
+    COMMAND test_dpu_table_frontdoor_throttle
+)
+
 add_executable(test_table_target test_table_target.c)
 target_include_directories(test_table_target PRIVATE
     ${CMAKE_SOURCE_DIR}/bridge/qemu
