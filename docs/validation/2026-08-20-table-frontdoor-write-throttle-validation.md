@@ -15,7 +15,7 @@ and `docs/superpowers/plans/2026-08-20-table-frontdoor-write-throttle.md`.
 - Task 1 starting point, after the design and plan commits:
   `358162f30c285b52878680a4858af03ee508b3fe`.
 - Validated implementation HEAD:
-  `3447f1eb21089dc42fa7ff6d1266873b21a80e29`
+  `6f0c772999ad0f1d3febf08f5698c50be97800a1`
   on `feature/qemu-vcs-isolated-tcp`.
 
 The implementation and validation-fix chain is:
@@ -26,6 +26,7 @@ f3286249d81422e3d499f660d299a5f7663f7354  test(driver): define table frontdoor t
 4a975e8d2b7ca25e82a7eed4806d4738865274cd  docs(driver): integrate frontdoor write pacing
 83b95317efad4ba2705a14ac66049c57024e2b2a  fix(driver): harden overlay patch state audit
 3447f1eb21089dc42fa7ff6d1266873b21a80e29  fix(test): allow full overlay audit matrix
+6f0c772999ad0f1d3febf08f5698c50be97800a1  test(driver): cover concurrent frontdoor pacing
 ```
 
 Before publication, the unpublished plan history was rewritten to remove a
@@ -40,14 +41,14 @@ source: /home/ubuntu/test_cosim/builds/table-sideband-target-src
 build:  /home/ubuntu/test_cosim/builds/table-sideband-target-build
 ```
 
-The sanitized tracked implementation collection was synchronized with
-`rsync -aR --checksum`. Its 189 implementation files exclude this report to
-avoid a self-referential manifest. They were hashed independently on the local
-worktree and host 53; the manifests compared byte-for-byte equal. The host-53
-manifest is
+The sanitized tracked controlled set contains 190 paths including this report.
+The report was excluded to avoid a self-referential manifest, and the remaining
+189 implementation inputs were synchronized with `rsync -aR --checksum`. They
+were hashed independently on the local worktree and host 53; the manifests
+compared byte-for-byte equal. The host-53 manifest is
 `/home/ubuntu/test_cosim/builds/dpu-table-frontdoor-flush-20260820/evidence/validation-controlled-inputs.sha256`
 and its SHA-256 is
-`4fc0b6ccf47c14b37e3a5d602a1bfb6b968fe3a783f58ced17b408b0794c21ec`.
+`31ad32d1ac2738e3254895111e1530f0a11cdcea7f8d70232a71ee79d8ea9f77`.
 
 ## RED and GREEN sequence
 
@@ -84,14 +85,24 @@ only entering its later cases after 30 seconds. The root cause was therefore
 the stale test timeout, not an overlay assertion failure.
 
 Commit `3447f1e` changed only that test's timeout from 30 to 90 seconds. After
-resynchronizing and reconfiguring from that HEAD, a completely new focused run
+resynchronizing and reconfiguring from that HEAD, a preliminary focused run
 passed 9/9 in 58.52 seconds; the overlay test itself passed in 49.52 seconds.
-The RED, diagnostic, and final GREEN logs are retained separately as:
+Its corresponding preliminary full regression passed 75/75. Concurrency review
+then extended the patched-driver harness at `6f0c772`, so those two successful
+logs are pre-concurrency-review history and are not authoritative for the final
+implementation. They are archived as:
+
+```text
+a91638c63e5835d83a6b61bfc5cbbbdaf849573dccfff15f81be9c7367b26df8  evidence/focused-ctest-pre-concurrency-review.log
+3e6490f85752649462ac1970ad0b9f1b0354621110afcf95686a07cb1340e28c  evidence/full-ctest-pre-concurrency-review.log
+```
+
+The RED and diagnostic logs remain separate from both the archived preliminary
+GREEN and the post-review canonical logs:
 
 ```text
 evidence/focused-ctest-timeout30-red.log
 evidence/overlay-timeout-diagnostic.log
-evidence/focused-ctest.log
 ```
 
 An initial CTest capability probe using `--test-dir` was also retained as
@@ -119,35 +130,46 @@ corresponding exit files record `CONFIGURE_RC=0` and `BUILD_RC=0` from
 archive and the Guest-driver source provenance described below, not to the
 reused project build directory.
 
-The final focused result was:
+The final fresh post-review focused run used verbose CTest output so the
+concurrent harness contracts were captured in the canonical log. It passed as
+follows:
 
 ```text
 9/9 passed
 0 failures
-Total Test time (real) = 58.52 seconds
+Total Test time (real) = 61.07 seconds
 FOCUSED_CTEST_RC=0
 ```
 
-The final serial full regression used:
+The overlay test took 51.73 seconds and the patched-driver frontdoor test took
+0.31 seconds. The log contains both required markers:
+
+```text
+53: concurrent harness source contract passed
+53: frontdoor throttle runtime contract passed
+```
+
+The final fresh post-review serial full regression used:
 
 ```bash
 cd /home/ubuntu/test_cosim/builds/table-sideband-target-build
 /usr/bin/time -p ctest --output-on-failure -j1
 ```
 
-It passed exactly 75/75 with zero failures. CTest reported 473.73 seconds;
-the surrounding timer reported 473.76 seconds real, 116.99 seconds user, and
-111.79 seconds system. `FULL_CTEST_RC=0` was captured from the timed CTest
+It passed exactly 75/75 with zero failures. CTest reported 476.23 seconds;
+the surrounding timer reported 476.25 seconds real, 120.43 seconds user, and
+117.18 seconds system. `FULL_CTEST_RC=0` was captured from the timed CTest
 pipeline. A separate `ctest -N` returned zero and reported exactly
 `Total Tests: 75`.
 
 The durable final logs and SHA-256 values are:
 
 ```text
-a91638c63e5835d83a6b61bfc5cbbbdaf849573dccfff15f81be9c7367b26df8  evidence/focused-ctest.log
-3e6490f85752649462ac1970ad0b9f1b0354621110afcf95686a07cb1340e28c  evidence/full-ctest.log
+6f6b61d44ed4e9f93295b6603d2ee6b33adf9239ee5d6cae0426c97b9a091761  evidence/focused-ctest.log
+ce463d49b0f86822b9b2ca57357b42e68a49fc3d5393fb981122cc5ec97b2d76  evidence/full-ctest.log
 d3a266b014d824f4f0a98b8a3da1d463beedfea34574fb3436c8f3ae2225ce72  evidence/validation-configure.log
-72da2bd0f6295cec6d1a659669a0bf0c2bdacc022d006d96696b03c901c77ca2  evidence/validation-build.log
+00d6219633a17310238a9f049fc17761fa253b1fc6eba0a66cddf35c7065f7d2  evidence/validation-build.log
+a7247ad10363d7f77543084d928edef6db60647f83d0de1ffefb9cb8fb5a8cac  evidence/ctest-list.log
 ```
 
 All `evidence/` paths in this report are relative to:
@@ -169,7 +191,7 @@ Fresh on-host hashing produced:
 
 ```text
 source input manifest:
-  4fc0b6ccf47c14b37e3a5d602a1bfb6b968fe3a783f58ced17b408b0794c21ec
+  31ad32d1ac2738e3254895111e1530f0a11cdcea7f8d70232a71ee79d8ea9f77
 portable throttle source:
   425764c1c1fa642d572452124c17ce3b7747640a9da25e1e7d511170ff06bd77
 module:
@@ -252,6 +274,22 @@ confirmed:
   tests cover intervals 0, 1, and 100, triggering-address selection,
   low-to-high and high-to-low loops, terminal results, and independent device
   sequences.
+- The patched-wrapper harness models the kernel counter with C11
+  `_Atomic uint64_t` storage and `atomic_fetch_add_explicit()`. A pthread
+  barrier/start gate launches two independent `dpu_hw` instances concurrently,
+  while a synchronized MMIO event log records the resulting accesses. Each
+  device performs 100 writes and exactly one readback at its own 100th write,
+  at that triggering write's exact address.
+- The canonical focused log records both the concurrent harness source
+  contract and the frontdoor throttle runtime contract as passed.
+
+`docs/COSIM-C-BUILD.md` and `docs/VCS-INTEGRATION-GUIDE.md` now use fixed host-53
+source and module paths and give the exact `CFLAGS=-UDPU_LACP` module-build
+command. They also document the performance tradeoff: a smaller interval
+causes more drains and slower, more conservative pacing; a larger interval
+causes fewer drains and faster operation with more DUT burst pressure; zero
+disables pacing; and the default of 100 still requires real-workload
+validation.
 
 ## Retained integration coverage
 
@@ -275,13 +313,13 @@ The final 75-test log retains the earlier target coverage documented in
 
 ## Hygiene
 
-The assigned worktree was clean before this report was created. Before adding
-the report, the range relative to the remote base contained 105 paths (86
-added and 19 modified), all accounted for by the retained table-sideband work
-and this throttle chain; this report adds one path. The implementation range
-after `358162f` through `3447f1e` contains 14 paths.
+The assigned worktree was clean before this report refresh. The final range
+relative to the remote base contains 106 paths (87 added and 19 modified), all
+accounted for by the retained table-sideband work and this throttle chain. The
+range after `358162f` through `6f0c772` contains 15 paths including this report
+and 14 implementation paths when the report is excluded.
 
-`git diff --check 358162f..3447f1e` returns 2 only because
+`git diff --check 358162f..6f0c772` returns 2 only because
 `guest/dpu-table-sideband/0004-dpu-table-frontdoor-throttle.patch` is a nested
 vendor-driver patch that intentionally preserves the reference driver's CRLF
 bytes and whitespace. Every diagnostic is confined to that payload; it is
@@ -296,11 +334,12 @@ headers were synchronized and independently hash-matched as intended.
 
 No extracted `host-driver-net` tree, `.ko`, build directory, credential file,
 token, or proxy configuration is tracked. The unpublished plan history was
-sanitized before push, and scans of branch-range added lines find no GitHub
-token, password-plus-numeric literal, or `SSHPASS` secret assignment. Existing
-documentation still demonstrates an interactive password-variable prompt;
-that is not a persisted credential. Validation credentials were supplied out
-of band. No remote URL or credential helper was changed.
+sanitized before push, and the final branch-range added-line secret scan found
+no matches for GitHub tokens, password-plus-numeric literals, literal
+`SSHPASS` assignments, or literal `sshpass -p` usage. Existing documentation
+still demonstrates an interactive password-variable prompt; that is not a
+persisted credential. Validation credentials were supplied out of band. No
+remote URL or credential helper was changed.
 
 ## Limitations
 
