@@ -56,9 +56,30 @@ EOF
 
 static bool af_mode = true;
 module_param(af_mode, bool, 0444);
+MODULE_PARM_DESC(af_mode, "Pf acts as af or not");
+
+static int dpu_probe(struct pci_dev *pdev, const struct pci_device_id *id)
+{
+	struct dpu_adapter *adapter;
+	struct dpu_hw *hw;
+
+	mutex_init(&adapter->stats.lock);
+	hw = &adapter->hw;
+	hw->adapter = adapter;
+
+	set_bit(DPU_DOWN, adapter->state);
+
+	return 0;
+}
 
 static int __init dpu_module_init(void)
 {
+	int err;
+	int i;
+
+	for (i = 0; i < DEV_HASH_SIZE; i++)
+		INIT_HLIST_HEAD(&dev_hash_table[i]);
+
 	err = dpu_workqueue_init();
 	if (err) {
 		pr_err("Failed to create workqueue, err = %d\n", err);
@@ -100,6 +121,14 @@ EOF
 
 
 #define __FILENAME__ (strrchr(__FILE__, '/') ? strrchr(__FILE__, '/') + 1 : __FILE__)
+
+struct dpu_hw {
+	void *adapter;
+
+	u8 __iomem *hw_addr;
+	u8 __iomem *msix_bar_hw_addr;
+	u8 __iomem *mailbox_bar_hw_addr;
+};
 
 #define wr32(hw, reg, value) writel((value), ((hw)->hw_addr + (reg)))
 #define rd32(hw, reg) readl((hw)->hw_addr + (reg))
@@ -185,6 +214,7 @@ make_unsafe_overlay()
     cp "$repo/guest/dpu-table-sideband/cosim_table_ctrl.c" \
         "$repo/guest/dpu-table-sideband/cosim_table_ctrl.h" \
         "$repo/guest/dpu-table-sideband/cosim_table_batch_core.h" \
+        "$repo/guest/dpu-table-sideband/cosim_table_frontdoor_throttle_core.h" \
         "$test_repo/guest/dpu-table-sideband/"
     cp "$repo/bridge/table/cosim_table_ctrl_uapi.h" \
         "$repo/bridge/table/cosim_table_protocol.h" \
@@ -235,11 +265,19 @@ sed -i 's/goto workqueue_init_err;/goto missing_anchor;/' "$missing/main.c"
 expect_failure_without_change "missing anchor" "$missing" \
     "$apply_script" "$missing"
 
+marker_mismatch="$work/marker-mismatch/host-driver-net"
+make_driver "$marker_mismatch"
+mkdir "$marker_mismatch/.cosim-table-sideband-applied"
+: >"$marker_mismatch/.cosim-table-sideband-applied/0004-dpu-table-frontdoor-throttle.patch.applied"
+expect_failure_without_change "marker without applied patch" "$marker_mismatch" \
+    "$apply_script" "$marker_mismatch"
+
 valid="$work/valid/host-driver-net"
 make_driver "$valid"
 "$apply_script" "$valid"
 for copied in cosim_table_ctrl.c cosim_table_ctrl.h cosim_table_batch_core.h \
-              cosim_table_ctrl_uapi.h cosim_table_protocol.h; do
+              cosim_table_frontdoor_throttle_core.h cosim_table_ctrl_uapi.h \
+              cosim_table_protocol.h; do
     [[ -f "$valid/$copied" ]] || fail "valid apply omitted $copied"
 done
 cmp "$valid/cosim_table_ctrl.c" \
@@ -251,6 +289,9 @@ cmp "$valid/cosim_table_ctrl.h" \
 cmp "$valid/cosim_table_batch_core.h" \
     "$repo/guest/dpu-table-sideband/cosim_table_batch_core.h" ||
     fail "batch core header was not copied byte-for-byte"
+cmp "$valid/cosim_table_frontdoor_throttle_core.h" \
+    "$repo/guest/dpu-table-sideband/cosim_table_frontdoor_throttle_core.h" ||
+    fail "frontdoor throttle core header was not copied byte-for-byte"
 cmp "$valid/cosim_table_ctrl_uapi.h" \
     "$repo/bridge/table/cosim_table_ctrl_uapi.h" ||
     fail "controller UAPI was not copied byte-for-byte"
@@ -265,12 +306,20 @@ grep -Fq 'dpu_table_ctrl_register()' "$valid/main.c" ||
     fail "controller registration patch is absent"
 [[ -f "$valid/.cosim-table-sideband-applied/0001-dpu-table-sideband-core.patch.applied" ]] ||
     fail "patch application marker is absent"
+[[ -f "$valid/.cosim-table-sideband-applied/0004-dpu-table-frontdoor-throttle.patch.applied" ]] ||
+    fail "frontdoor throttle patch application marker is absent"
 
 before_second=$(snapshot "$valid")
 "$apply_script" "$valid"
 after_second=$(snapshot "$valid")
 [[ "$before_second" == "$after_second" ]] ||
     fail "second apply changed file checksums"
+
+rm -rf -- "$valid/.cosim-table-sideband-applied"
+"$apply_script" "$valid"
+after_marker_import=$(snapshot "$valid")
+[[ "$before_second" == "$after_marker_import" ]] ||
+    fail "pre-applied tree marker import changed file checksums"
 
 injected="$work/injected/host-driver-net"
 make_driver "$injected"

@@ -238,7 +238,24 @@ TABLE_BACKDOOR=on TABLE_PORT_BASE=10100 make run-qemu
 ```
 
 ```bash
-insmod dpu_snd1.ko table_backdoor=1
+insmod dpu_snd1.ko
+insmod dpu_snd1.ko table_backdoor=1 table_frontdoor_flush_interval=100
+insmod dpu_snd1.ko table_frontdoor_flush_interval=0
+```
+
+`table_frontdoor_flush_interval` 是只读模块参数，默认值为 100；因此第一条命令虽然
+没有显式参数，仍默认开启每 100 次写一次的节流。计数只覆盖
+`wr32_for_each`/`wr32_for_high_order` 进入 frontdoor fallback 后实际执行的 4-byte
+MMIO 写。默认配置在第 100 次写之后（以后每 100 次）立即对刚写的 DWORD 地址执行
+`readl`，丢弃返回值；它用于 posted-write pacing，不是数据校验。设为 0 会恢复原始
+无节流循环。backdoor 成功和 hard error 都在 fallback 循环前返回，不会计数；每个
+`dpu_hw` 分别维护独立计数器。
+
+也可用 kernel cmdline 显式选择：
+
+```text
+dpu_snd1.table_frontdoor_flush_interval=100
+dpu_snd1.table_frontdoor_flush_interval=0
 ```
 
 `+COSIM_TABLE_PROTECT_<handler>` 只覆盖该名称的运行时 codec/protection 选择，

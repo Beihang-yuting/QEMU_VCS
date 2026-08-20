@@ -33,6 +33,7 @@ sources=(
 	"$overlay_dir/cosim_table_ctrl.c"
 	"$overlay_dir/cosim_table_ctrl.h"
 	"$overlay_dir/cosim_table_batch_core.h"
+	"$overlay_dir/cosim_table_frontdoor_throttle_core.h"
 	"$repo/bridge/table/cosim_table_ctrl_uapi.h"
 	"$repo/bridge/table/cosim_table_protocol.h"
 )
@@ -256,31 +257,77 @@ if [[ -e "$marker_dir" ]]; then
 else
 	mkdir -- "$marker_dir"
 fi
-for patch_file in "${patches[@]}"; do
+audit="$transaction/audit"
+cp -a -- "$stage" "$audit"
+validate_managed_tree "$audit"
+declare -a patch_applied=()
+for ((index = ${#patches[@]} - 1; index >= 0; index--)); do
+	patch_file=${patches[$index]}
+	patch_name=$(basename "$patch_file")
+	validate_managed_tree "$audit"
+	if patch --batch --force --binary --fuzz=0 --reverse --dry-run -p1 \
+		-d "$audit" <"$patch_file" >/dev/null 2>&1; then
+		patch --batch --force --binary --fuzz=0 --reverse -p1 \
+			-d "$audit" <"$patch_file" >/dev/null
+		patch_applied[$index]=true
+	else
+		patch_applied[$index]=false
+	fi
+	validate_managed_tree "$audit"
+done
+
+applied_prefix_ended=false
+for index in "${!patches[@]}"; do
+	patch_file=${patches[$index]}
+	patch_name=$(basename "$patch_file")
+	marker="$marker_dir/$patch_name.applied"
+	if [[ ${patch_applied[$index]} == true ]]; then
+		if $applied_prefix_ended; then
+			echo "error: applied patch stack is not a contiguous prefix: $patch_name" >&2
+			exit 1
+		fi
+	elif [[ -f "$marker" ]]; then
+		echo "error: marker does not match applied patch: $patch_name" >&2
+		exit 1
+	else
+		applied_prefix_ended=true
+	fi
+done
+
+for index in "${!patches[@]}"; do
+	patch_file=${patches[$index]}
+	patch_name=$(basename "$patch_file")
+	validate_managed_tree "$audit"
+	if ! patch --batch --binary --fuzz=0 --forward --dry-run -p1 \
+		-d "$audit" <"$patch_file" >/dev/null 2>&1; then
+		echo "error: patch is partially applied or has a missing anchor: $patch_name" >&2
+		exit 1
+	fi
+	patch --batch --binary --fuzz=0 --forward -p1 \
+		-d "$audit" <"$patch_file" >/dev/null
+	validate_managed_tree "$audit"
+done
+
+for index in "${!patches[@]}"; do
+	patch_file=${patches[$index]}
 	patch_name=$(basename "$patch_file")
 	marker="$marker_dir/$patch_name.applied"
 	marker_path="$marker_rel/$patch_name.applied"
 	validate_managed_tree "$stage"
-	if [[ -f "$marker" ]]; then
-		if ! patch --batch --binary --fuzz=0 --reverse --dry-run -p1 \
-			-d "$stage" <"$patch_file" >/dev/null 2>&1; then
-			echo "error: marker does not match applied patch: $patch_name" >&2
-			exit 1
+	if [[ ${patch_applied[$index]} == true ]]; then
+		if [[ ! -f "$marker" ]]; then
+			atomic_empty_file "$stage" "$marker_path"
 		fi
 		continue
 	fi
-	if patch --batch --binary --fuzz=0 --forward --dry-run -p1 \
+	if ! patch --batch --binary --fuzz=0 --forward --dry-run -p1 \
 		-d "$stage" <"$patch_file" >/dev/null 2>&1; then
-		validate_managed_tree "$stage"
-		patch --batch --binary --fuzz=0 --forward -p1 \
-			-d "$stage" <"$patch_file" >/dev/null
-	elif patch --batch --binary --fuzz=0 --reverse --dry-run -p1 \
-		-d "$stage" <"$patch_file" >/dev/null 2>&1; then
-		:
-	else
-		echo "error: patch is partially applied or has a missing anchor: $patch_name" >&2
+		echo "error: audited patch state changed before apply: $patch_name" >&2
 		exit 1
 	fi
+	patch --batch --binary --fuzz=0 --forward -p1 \
+		-d "$stage" <"$patch_file" >/dev/null
+	validate_managed_tree "$stage"
 	atomic_empty_file "$stage" "$marker_path"
 done
 
