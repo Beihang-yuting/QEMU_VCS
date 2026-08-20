@@ -21,14 +21,14 @@ cat >"$work/hw.h" <<'EOF'
 #ifndef TEST_HW_H
 #define TEST_HW_H
 #include <stddef.h>
+#include <stdatomic.h>
 #include <stdint.h>
 
 typedef uint8_t u8;
-/* Keep the minimal fixture warning-clean for the vendor wrapper's int index. */
-typedef int32_t u32;
+typedef uint32_t u32;
 typedef uint64_t u64;
 typedef struct {
-    uint64_t value;
+    _Atomic uint64_t value;
 } atomic64_t;
 
 #define __iomem
@@ -36,17 +36,18 @@ typedef struct {
 
 static inline void atomic64_set(atomic64_t *counter, uint64_t value)
 {
-    counter->value = value;
+    atomic_store_explicit(&counter->value, value, memory_order_relaxed);
 }
 
 static inline uint64_t atomic64_read(const atomic64_t *counter)
 {
-    return counter->value;
+    return atomic_load_explicit(&counter->value, memory_order_relaxed);
 }
 
 static inline uint64_t atomic64_inc_return(atomic64_t *counter)
 {
-    return ++counter->value;
+    return atomic_fetch_add_explicit(&counter->value, 1,
+                                     memory_order_relaxed) + 1;
 }
 
 void test_writel(u32 value, u8 *address);
@@ -290,21 +291,33 @@ print("frontdoor throttle source contract passed")
 PY
 
 cat >"$work/throttle_test.c" <<'EOF'
+#include <pthread.h>
+#include <sched.h>
 #include <stdio.h>
 #include <stdlib.h>
 
+/* The unchanged vendor loops compare their signed index with a u32 size. */
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wsign-compare"
 #include "common.h"
+#pragma GCC diagnostic pop
 
 #define MAX_EVENTS 1024
+#define BAR_BYTES 0x10000u
 struct event {
     char kind;
     u8 *address;
 };
 
+static u8 bar_a[BAR_BYTES];
+static u8 bar_b[BAR_BYTES];
 static struct event events[MAX_EVENTS];
 static size_t event_count;
 static size_t write_count;
 static size_t read_count;
+static pthread_mutex_t event_lock = PTHREAD_MUTEX_INITIALIZER;
+static _Atomic unsigned int writers_ready;
+static _Atomic unsigned int writers_start;
 static unsigned int flush_interval = 100;
 static enum dpu_table_submit_result submit_result = DPU_TABLE_FRONTDOOR;
 
@@ -322,24 +335,33 @@ static void expect(int condition, const char *message)
 
 static void reset_events(void)
 {
+    expect(pthread_mutex_lock(&event_lock) == 0, "event mutex lock failed");
     event_count = 0;
     write_count = 0;
     read_count = 0;
+    expect(pthread_mutex_unlock(&event_lock) == 0,
+           "event mutex unlock failed");
 }
 
 void test_writel(u32 value, u8 *address)
 {
     (void)value;
+    expect(pthread_mutex_lock(&event_lock) == 0, "event mutex lock failed");
     expect(event_count < MAX_EVENTS, "event log overflow");
     events[event_count++] = (struct event){ .kind = 'W', .address = address };
     write_count++;
+    expect(pthread_mutex_unlock(&event_lock) == 0,
+           "event mutex unlock failed");
 }
 
 u32 test_readl(u8 *address)
 {
+    expect(pthread_mutex_lock(&event_lock) == 0, "event mutex lock failed");
     expect(event_count < MAX_EVENTS, "event log overflow");
     events[event_count++] = (struct event){ .kind = 'R', .address = address };
     read_count++;
+    expect(pthread_mutex_unlock(&event_lock) == 0,
+           "event mutex unlock failed");
     return 0;
 }
 
@@ -367,13 +389,65 @@ static void write_one(struct dpu_hw *hw, u64 reg)
     wr32_for_each(hw, reg, &value, sizeof(value));
 }
 
+struct writer_context {
+    struct dpu_hw *hw;
+    u64 first_reg;
+};
+
+static void *write_100_dwords(void *opaque)
+{
+    struct writer_context *context = opaque;
+    unsigned int index;
+
+    atomic_fetch_add_explicit(&writers_ready, 1, memory_order_release);
+    while (!atomic_load_explicit(&writers_start, memory_order_acquire))
+        sched_yield();
+    for (index = 0; index < 100; index++)
+        write_one(context->hw, context->first_reg + index * 4u);
+    return NULL;
+}
+
+static void expect_device_events(u8 *base, u64 final_reg)
+{
+    size_t device_reads = 0;
+    size_t device_writes = 0;
+    u8 *last_write = NULL;
+    size_t index;
+
+    for (index = 0; index < event_count; index++) {
+        uintptr_t address = (uintptr_t)events[index].address;
+        uintptr_t first = (uintptr_t)base;
+
+        if (address < first || address >= first + BAR_BYTES)
+            continue;
+        if (events[index].kind == 'W') {
+            device_writes++;
+            last_write = events[index].address;
+            continue;
+        }
+        device_reads++;
+        expect(device_writes == 100,
+               "device readback did not follow its 100th write");
+        expect(last_write == events[index].address,
+               "device readback did not use its just-written address");
+    }
+    expect(device_writes == 100, "device did not issue exactly 100 writes");
+    expect(device_reads == 1, "device did not issue exactly one readback");
+    expect(last_write == base + final_reg,
+           "device 100th write used an unexpected address");
+}
+
 int main(void)
 {
-    u8 *const base_a = (u8 *)(uintptr_t)0x10000000u;
-    u8 *const base_b = (u8 *)(uintptr_t)0x20000000u;
+    u8 *const base_a = bar_a;
+    u8 *const base_b = bar_b;
     struct dpu_hw first = { .hw_addr = base_a };
     struct dpu_hw second = { .hw_addr = base_b };
     const u32 pair[2] = { 0x11111111u, 0x22222222u };
+    struct writer_context first_writer = { .hw = &first, .first_reg = 0xc000u };
+    struct writer_context second_writer = { .hw = &second, .first_reg = 0xd000u };
+    pthread_t first_thread;
+    pthread_t second_thread;
     unsigned int index;
 
     flush_interval = 100;
@@ -442,12 +516,55 @@ int main(void)
     expect(read_count == 2 && events[event_count - 1].address == base_b + 0xb000u,
            "second device did not independently flush at 100 writes");
 
+    reset_events();
+    atomic64_set(&first.table_frontdoor_write_sequence, 0);
+    atomic64_set(&second.table_frontdoor_write_sequence, 0);
+    atomic_store_explicit(&writers_ready, 0, memory_order_relaxed);
+    atomic_store_explicit(&writers_start, 0, memory_order_relaxed);
+    expect(pthread_create(&first_thread, NULL, write_100_dwords,
+                          &first_writer) == 0,
+           "failed to create first writer thread");
+    expect(pthread_create(&second_thread, NULL, write_100_dwords,
+                          &second_writer) == 0,
+           "failed to create second writer thread");
+    while (atomic_load_explicit(&writers_ready, memory_order_acquire) != 2u)
+        sched_yield();
+    atomic_store_explicit(&writers_start, 1, memory_order_release);
+    expect(pthread_join(first_thread, NULL) == 0,
+           "failed to join first writer thread");
+    expect(pthread_join(second_thread, NULL) == 0,
+           "failed to join second writer thread");
+    expect(atomic64_read(&first.table_frontdoor_write_sequence) == 100,
+           "first concurrent device sequence is not 100");
+    expect(atomic64_read(&second.table_frontdoor_write_sequence) == 100,
+           "second concurrent device sequence is not 100");
+    expect(write_count == 200, "concurrent writers did not issue 200 writes");
+    expect(read_count == 2, "concurrent writers did not issue two readbacks");
+    expect_device_events(base_a, first_writer.first_reg + 99u * 4u);
+    expect_device_events(base_b, second_writer.first_reg + 99u * 4u);
+
     puts("frontdoor throttle runtime contract passed");
     return 0;
 }
 EOF
 
-cc -std=c11 -Wall -Wextra -Werror -I"$work" \
+python3 - "$work/hw.h" "$work/throttle_test.c" <<'PY'
+from pathlib import Path
+import sys
+
+mock = Path(sys.argv[1]).read_text()
+harness = Path(sys.argv[2]).read_text()
+assert "#include <stdatomic.h>" in mock, "mock atomic64 must use C11 atomics"
+assert "_Atomic uint64_t value;" in mock, "atomic64_t storage is not atomic"
+assert "atomic_fetch_add_explicit" in mock, "atomic64 increment is not atomic"
+assert "pthread_create(" in harness, "separate dpu_hw callers are not concurrent"
+assert "atomic_load_explicit(&writers_ready" in harness, "writer barrier is absent"
+assert "atomic_load_explicit(&writers_start" in harness, "writer start gate is absent"
+assert "pthread_mutex_lock(&event_lock)" in harness, "MMIO log is not synchronized"
+print("concurrent harness source contract passed")
+PY
+
+cc -std=c11 -Wall -Wextra -Werror -pthread -I"$work" \
    -I"$repo/guest/dpu-table-sideband" \
    "$work/throttle_test.c" -o "$work/throttle_test"
 "$work/throttle_test"

@@ -503,6 +503,16 @@ TABLE_BACKDOOR=on TABLE_PORT_BASE=10100 make run-qemu
   +COSIM_TABLE_PROTECT_vio_notify=none
 ```
 
+host53 上已验证的固定 Guest 源码路径是
+`/home/ubuntu/test_cosim/builds/dpu-table-frontdoor-flush-20260820/host-driver-net`，
+对应模块是
+`/home/ubuntu/test_cosim/builds/dpu-table-frontdoor-flush-20260820/host-driver-net/dpu_snd1.ko`。
+reference release 的构建命令是：
+
+```bash
+make -C /home/ubuntu/test_cosim/builds/dpu-table-frontdoor-flush-20260820/host-driver-net CFLAGS=-UDPU_LACP modules
+```
+
 ```bash
 insmod dpu_snd1.ko
 insmod dpu_snd1.ko table_backdoor=1 table_frontdoor_flush_interval=100
@@ -516,6 +526,10 @@ MMIO 写。默认配置在第 100 次写之后（以后每 100 次）立即对�
 `readl`，丢弃返回值；它用于 posted-write pacing，不是数据校验。设为 0 会恢复原始
 无节流循环。backdoor 成功和 hard error 都在 fallback 循环前返回，不会计数；每个
 `dpu_hw` 分别维护独立计数器。
+
+较小的 interval 会更频繁地执行 read/drain，对 posted write 更保守，但性能更慢；
+较大的 interval 减少 read/drain，通常更快，但会给 DUT 施加更大的突发压力。值 0
+完全关闭 pacing。默认值 100 只是集成起点，最终取值必须用真实 workload 验证。
 
 也可用 kernel cmdline 显式选择：
 
