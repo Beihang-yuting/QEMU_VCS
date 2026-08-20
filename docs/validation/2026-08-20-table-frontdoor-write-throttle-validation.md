@@ -15,7 +15,7 @@ and `docs/superpowers/plans/2026-08-20-table-frontdoor-write-throttle.md`.
 - Task 1 starting point, after the design and plan commits:
   `358162f30c285b52878680a4858af03ee508b3fe`.
 - Validated implementation HEAD:
-  `6f0c772999ad0f1d3febf08f5698c50be97800a1`
+  `67b657f1bebfd79df46cb0f96b2a65079b66d426`
   on `feature/qemu-vcs-isolated-tcp`.
 
 The implementation and validation-fix chain is:
@@ -27,7 +27,14 @@ f3286249d81422e3d499f660d299a5f7663f7354  test(driver): define table frontdoor t
 83b95317efad4ba2705a14ac66049c57024e2b2a  fix(driver): harden overlay patch state audit
 3447f1eb21089dc42fa7ff6d1266873b21a80e29  fix(test): allow full overlay audit matrix
 6f0c772999ad0f1d3febf08f5698c50be97800a1  test(driver): cover concurrent frontdoor pacing
+67b657f1bebfd79df46cb0f96b2a65079b66d426  fix(driver): serialize frontdoor pacing boundary
 ```
+
+Commits `e60c832` and `9fffaeb` are intermediate, report-only evidence
+commits, not implementation revisions. This report is finalized by a later
+report-only commit whose identity cannot be embedded in its own contents
+without creating a self-reference; the validated implementation chain
+therefore ends at `67b657f` above.
 
 Before publication, the unpublished plan history was rewritten to remove a
 credential literal. The rewritten commit identities above replace their
@@ -48,7 +55,7 @@ were hashed independently on the local worktree and host 53; the manifests
 compared byte-for-byte equal. The host-53 manifest is
 `/home/ubuntu/test_cosim/builds/dpu-table-frontdoor-flush-20260820/evidence/validation-controlled-inputs.sha256`
 and its SHA-256 is
-`31ad32d1ac2738e3254895111e1530f0a11cdcea7f8d70232a71ee79d8ea9f77`.
+`83ba5db953f9efd241ff06c0b615795fdb2ce0261301a1e4c7d0541f6f1be304`.
 
 ## RED and GREEN sequence
 
@@ -90,12 +97,30 @@ passed 9/9 in 58.52 seconds; the overlay test itself passed in 49.52 seconds.
 Its corresponding preliminary full regression passed 75/75. Concurrency review
 then extended the patched-driver harness at `6f0c772`, so those two successful
 logs are pre-concurrency-review history and are not authoritative for the final
-implementation. They are archived as:
+implementation. They are archived under
+`/home/ubuntu/test_cosim/builds/dpu-table-frontdoor-flush-20260820-pre-serialization/evidence`
+as:
 
 ```text
-a91638c63e5835d83a6b61bfc5cbbbdaf849573dccfff15f81be9c7367b26df8  evidence/focused-ctest-pre-concurrency-review.log
-3e6490f85752649462ac1970ad0b9f1b0354621110afcf95686a07cb1340e28c  evidence/full-ctest-pre-concurrency-review.log
+a91638c63e5835d83a6b61bfc5cbbbdaf849573dccfff15f81be9c7367b26df8  focused-ctest-pre-concurrency-review.log
+3e6490f85752649462ac1970ad0b9f1b0354621110afcf95686a07cb1340e28c  full-ctest-pre-concurrency-review.log
 ```
+
+At `6f0c772`, the concurrent test proved independent counters and readbacks for
+two separate `dpu_hw` instances, and its then-canonical focused and full runs
+passed 9/9 and 75/75. Spinlock review subsequently identified a same-device
+ordering gap: an atomic sequence selects a unique boundary writer, but by
+itself does not prevent a later write from passing that writer's drain. Those
+successful runs are therefore pre-spinlock-review evidence and are not
+authoritative for the production fix. They are preserved as:
+
+```text
+6f6b61d44ed4e9f93295b6603d2ee6b33adf9239ee5d6cae0426c97b9a091761  evidence/focused-ctest-pre-spinlock-review.log
+ce463d49b0f86822b9b2ca57357b42e68a49fc3d5393fb981122cc5ec97b2d76  evidence/full-ctest-pre-spinlock-review.log
+```
+
+Commit `67b657f` added an IRQ-safe per-`dpu_hw` pacing lock and deterministic
+same-device boundary coverage. Its authoritative GREEN is the fresh run below.
 
 The RED and diagnostic logs remain separate from both the archived preliminary
 GREEN and the post-review canonical logs:
@@ -130,46 +155,50 @@ corresponding exit files record `CONFIGURE_RC=0` and `BUILD_RC=0` from
 archive and the Guest-driver source provenance described below, not to the
 reused project build directory.
 
-The final fresh post-review focused run used verbose CTest output so the
-concurrent harness contracts were captured in the canonical log. It passed as
-follows:
+The final fresh post-spinlock-review focused run used verbose CTest output so
+the concurrent and same-device contracts were captured in the canonical log.
+It passed as follows:
 
 ```text
 9/9 passed
 0 failures
-Total Test time (real) = 61.07 seconds
+Total Test time (real) = 59.67 seconds
 FOCUSED_CTEST_RC=0
 ```
 
-The overlay test took 51.73 seconds and the patched-driver frontdoor test took
-0.31 seconds. The log contains both required markers:
+The overlay test took 50.09 seconds and the patched-driver frontdoor test took
+0.33 seconds. The latter executes the deterministic same-`dpu_hw` boundary
+gate, and the log contains all three required markers:
 
 ```text
+53: frontdoor throttle source contract passed
 53: concurrent harness source contract passed
 53: frontdoor throttle runtime contract passed
 ```
 
-The final fresh post-review serial full regression used:
+The final fresh post-spinlock-review serial full regression used:
 
 ```bash
 cd /home/ubuntu/test_cosim/builds/table-sideband-target-build
 /usr/bin/time -p ctest --output-on-failure -j1
 ```
 
-It passed exactly 75/75 with zero failures. CTest reported 476.23 seconds;
-the surrounding timer reported 476.25 seconds real, 120.43 seconds user, and
-117.18 seconds system. `FULL_CTEST_RC=0` was captured from the timed CTest
+It passed exactly 75/75 with zero failures. CTest reported 488.39 seconds;
+the surrounding timer reported 488.54 seconds real, 122.38 seconds user, and
+116.61 seconds system. `FULL_CTEST_RC=0` was captured from the timed CTest
 pipeline. A separate `ctest -N` returned zero and reported exactly
 `Total Tests: 75`.
 
 The durable final logs and SHA-256 values are:
 
 ```text
-6f6b61d44ed4e9f93295b6603d2ee6b33adf9239ee5d6cae0426c97b9a091761  evidence/focused-ctest.log
-ce463d49b0f86822b9b2ca57357b42e68a49fc3d5393fb981122cc5ec97b2d76  evidence/full-ctest.log
+6f52bb5915412201f86ff11b0eed5e22fee731a909fd45f221c872ea93489937  evidence/focused-ctest.log
+09603ca7d1d39a16927ad110d61205b5c9d5d09090c6d17403aa341567a1e509  evidence/full-ctest.log
 d3a266b014d824f4f0a98b8a3da1d463beedfea34574fb3436c8f3ae2225ce72  evidence/validation-configure.log
-00d6219633a17310238a9f049fc17761fa253b1fc6eba0a66cddf35c7065f7d2  evidence/validation-build.log
+a0380c0041acfe2fdcf01c28ba38111e0d4c710c395b014f9bb191e7f337bbdc  evidence/validation-build.log
 a7247ad10363d7f77543084d928edef6db60647f83d0de1ffefb9cb8fb5a8cac  evidence/ctest-list.log
+7e011fa8f342e41353607b12698074b8c266abf7b2fc3eaacf1b5efb8022f01d  evidence/validation-summary.txt
+4516e2754ac2d69c625fcfed192b9827cd59958f560d8bede3e30a8e143f2650  evidence/validation-reproduce.txt
 ```
 
 All `evidence/` paths in this report are relative to:
@@ -190,16 +219,20 @@ module:        /home/ubuntu/test_cosim/builds/dpu-table-frontdoor-flush-20260820
 Fresh on-host hashing produced:
 
 ```text
-source input manifest:
-  31ad32d1ac2738e3254895111e1530f0a11cdcea7f8d70232a71ee79d8ea9f77
+validation controlled-input manifest (189 implementation inputs):
+  83ba5db953f9efd241ff06c0b615795fdb2ce0261301a1e4c7d0541f6f1be304
+Task 4 r2 delivery source-input manifest (12 overlay inputs):
+  9d2a06c895761f5333cc92eda00ccfb78c62c0a33704f729ae4d15093a3abfed
+Task 4 r2 synchronized-input manifest (190 tracked inputs):
+  146b5c464e61dff85a16fd9e1da49c3727e1a783ce44cc72ee96fb574478a800
 portable throttle source:
   425764c1c1fa642d572452124c17ce3b7747640a9da25e1e7d511170ff06bd77
 module:
-  a002d711d7b512c7247ab6c8978277385423585dbee8d1cd5a3a61684c800bc7
+  0cba6823475aa9ca6111094d0625fb20745ac5a3564ab93d50cb4155ddcc6f5b
 reference archive:
   6807536b08663c82a40b2e37b065a4e6f2e910cc2137433c9df4c54a1750018c
 patched-source tree manifest:
-  4e7d2f725c9156d602e3d05c6bc5d1c2cdd0babfdba2398208e89acb9187fa5d
+  8db8d1fe256376fb20d22d88a91234333ca0ecdd88bef45924af8b9ae77419c5
 ```
 
 The last value is the live SHA-256 of `evidence/tree-first.sha256`, not the
@@ -214,26 +247,27 @@ make -C /home/ubuntu/test_cosim/builds/dpu-table-frontdoor-flush-20260820/host-d
   CFLAGS=-UDPU_LACP modules
 ```
 
-The Guest driver was initially generated from the clean reference archive and
-built in the delivery tree. The authoritative verification build then reran
-the same command on that same delivery tree. The following three files are the
+Task 4 r2 atomically preserved the previous delivery, generated the production
+driver from the clean reference archive, applied the overlay twice, and built
+the new delivery with the command above. The following three files are the
 authoritative final module-build evidence; the transcript captures
 `PIPESTATUS[0]` as `build_rc=0`, and `module-build.exit` contains `0`:
 
 ```text
-138fb6f0aa42e712f7e76534fb32e9cadead4298e974c28ea47fc507420ed070  evidence/module-build-verification.log
-44b0f8e6fde54404f735a97c840dd2fc90fd2531b6012c1d918a41a4b1dda1c0  evidence/module-build-verification-transcript.log
+94769d9c918aa79b6718739a7bc142bc5dedf9e322bbaae0bf64b77342d7c464  evidence/module-build.log
+4896d7a9eff0159654e150ec9810b57aaaa4d8953272e9671743ebb2eae87e8c  evidence/module-build-transcript.log
 9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa  evidence/module-build.exit
 ```
 
-That successful verification build produced the final module SHA-256
+That build produced the final module SHA-256
+`0cba6823475aa9ca6111094d0625fb20745ac5a3564ab93d50cb4155ddcc6f5b`.
+The pre-serialization delivery remains intact at
+`/home/ubuntu/test_cosim/builds/dpu-table-frontdoor-flush-20260820-pre-serialization`;
+its superseded module SHA-256 is
 `a002d711d7b512c7247ab6c8978277385423585dbee8d1cd5a3a61684c800bc7`.
-The earlier `evidence/module-build.log` belongs only to the initial build and
-is not the final authoritative build record. Likewise,
-`evidence/module-before-verification.sha256` (file SHA-256
-`d291e54529667a2591a73dae82f70695a5d56b482df49bc91468f35aa20bd8f3`)
-records the superseded pre-verification module SHA-256
-`d7f2cc584523003cda5e04b67b4ca170458124b6ee9692c73545217716b9dd6c`.
+It is retained for provenance but is not the production module. The Task 4 r2
+`summary.txt` and `reproduce.txt` were kept byte-identical while this final run
+added separate `validation-summary.txt` and `validation-reproduce.txt` files.
 
 The final module's `modinfo` reports version 2.1.0,
 vermagic `5.15.0-101-generic`, build metadata containing `-UDPU_LACP`, and:
@@ -256,9 +290,9 @@ date, as expected for the already-overlaid reference archive.
 Inspection of the actual generated driver, not only the repository patch,
 confirmed:
 
-- `struct dpu_hw` owns one `atomic64_t table_frontdoor_write_sequence`, and
-  probe initializes it with `atomic64_set(..., 0)`. Counters are therefore
-  independent per `dpu_hw`/DUT context.
+- `struct dpu_hw` owns one `atomic64_t table_frontdoor_write_sequence` and one
+  `spinlock_t table_frontdoor_write_lock`. Probe initializes both, so the
+  counter and IRQ-safe pacing lock are independent per `dpu_hw`/DUT context.
 - The generated `common.h` has one helper definition and exactly two helper
   call sites. Those calls replace only the fallback loops in
   `wr32_for_each()` and `wr32_for_high_order()`; the generic `wr32()` macro and
@@ -266,9 +300,12 @@ confirmed:
 - Each wrapper returns on both `DPU_TABLE_SUCCESS` and `DPU_TABLE_ERROR`
   before entering its fallback loop. Successful semantic writes and hard
   errors therefore perform neither frontdoor MMIO nor a throttle increment.
-- The helper writes the actual DWORD first. When the interval is zero it
-  returns before the atomic increment. Otherwise the exact interval boundary
-  performs `readl()` through `rd32()` at the triggering DWORD address.
+- When the interval is zero, the helper writes the DWORD and returns without
+  touching either the atomic counter or the pacing lock. For a nonzero
+  interval, `spin_lock_irqsave()` serializes the complete write, atomic
+  increment, optional boundary `readl()` through `rd32()`, and
+  `spin_unlock_irqrestore()` sequence. A later write on that same device cannot
+  pass its boundary read, while distinct `dpu_hw` instances remain parallel.
 - The portable predicate rejects interval zero and sequence zero and selects
   exact multiples with `sequence % interval == 0`. Unit and patched-wrapper
   tests cover intervals 0, 1, and 100, triggering-address selection,
@@ -280,8 +317,13 @@ confirmed:
   while a synchronized MMIO event log records the resulting accesses. Each
   device performs 100 writes and exactly one readback at its own 100th write,
   at that triggering write's exact address.
-- The canonical focused log records both the concurrent harness source
-  contract and the frontdoor throttle runtime contract as passed.
+- The same-device test starts from sequence 99, holds boundary write A after
+  its `writel()` while still inside the pacing lock, and makes follower B
+  attempt that same lock. No follower MMIO is permitted until A is released;
+  the synchronized event log then proves deterministic `W_A, R_A, W_B` order
+  and a final sequence of 101.
+- The canonical focused log records the frontdoor source, concurrent harness
+  source, and frontdoor runtime contracts as passed.
 
 `docs/COSIM-C-BUILD.md` and `docs/VCS-INTEGRATION-GUIDE.md` now use fixed host-53
 source and module paths and give the exact `CFLAGS=-UDPU_LACP` module-build
@@ -307,7 +349,7 @@ The final 75-test log retains the earlier target coverage documented in
   final module build and `modinfo` evidence are recorded above.
 - VCS: `test_runtime_bdf_utils`, `test_dpu_501x_profile`, the completion codec,
   table unit/service/runtime, and multi-RAM simulations all passed on host 53.
-- Multi-RAM specifically passed as test 67/75 in 45.80 seconds. The existing
+- Multi-RAM specifically passed as test 67/75 in 46.55 seconds. The existing
   report also records the standalone `run_test_cosim_table_multiram.sh` pass
   and the retained filelist link evidence.
 
@@ -316,10 +358,10 @@ The final 75-test log retains the earlier target coverage documented in
 The assigned worktree was clean before this report refresh. The final range
 relative to the remote base contains 106 paths (87 added and 19 modified), all
 accounted for by the retained table-sideband work and this throttle chain. The
-range after `358162f` through `6f0c772` contains 15 paths including this report
-and 14 implementation paths when the report is excluded.
+range after `358162f` through `67b657f` contains 17 paths including this report
+and 16 implementation paths when the report is excluded.
 
-`git diff --check 358162f..6f0c772` returns 2 only because
+`git diff --check 358162f..67b657f` returns 2 only because
 `guest/dpu-table-sideband/0004-dpu-table-frontdoor-throttle.patch` is a nested
 vendor-driver patch that intentionally preserves the reference driver's CRLF
 bytes and whitespace. Every diagnostic is confined to that payload; it is
@@ -334,12 +376,13 @@ headers were synchronized and independently hash-matched as intended.
 
 No extracted `host-driver-net` tree, `.ko`, build directory, credential file,
 token, or proxy configuration is tracked. The unpublished plan history was
-sanitized before push, and the final branch-range added-line secret scan found
-no matches for GitHub tokens, password-plus-numeric literals, literal
-`SSHPASS` assignments, or literal `sshpass -p` usage. Existing documentation
-still demonstrates an interactive password-variable prompt; that is not a
-persisted credential. Validation credentials were supplied out of band. No
-remote URL or credential helper was changed.
+sanitized before push, and the final implementation added-line secret-literal
+scan, excluding this self-describing validation report, found no matches for
+GitHub tokens, password-plus-numeric literals, literal `SSHPASS` assignments,
+or literal `sshpass -p` usage. Existing documentation still demonstrates an
+interactive password-variable prompt; that is not a persisted credential.
+Validation credentials were supplied out of band. No remote URL or credential
+helper was changed.
 
 ## Limitations
 
@@ -347,6 +390,12 @@ The pacing `readl()` deliberately discards its data. It is a posted-write
 drain, not a table-data correctness check, and Linux `readl()` supplies no
 separate completion status to this helper. Existing QEMU/VCS completion and
 timeout behavior remains authoritative.
+
+The per-device `atomic64_t` sequence is observed as a `u64` and theoretically
+wraps after 2^64 nonzero-interval frontdoor DWORD writes. At wrap, sequence
+zero is deliberately rejected by the portable predicate; the pacing phase then
+restarts from one and may contain one nonstandard boundary gap. This lifetime
+edge is documented rather than claimed as exercised by the finite regression.
 
 The unit, patched-driver, module-build, QEMU, VCS, Guest, and multi-RAM results
 validate integration and bounded write pacing. They do not determine the
