@@ -20,8 +20,10 @@ trap 'rm -rf -- "$work"' EXIT
 cat >"$work/hw.h" <<'EOF'
 #ifndef TEST_HW_H
 #define TEST_HW_H
+#include <pthread.h>
 #include <stddef.h>
 #include <stdatomic.h>
+#include <stdlib.h>
 #include <stdint.h>
 
 typedef uint8_t u8;
@@ -30,6 +32,9 @@ typedef uint64_t u64;
 typedef struct {
     _Atomic uint64_t value;
 } atomic64_t;
+typedef struct {
+    pthread_mutex_t mutex;
+} spinlock_t;
 
 #define __iomem
 #define unlikely(condition) (condition)
@@ -49,6 +54,39 @@ static inline uint64_t atomic64_inc_return(atomic64_t *counter)
     return atomic_fetch_add_explicit(&counter->value, 1,
                                      memory_order_relaxed) + 1;
 }
+
+void test_spin_lock_pre_acquire(spinlock_t *lock);
+
+static inline void test_spin_lock_init(spinlock_t *lock)
+{
+    if (pthread_mutex_init(&lock->mutex, NULL) != 0)
+        abort();
+}
+
+static inline void test_spin_lock_acquire(spinlock_t *lock)
+{
+    test_spin_lock_pre_acquire(lock);
+    if (pthread_mutex_lock(&lock->mutex) != 0)
+        abort();
+}
+
+static inline void test_spin_lock_release(spinlock_t *lock)
+{
+    if (pthread_mutex_unlock(&lock->mutex) != 0)
+        abort();
+}
+
+#define spin_lock_init(lock) test_spin_lock_init((lock))
+#define spin_lock_irqsave(lock, flags)                                         \
+    do {                                                                       \
+        (flags) = 0;                                                           \
+        test_spin_lock_acquire((lock));                                        \
+    } while (0)
+#define spin_unlock_irqrestore(lock, flags)                                    \
+    do {                                                                       \
+        (void)(flags);                                                         \
+        test_spin_lock_release((lock));                                        \
+    } while (0)
 
 void test_writel(u32 value, u8 *address);
 u32 test_readl(u8 *address);
@@ -249,23 +287,40 @@ assert len(interval_logs) == 1, interval_logs
 probe = function(main, "static int dpu_probe(")
 adapter = probe.index("hw->adapter = adapter;")
 counter = probe.index("atomic64_set(&hw->table_frontdoor_write_sequence, 0);")
-assert adapter < counter
+lock_init_token = "spin_lock_init(&hw->table_frontdoor_write_lock);"
+assert lock_init_token in probe, "probe does not initialize the pacing spinlock"
+lock_init = probe.index(lock_init_token)
+assert adapter < counter < lock_init
 assert probe.count("atomic64_set(&hw->table_frontdoor_write_sequence, 0);") == 1
+assert probe.count("spin_lock_init(&hw->table_frontdoor_write_lock);") == 1
 
 assert '#include "cosim_table_frontdoor_throttle_core.h"' in common
 struct = common[common.index("struct dpu_hw {"):common.index("};", common.index("struct dpu_hw {"))]
 assert struct.count("atomic64_t table_frontdoor_write_sequence;") == 1
+assert struct.count("spinlock_t table_frontdoor_write_lock;") == 1
 assert "#define wr32(hw, reg, value) writel((value), ((hw)->hw_addr + (reg)))" in common
 
 helper = function(common, "static inline void dpu_table_frontdoor_wr32(")
-write = helper.index("wr32(hw, reg, value);")
 interval = helper.index("interval = dpu_table_frontdoor_flush_interval_get();")
 disabled = helper.index("if (!interval)", interval)
-increment = helper.index("atomic64_inc_return(", disabled)
+unpaced_write = helper.index("wr32(hw, reg, value);", disabled)
+unpaced_return = helper.index("return;", unpaced_write)
+lock = helper.index(
+    "spin_lock_irqsave(&hw->table_frontdoor_write_lock, flags);",
+    unpaced_return)
+paced_write = helper.index("wr32(hw, reg, value);", lock)
+increment = helper.index("atomic64_inc_return(", paced_write)
 assert "&hw->table_frontdoor_write_sequence" in helper[increment:]
 decision = helper.index("dpu_table_frontdoor_should_flush(sequence, interval)", increment)
 readback = helper.index("(void)rd32(hw, reg);", decision)
-assert write < interval < disabled < increment < decision < readback
+unlock = helper.index(
+    "spin_unlock_irqrestore(&hw->table_frontdoor_write_lock, flags);",
+    readback)
+assert interval < disabled < unpaced_write < unpaced_return < lock
+assert lock < paced_write < increment < decision < readback < unlock
+assert "spin_lock" not in helper[disabled:unpaced_return]
+assert "atomic64_" not in helper[disabled:unpaced_return]
+assert helper.count("wr32(hw, reg, value);") == 2
 assert "unlikely(dpu_table_frontdoor_should_flush(sequence, interval))" in helper
 
 low = function(common, "static inline void wr32_for_each(")
@@ -318,6 +373,13 @@ static size_t read_count;
 static pthread_mutex_t event_lock = PTHREAD_MUTEX_INITIALIZER;
 static _Atomic unsigned int writers_ready;
 static _Atomic unsigned int writers_start;
+static _Atomic unsigned int spin_lock_attempts;
+static _Atomic unsigned int boundary_write_seen;
+static _Atomic unsigned int boundary_write_release;
+static _Atomic unsigned int follower_lock_attempted;
+static _Atomic unsigned int boundary_gate_enabled;
+static spinlock_t *boundary_lock;
+static u8 *boundary_write_address;
 static unsigned int flush_interval = 100;
 static enum dpu_table_submit_result submit_result = DPU_TABLE_FRONTDOOR;
 
@@ -343,6 +405,17 @@ static void reset_events(void)
            "event mutex unlock failed");
 }
 
+void test_spin_lock_pre_acquire(spinlock_t *lock)
+{
+    atomic_fetch_add_explicit(&spin_lock_attempts, 1, memory_order_relaxed);
+    if (lock == boundary_lock &&
+        atomic_load_explicit(&boundary_write_seen, memory_order_acquire) &&
+        !atomic_load_explicit(&boundary_write_release,
+                              memory_order_acquire))
+        atomic_store_explicit(&follower_lock_attempted, 1,
+                              memory_order_release);
+}
+
 void test_writel(u32 value, u8 *address)
 {
     (void)value;
@@ -352,6 +425,13 @@ void test_writel(u32 value, u8 *address)
     write_count++;
     expect(pthread_mutex_unlock(&event_lock) == 0,
            "event mutex unlock failed");
+    if (atomic_load_explicit(&boundary_gate_enabled, memory_order_acquire) &&
+        address == boundary_write_address) {
+        atomic_store_explicit(&boundary_write_seen, 1, memory_order_release);
+        while (!atomic_load_explicit(&boundary_write_release,
+                                     memory_order_acquire))
+            sched_yield();
+    }
 }
 
 u32 test_readl(u8 *address)
@@ -394,6 +474,12 @@ struct writer_context {
     u64 first_reg;
 };
 
+struct single_writer_context {
+    struct dpu_hw *hw;
+    u64 reg;
+    _Atomic unsigned int done;
+};
+
 static void *write_100_dwords(void *opaque)
 {
     struct writer_context *context = opaque;
@@ -404,6 +490,15 @@ static void *write_100_dwords(void *opaque)
         sched_yield();
     for (index = 0; index < 100; index++)
         write_one(context->hw, context->first_reg + index * 4u);
+    return NULL;
+}
+
+static void *write_single_dword(void *opaque)
+{
+    struct single_writer_context *context = opaque;
+
+    write_one(context->hw, context->reg);
+    atomic_store_explicit(&context->done, 1, memory_order_release);
     return NULL;
 }
 
@@ -446,10 +541,20 @@ int main(void)
     const u32 pair[2] = { 0x11111111u, 0x22222222u };
     struct writer_context first_writer = { .hw = &first, .first_reg = 0xc000u };
     struct writer_context second_writer = { .hw = &second, .first_reg = 0xd000u };
+    struct single_writer_context boundary_writer = {
+        .hw = &first, .reg = 0xe000u
+    };
+    struct single_writer_context follower_writer = {
+        .hw = &first, .reg = 0xe004u
+    };
     pthread_t first_thread;
     pthread_t second_thread;
+    pthread_t boundary_thread;
+    pthread_t follower_thread;
     unsigned int index;
 
+    spin_lock_init(&first.table_frontdoor_write_lock);
+    spin_lock_init(&second.table_frontdoor_write_lock);
     flush_interval = 100;
     submit_result = DPU_TABLE_FRONTDOOR;
     reset_events();
@@ -480,24 +585,31 @@ int main(void)
     reset_events();
     flush_interval = 0;
     atomic64_set(&first.table_frontdoor_write_sequence, 0);
+    atomic_store_explicit(&spin_lock_attempts, 0, memory_order_relaxed);
     for (index = 0; index < 200; index++)
         write_one(&first, 0x5000u + index * 4u);
     expect(write_count == 200 && read_count == 0,
            "disabled throttling generated a readback");
     expect(atomic64_read(&first.table_frontdoor_write_sequence) == 0,
            "disabled throttling incremented the write sequence");
+    expect(atomic_load_explicit(&spin_lock_attempts, memory_order_relaxed) == 0,
+           "disabled throttling acquired the pacing lock");
 
     flush_interval = 100;
     for (submit_result = DPU_TABLE_SUCCESS;
          submit_result <= DPU_TABLE_ERROR; submit_result++) {
         reset_events();
         atomic64_set(&first.table_frontdoor_write_sequence, 0);
+        atomic_store_explicit(&spin_lock_attempts, 0, memory_order_relaxed);
         wr32_for_each(&first, 0x6000u, pair, sizeof(pair));
         wr32_for_high_order(&first, 0x7000u, pair, sizeof(pair));
         expect(write_count == 0 && read_count == 0,
                "SUCCESS/ERROR path accessed MMIO");
         expect(atomic64_read(&first.table_frontdoor_write_sequence) == 0,
                "SUCCESS/ERROR path incremented the write sequence");
+        expect(atomic_load_explicit(&spin_lock_attempts,
+                                    memory_order_relaxed) == 0,
+               "SUCCESS/ERROR path acquired the pacing lock");
     }
 
     submit_result = DPU_TABLE_FRONTDOOR;
@@ -543,6 +655,53 @@ int main(void)
     expect_device_events(base_a, first_writer.first_reg + 99u * 4u);
     expect_device_events(base_b, second_writer.first_reg + 99u * 4u);
 
+    reset_events();
+    atomic64_set(&first.table_frontdoor_write_sequence, 99);
+    atomic_store_explicit(&boundary_writer.done, 0, memory_order_relaxed);
+    atomic_store_explicit(&follower_writer.done, 0, memory_order_relaxed);
+    atomic_store_explicit(&boundary_write_seen, 0, memory_order_relaxed);
+    atomic_store_explicit(&boundary_write_release, 0, memory_order_relaxed);
+    atomic_store_explicit(&follower_lock_attempted, 0, memory_order_relaxed);
+    boundary_lock = &first.table_frontdoor_write_lock;
+    boundary_write_address = base_a + boundary_writer.reg;
+    atomic_store_explicit(&boundary_gate_enabled, 1, memory_order_release);
+    expect(pthread_create(&boundary_thread, NULL, write_single_dword,
+                          &boundary_writer) == 0,
+           "failed to create boundary writer thread");
+    while (!atomic_load_explicit(&boundary_write_seen, memory_order_acquire))
+        sched_yield();
+    expect(pthread_create(&follower_thread, NULL, write_single_dword,
+                          &follower_writer) == 0,
+           "failed to create follower writer thread");
+    while (!atomic_load_explicit(&follower_lock_attempted,
+                                 memory_order_acquire))
+        sched_yield();
+    expect(!atomic_load_explicit(&follower_writer.done,
+                                 memory_order_acquire),
+           "follower write crossed the held pacing lock");
+    expect(event_count == 1 && write_count == 1 && read_count == 0 &&
+           events[0].kind == 'W' &&
+           events[0].address == base_a + boundary_writer.reg,
+           "unexpected MMIO occurred while the boundary write was held");
+    atomic_store_explicit(&boundary_write_release, 1, memory_order_release);
+    expect(pthread_join(boundary_thread, NULL) == 0,
+           "failed to join boundary writer thread");
+    expect(pthread_join(follower_thread, NULL) == 0,
+           "failed to join follower writer thread");
+    atomic_store_explicit(&boundary_gate_enabled, 0, memory_order_release);
+    boundary_lock = NULL;
+    expect(event_count == 3 && write_count == 2 && read_count == 1,
+           "serialized boundary test produced unexpected MMIO counts");
+    expect(events[0].kind == 'W' &&
+           events[0].address == base_a + boundary_writer.reg &&
+           events[1].kind == 'R' &&
+           events[1].address == base_a + boundary_writer.reg &&
+           events[2].kind == 'W' &&
+           events[2].address == base_a + follower_writer.reg,
+           "same-device MMIO order was not boundary-W, boundary-R, follower-W");
+    expect(atomic64_read(&first.table_frontdoor_write_sequence) == 101,
+           "same-device serialized sequence is not 101");
+
     puts("frontdoor throttle runtime contract passed");
     return 0;
 }
@@ -561,6 +720,8 @@ assert "pthread_create(" in harness, "separate dpu_hw callers are not concurrent
 assert "atomic_load_explicit(&writers_ready" in harness, "writer barrier is absent"
 assert "atomic_load_explicit(&writers_start" in harness, "writer start gate is absent"
 assert "pthread_mutex_lock(&event_lock)" in harness, "MMIO log is not synchronized"
+assert "test_spin_lock_pre_acquire" in mock, "spinlock mock hook is absent"
+assert "follower_lock_attempted" in harness, "same-device lock race is absent"
 print("concurrent harness source contract passed")
 PY
 

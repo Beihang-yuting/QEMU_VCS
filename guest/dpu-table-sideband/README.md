@@ -45,7 +45,11 @@ The return value is discarded: this is a posted-write pacing readback, not
 data validation. A value of 0 restores the original unthrottled loops. A
 successful backdoor submission and a hard backdoor error both return before
 the fallback loops and therefore do not count. Each `dpu_hw` has an
-independent counter.
+independent counter and IRQ-safe pacing lock. For a nonzero interval, that
+per-device lock serializes the complete write/count/boundary-read sequence, so
+the next write on the same device cannot pass its pacing read; different
+`dpu_hw` instances can still progress independently. A value of 0 bypasses
+both the counter and the lock.
 
 The equivalent kernel command-line settings are:
 

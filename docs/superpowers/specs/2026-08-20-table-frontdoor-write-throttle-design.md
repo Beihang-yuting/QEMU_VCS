@@ -59,25 +59,34 @@ matching route and the existing policy selects frontdoor fallback.
 
 ### Per-DUT state
 
-`struct dpu_hw` gains an `atomic64_t` table-frontdoor write sequence. Probe
-initializes it to zero immediately after associating the `dpu_hw` with its
-adapter. State is therefore independent for each probed DUT/PF and safe when
-multiple driver contexts write tables concurrently.
+`struct dpu_hw` gains an `atomic64_t` table-frontdoor write sequence and a
+dedicated `spinlock_t` pacing lock. Probe initializes both immediately after
+associating the `dpu_hw` with its adapter. State and serialization are therefore
+independent for each probed DUT/PF when multiple driver contexts write tables
+concurrently.
 
 The sequence is monotonic for the lifetime of that `dpu_hw`. A write whose
 sequence is an exact multiple of the configured interval triggers the
-synchronous read. An atomic sequence avoids a lock around MMIO and ensures
-that concurrent callers collectively receive one pacing read per interval.
+synchronous read. For a nonzero interval, the per-device IRQ-safe spinlock
+serializes the complete MMIO write, atomic increment, and possible readback;
+therefore a later write on the same device cannot cross the boundary read.
+Separate `dpu_hw` locks still permit different devices to progress in
+parallel. Interval 0 bypasses both the counter and the lock.
 
 ### Write helper
 
 A table-frontdoor-only helper performs this operation:
 
 ```text
+if interval == 0:
+    writel(value, hw->hw_addr + offset)
+    return
+spin_lock_irqsave(hw->table_frontdoor_write_lock)
 writel(value, hw->hw_addr + offset)
 sequence = atomic64_inc_return(&hw->table_frontdoor_write_sequence)
-if interval != 0 and sequence % interval == 0:
+if sequence % interval == 0:
     readl(hw->hw_addr + offset)    // result intentionally discarded
+spin_unlock_irqrestore(hw->table_frontdoor_write_lock)
 ```
 
 The read uses the exact DWORD address written by the triggering operation. No
@@ -171,6 +180,10 @@ All behavior changes are test-first.
 - Exercise intervals 0, 1, 100, and a boundary spanning multiple entries.
 - Exercise concurrent callers against separate `dpu_hw` instances and confirm
   independent sequences.
+- Deterministically hold one same-`dpu_hw` boundary write after `writel`, make a
+  second caller attempt the pacing lock, and prove the order is boundary write,
+  boundary read, then follower write.
+- Prove interval 0 never attempts the pacing lock.
 - Confirm the pacing read uses the address of the triggering write and ignores
   its value.
 

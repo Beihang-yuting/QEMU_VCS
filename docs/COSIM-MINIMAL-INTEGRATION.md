@@ -149,7 +149,9 @@ insmod dpu_snd1.ko table_frontdoor_flush_interval=0
 MMIO 写。默认配置在第 100 次写之后（以后每 100 次）立即对刚写的 DWORD 地址执行
 `readl`，丢弃返回值；它用于 posted-write pacing，不是数据校验。设为 0 会恢复原始
 无节流循环。backdoor 成功和 hard error 都在 fallback 循环前返回，不会计数；每个
-`dpu_hw` 分别维护独立计数器。
+`dpu_hw` 分别维护独立计数器和 IRQ-safe pacing lock。interval 非零时，同一设备的
+完整 write/count/boundary-read 序列在该锁内串行，后续写不能越过对应的 pacing
+read；不同 `dpu_hw` 仍可并行。interval 为 0 时既不计数也不获取该锁。
 
 也可用 kernel cmdline 显式选择：
 

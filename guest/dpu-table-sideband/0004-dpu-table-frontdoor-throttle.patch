@@ -8,39 +8,45 @@
  
  
  #define __FILENAME__ (strrchr(__FILE__, '/') ? strrchr(__FILE__, '/') + 1 : __FILE__)
-@@ -587,6 +588,7 @@
+@@ -587,6 +588,8 @@
  
  struct dpu_hw {
  	void *adapter;
 +	atomic64_t table_frontdoor_write_sequence;
++	spinlock_t table_frontdoor_write_lock;
  
  	u8 __iomem *hw_addr;
  	u8 __iomem *msix_bar_hw_addr;
-@@ -877,6 +879,23 @@
+@@ -877,6 +880,28 @@
  #define wr32(hw, reg, value) writel((value), ((hw)->hw_addr + (reg)))
  #define rd32(hw, reg) readl((hw)->hw_addr + (reg))
  
 +static inline void dpu_table_frontdoor_wr32(struct dpu_hw *hw, u64 reg,
 +					     u32 value)
 +{
++	unsigned long flags;
 +	u32 interval;
 +	u64 sequence;
 +
-+	wr32(hw, reg, value);
 +	interval = dpu_table_frontdoor_flush_interval_get();
-+	if (!interval)
++	if (!interval) {
++		wr32(hw, reg, value);
 +		return;
++	}
 +
++	spin_lock_irqsave(&hw->table_frontdoor_write_lock, flags);
++	wr32(hw, reg, value);
 +	sequence = (u64)atomic64_inc_return(
 +		&hw->table_frontdoor_write_sequence);
 +	if (unlikely(dpu_table_frontdoor_should_flush(sequence, interval)))
 +		(void)rd32(hw, reg);
++	spin_unlock_irqrestore(&hw->table_frontdoor_write_lock, flags);
 +}
 +
  /* COSIM_TABLE_SIDEBAND_PATCH_0002 */
  static inline void wr32_for_each(struct dpu_hw *hw, u64 reg,
  				 const void *value, u32 size)
-@@ -891,7 +910,8 @@
+@@ -891,7 +916,8 @@
  	if (result == DPU_TABLE_ERROR)
  		return;
  	for (__n = 0; __n < size; __n += 4)
@@ -50,7 +56,7 @@
  }
  
  static inline void wr32_for_high_order(struct dpu_hw *hw, u64 reg,
-@@ -907,7 +927,8 @@
+@@ -907,7 +933,8 @@
  	if (result == DPU_TABLE_ERROR)
  		return;
  	for (__n = size - 4; __n >= 0; __n -= 4)
@@ -79,15 +85,16 @@
  static bool af_mode = true;
  module_param(af_mode, bool, 0444);
  MODULE_PARM_DESC(af_mode, "Pf acts as af or not");
-@@ -2148,6 +2158,7 @@
+@@ -2148,6 +2158,8 @@
  	mutex_init(&adapter->stats.lock);
  	hw = &adapter->hw;
  	hw->adapter = adapter;
 +	atomic64_set(&hw->table_frontdoor_write_sequence, 0);
++	spin_lock_init(&hw->table_frontdoor_write_lock);
  
  	set_bit(DPU_DOWN, adapter->state);
  
-@@ -2654,6 +2665,9 @@
+@@ -2654,6 +2666,9 @@
  	int err;
  	int i;
  

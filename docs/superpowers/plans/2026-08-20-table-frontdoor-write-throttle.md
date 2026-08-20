@@ -308,12 +308,14 @@ Add this field to `struct dpu_hw`:
 
 ```c
 atomic64_t table_frontdoor_write_sequence;
+spinlock_t table_frontdoor_write_lock;
 ```
 
 Immediately after `hw->adapter = adapter;` in probe, initialize it:
 
 ```c
 atomic64_set(&hw->table_frontdoor_write_sequence, 0);
+spin_lock_init(&hw->table_frontdoor_write_lock);
 ```
 
 Include the portable core and add this helper next to the existing wrappers:
@@ -324,16 +326,22 @@ Include the portable core and add this helper next to the existing wrappers:
 static inline void dpu_table_frontdoor_wr32(struct dpu_hw *hw, u64 reg,
                                              u32 value)
 {
-    u32 interval = dpu_table_frontdoor_flush_interval_get();
+    unsigned long flags;
+    u32 interval;
     u64 sequence;
 
-    wr32(hw, reg, value);
-    if (!interval)
+    interval = dpu_table_frontdoor_flush_interval_get();
+    if (!interval) {
+        wr32(hw, reg, value);
         return;
+    }
+    spin_lock_irqsave(&hw->table_frontdoor_write_lock, flags);
+    wr32(hw, reg, value);
     sequence = (u64)atomic64_inc_return(
         &hw->table_frontdoor_write_sequence);
     if (unlikely(dpu_table_frontdoor_should_flush(sequence, interval)))
         (void)rd32(hw, reg);
+    spin_unlock_irqrestore(&hw->table_frontdoor_write_lock, flags);
 }
 ```
 
@@ -453,6 +461,8 @@ fallback count toward the interval.
 The 100th write is followed by readl() of that just-written DWORD; the value is
 discarded and is not data verification.
 table_frontdoor_flush_interval=0 restores the original unpaced loops.
+For a nonzero interval, each dpu_hw serializes its complete write/count/read
+sequence with an IRQ-safe spinlock; interval 0 bypasses that lock.
 Successful backdoor requests and hard errors never increment the frontdoor
 counter.
 Each dpu_hw has an independent counter.
