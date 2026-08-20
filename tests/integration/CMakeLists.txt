@@ -138,6 +138,12 @@ add_test(NAME test_dpu_qid_batch_patch
          COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/test_dpu_qid_batch_patch.sh)
 set_tests_properties(test_dpu_qid_batch_patch PROPERTIES TIMEOUT 10)
 
+add_test(NAME test_dpu_table_frontdoor_throttle_patch
+         COMMAND bash
+                 ${CMAKE_CURRENT_SOURCE_DIR}/test_dpu_table_frontdoor_throttle_patch.sh)
+set_tests_properties(test_dpu_table_frontdoor_throttle_patch
+                     PROPERTIES TIMEOUT 20)
+
 add_test(NAME test_dpu_table_batch_source_contract
          COMMAND bash
                  ${CMAKE_CURRENT_SOURCE_DIR}/test_dpu_table_batch_source_contract.sh)

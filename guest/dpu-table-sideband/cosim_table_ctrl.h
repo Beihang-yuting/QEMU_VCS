@@ -38,6 +38,7 @@ enum dpu_table_submit_result dpu_table_submit_batch(
 	const void *entries, u32 entry_bytes, u32 stride_bytes,
 	u32 entry_count, enum dpu_table_write_order order);
 
+u32 dpu_table_frontdoor_flush_interval_get(void);
 bool dpu_table_backdoor_enabled(void);
 int dpu_table_ctrl_register(void);
 void dpu_table_ctrl_unregister(void);
