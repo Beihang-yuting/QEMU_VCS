@@ -1,4 +1,4 @@
-#include <assert.h>
+#include "test_check.h"
 #include <stdint.h>
 #include <string.h>
 
@@ -9,9 +9,9 @@ static void test_bdf_keeps_full_devfn(void)
     uint16_t pf0 = cosim_pcie_bdf(1, 0);
     uint16_t pf8 = cosim_pcie_bdf(1, 8);
 
-    assert(pf0 == 0x0100);
-    assert(pf8 == 0x0108);
-    assert(pf8 != pf0);
+    CHECK(pf0 == 0x0100);
+    CHECK(pf8 == 0x0108);
+    CHECK(pf8 != pf0);
 }
 
 static void test_host_route_sets_rc_requester_and_target_only(void)
@@ -27,14 +27,14 @@ static void test_host_route_sets_rc_requester_and_target_only(void)
 
     cosim_route_host_to_device(&req, 0x0108);
 
-    assert(req.requester_id == 0x0000);
-    assert(req.target_bdf == 0x0108);
-    assert(req.type == TLP_MRD);
-    assert(req.addr == UINT64_C(0x123456789abcdef0));
-    assert(req.len == 8);
-    assert(req.first_be == 0x3);
-    assert(req.last_be == 0xc);
-    assert(req.data[0] == 0xff);
+    CHECK(req.requester_id == 0x0000);
+    CHECK(req.target_bdf == 0x0108);
+    CHECK(req.type == TLP_MRD);
+    CHECK(req.addr == UINT64_C(0x123456789abcdef0));
+    CHECK(req.len == 8);
+    CHECK(req.first_be == 0x3);
+    CHECK(req.last_be == 0xc);
+    CHECK(req.data[0] == 0xff);
 }
 
 static void test_sc_completion_decodes_little_endian_by_size(void)
@@ -53,9 +53,9 @@ static void test_sc_completion_decodes_little_endian_by_size(void)
     for (unsigned i = 0; i < sizeof(sizes) / sizeof(sizes[0]); i++) {
         uint64_t value = UINT64_MAX;
 
-        assert(cosim_cpl_value_decode(COSIM_CPL_STATUS_SC, payload,
+        CHECK(cosim_cpl_value_decode(COSIM_CPL_STATUS_SC, payload,
                                       sizes[i], &value));
-        assert(value == expected[i]);
+        CHECK(value == expected[i]);
     }
 }
 
@@ -73,9 +73,9 @@ static void test_non_sc_completion_does_not_read_poisoned_payload(void)
     for (unsigned i = 0; i < sizeof(statuses) / sizeof(statuses[0]); i++) {
         uint64_t value = 0;
 
-        assert(!cosim_cpl_value_decode(statuses[i], poisoned_payload, 8,
+        CHECK(!cosim_cpl_value_decode(statuses[i], poisoned_payload, 8,
                                        &value));
-        assert(value == UINT64_MAX);
+        CHECK(value == UINT64_MAX);
     }
 }
 

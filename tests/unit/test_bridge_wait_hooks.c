@@ -1,7 +1,7 @@
 #include "bridge_qemu.h"
 #include "cosim_transport.h"
 
-#include <assert.h>
+#include "test_check.h"
 #include <pthread.h>
 #include <stdio.h>
 #include <string.h>
@@ -84,7 +84,7 @@ static void hook_begin(void *opaque)
 static void hook_end(void *opaque)
 {
     hook_state_t *s = opaque;
-    assert(s->depth > 0);
+    CHECK(s->depth > 0);
     s->end_count++;
     s->depth--;
 }
@@ -116,10 +116,10 @@ static void init_ctx(bridge_ctx_t *ctx, cosim_transport_t *transport,
 
 static void assert_balanced(const hook_state_t *s, int expected)
 {
-    assert(s->begin_count == expected);
-    assert(s->end_count == expected);
-    assert(s->depth == 0);
-    assert(s->max_depth == 1);
+    CHECK(s->begin_count == expected);
+    CHECK(s->end_count == expected);
+    CHECK(s->depth == 0);
+    CHECK(s->max_depth == 1);
 }
 
 static void test_success_and_failures(void)
@@ -132,40 +132,40 @@ static void test_success_and_failures(void)
     cpl_entry_t cpl;
 
     init_ctx(&ctx, &transport, &fake, &hooks);
-    assert(bridge_send_tlp_and_wait(&ctx, &req, &cpl) == 0);
+    CHECK(bridge_send_tlp_and_wait(&ctx, &req, &cpl) == 0);
     assert_balanced(&hooks, 1);
 
     fake.send_tlp_rc = -1;
-    assert(bridge_send_tlp_and_wait(&ctx, &req, &cpl) == -1);
+    CHECK(bridge_send_tlp_and_wait(&ctx, &req, &cpl) == -1);
     assert_balanced(&hooks, 2);
 
     fake.send_tlp_rc = 0;
     fake.send_sync_rc = -1;
-    assert(bridge_send_tlp_and_wait(&ctx, &req, &cpl) == -1);
+    CHECK(bridge_send_tlp_and_wait(&ctx, &req, &cpl) == -1);
     assert_balanced(&hooks, 3);
 
     fake.send_sync_rc = 0;
     fake.recv_sync_rc = -1;
-    assert(bridge_send_tlp_and_wait(&ctx, &req, &cpl) == -1);
+    CHECK(bridge_send_tlp_and_wait(&ctx, &req, &cpl) == -1);
     assert_balanced(&hooks, 4);
 
     fake.recv_sync_rc = 0;
     fake.sync_type = SYNC_MSG_DMA_CPL;
-    assert(bridge_send_tlp_and_wait(&ctx, &req, &cpl) == -1);
+    CHECK(bridge_send_tlp_and_wait(&ctx, &req, &cpl) == -1);
     assert_balanced(&hooks, 5);
 
     fake.sync_type = SYNC_MSG_CPL_READY;
     fake.recv_cpl_rc = -1;
-    assert(bridge_send_tlp_and_wait(&ctx, &req, &cpl) == -1);
+    CHECK(bridge_send_tlp_and_wait(&ctx, &req, &cpl) == -1);
     assert_balanced(&hooks, 6);
 
     fake.recv_cpl_rc = 0;
     fake.recv_timed_rc = 1;
-    assert(bridge_send_tlp_and_wait_timed(&ctx, &req, &cpl, 10) == -2);
+    CHECK(bridge_send_tlp_and_wait_timed(&ctx, &req, &cpl, 10) == -2);
     assert_balanced(&hooks, 7);
 
     fake.recv_timed_rc = 0;
-    assert(bridge_send_tlp_fire(&ctx, &req) == 0);
+    CHECK(bridge_send_tlp_fire(&ctx, &req) == 0);
     assert_balanced(&hooks, 8);
 
     fake.recv_timed_rc = 1;
@@ -186,7 +186,7 @@ static void test_stale_completion_guard_restores_hook(void)
 
     init_ctx(&ctx, &transport, &fake, &hooks);
     fake.match_tag = 0;
-    assert(bridge_send_tlp_and_wait(&ctx, &req, &cpl) == -1);
+    CHECK(bridge_send_tlp_and_wait(&ctx, &req, &cpl) == -1);
     assert_balanced(&hooks, 1);
     pthread_mutex_destroy(&ctx.tlp_mutex);
 }

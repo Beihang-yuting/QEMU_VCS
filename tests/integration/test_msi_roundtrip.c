@@ -1,5 +1,5 @@
 #include <stdio.h>
-#include <assert.h>
+#include "test_check.h"
 #include <unistd.h>
 #include <sys/wait.h>
 #include "bridge_qemu.h"
@@ -23,14 +23,14 @@ static void msi_callback(uint32_t vector, void *user) {
 static void vcs_stub(void) {
     usleep(100000);
     cosim_shm_t shm;
-    assert(cosim_shm_open(&shm, SHM_NAME) == 0);
+    CHECK(cosim_shm_open(&shm, SHM_NAME) == 0);
     int sock = sock_sync_connect(SOCK_PATH);
-    assert(sock >= 0);
+    CHECK(sock >= 0);
     atomic_store(&shm.ctrl->vcs_ready, 1);
 
     for (uint32_t v = 0; v < 3; v++) {
         msi_event_t ev = { .vector = (uint16_t)v, .timestamp = 1000 + v };
-        assert(ring_buf_enqueue(&shm.msi_ring, &ev) == 0);
+        CHECK(ring_buf_enqueue(&shm.msi_ring, &ev) == 0);
         usleep(50000);  /* give poller time to process */
     }
 
@@ -45,23 +45,23 @@ static void test_msi_delivery(void) {
     if (pid == 0) { vcs_stub(); _exit(0); }
 
     bridge_ctx_t *ctx = bridge_init(SHM_NAME, SOCK_PATH);
-    assert(ctx);
-    assert(bridge_connect(ctx) == 0);
+    CHECK(ctx);
+    CHECK(bridge_connect(ctx) == 0);
 
     irq_poller_t *poller = irq_poller_start(&ctx->shm, NULL, msi_callback, NULL);
-    assert(poller);
+    CHECK(poller);
 
     for (int i = 0; i < 50 && __atomic_load_n(&msi_count, __ATOMIC_SEQ_CST) < 3; i++)
         usleep(50000);
-    assert(__atomic_load_n(&msi_count, __ATOMIC_SEQ_CST) == 3);
-    assert(last_vector == 2);
+    CHECK(__atomic_load_n(&msi_count, __ATOMIC_SEQ_CST) == 3);
+    CHECK(last_vector == 2);
 
     irq_poller_stop(poller);
     bridge_destroy(ctx);
 
     int status;
     waitpid(pid, &status, 0);
-    assert(WIFEXITED(status) && WEXITSTATUS(status) == 0);
+    CHECK(WIFEXITED(status) && WEXITSTATUS(status) == 0);
 
     printf("  PASS: test_msi_delivery\n");
 }

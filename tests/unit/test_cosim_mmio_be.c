@@ -1,4 +1,4 @@
-#include <assert.h>
+#include "test_check.h"
 #include <stdint.h>
 #include <stdio.h>
 
@@ -11,12 +11,12 @@ static void expect_layout(unsigned offset, unsigned size,
     cosim_mmio_be_layout_t layout;
     uint64_t value = UINT64_C(0x8877665544332211);
 
-    assert(cosim_mmio_be_layout_build(offset, size, value, &layout) == 0);
-    assert(layout.first_be == first_be);
-    assert(layout.last_be == last_be);
-    assert(layout.wire_len == wire_len);
+    CHECK(cosim_mmio_be_layout_build(offset, size, value, &layout) == 0);
+    CHECK(layout.first_be == first_be);
+    CHECK(layout.last_be == last_be);
+    CHECK(layout.wire_len == wire_len);
     for (unsigned i = 0; i < size; i++) {
-        assert(layout.data[offset + i] == (uint8_t)(value >> (8 * i)));
+        CHECK(layout.data[offset + i] == (uint8_t)(value >> (8 * i)));
     }
 }
 

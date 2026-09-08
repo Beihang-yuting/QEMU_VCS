@@ -1,5 +1,5 @@
 #include <stdio.h>
-#include <assert.h>
+#include "test_check.h"
 #include <string.h>
 #include <unistd.h>
 #include "trace_log.h"
@@ -9,7 +9,7 @@ static void test_csv_write(void) {
     const char *path = "/tmp/cosim_trace_test.csv";
     unlink(path);
     trace_log_t log;
-    assert(trace_log_open(&log, path, TRACE_FMT_CSV) == 0);
+    CHECK(trace_log_open(&log, path, TRACE_FMT_CSV) == 0);
 
     tlp_entry_t req = { .type = TLP_MRD, .tag = 5, .addr = 0x1000, .len = 4,
                          .timestamp = 100 };
@@ -23,16 +23,16 @@ static void test_csv_write(void) {
     trace_log_close(&log);
 
     FILE *f = fopen(path, "r");
-    assert(f);
+    CHECK(f);
     char line[256];
-    assert(fgets(line, sizeof(line), f));
-    assert(strstr(line, "timestamp"));
-    assert(fgets(line, sizeof(line), f));
-    assert(strstr(line, "MRd"));
-    assert(strstr(line, "0x1000"));
-    assert(fgets(line, sizeof(line), f));
-    assert(strstr(line, "Cpl"));
-    assert(strstr(line, "EFBEADDE") || strstr(line, "efbeadde"));
+    CHECK(fgets(line, sizeof(line), f));
+    CHECK(strstr(line, "timestamp"));
+    CHECK(fgets(line, sizeof(line), f));
+    CHECK(strstr(line, "MRd"));
+    CHECK(strstr(line, "0x1000"));
+    CHECK(fgets(line, sizeof(line), f));
+    CHECK(strstr(line, "Cpl"));
+    CHECK(strstr(line, "EFBEADDE") || strstr(line, "efbeadde"));
     fclose(f);
 
     unlink(path);
@@ -43,7 +43,7 @@ static void test_json_write(void) {
     const char *path = "/tmp/cosim_trace_test.json";
     unlink(path);
     trace_log_t log;
-    assert(trace_log_open(&log, path, TRACE_FMT_JSON) == 0);
+    CHECK(trace_log_open(&log, path, TRACE_FMT_JSON) == 0);
 
     tlp_entry_t req = { .type = TLP_MWR, .tag = 7, .addr = 0x2000, .len = 4,
                          .timestamp = 200 };
@@ -51,19 +51,19 @@ static void test_json_write(void) {
     trace_log_close(&log);
 
     FILE *f = fopen(path, "r");
-    assert(f);
+    CHECK(f);
     /* JSON should start with [ and end with ] */
     fseek(f, 0, SEEK_END);
     long size = ftell(f);
-    assert(size > 10);
+    CHECK(size > 10);
     fseek(f, 0, SEEK_SET);
     char buf[512];
     size_t n = fread(buf, 1, sizeof(buf) - 1, f);
     buf[n] = '\0';
     fclose(f);
-    assert(buf[0] == '[');
-    assert(strstr(buf, "\"kind\":\"tlp\""));
-    assert(strstr(buf, "\"type\":\"MWr\""));
+    CHECK(buf[0] == '[');
+    CHECK(strstr(buf, "\"kind\":\"tlp\""));
+    CHECK(strstr(buf, "\"type\":\"MWr\""));
 
     unlink(path);
     printf("  PASS: test_json_write\n");

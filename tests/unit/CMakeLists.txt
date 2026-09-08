@@ -1,3 +1,5 @@
+# test_check.h 位于 tests/ 根目录，供各测试以引号形式包含
+include_directories(${CMAKE_CURRENT_SOURCE_DIR}/..)
 add_executable(test_ring_buffer test_ring_buffer.c)
 target_link_libraries(test_ring_buffer cosim_bridge_common)
 add_test(NAME test_ring_buffer COMMAND test_ring_buffer)
