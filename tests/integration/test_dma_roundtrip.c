@@ -1,5 +1,5 @@
 #include <stdio.h>
-#include <assert.h>
+#include "test_check.h"
 #include <string.h>
 #include <unistd.h>
 #include <sys/wait.h>
@@ -28,15 +28,15 @@ static void dma_callback(const dma_req_t *req, void *user) {
 static void vcs_stub(void) {
     usleep(100000);
     cosim_shm_t shm;
-    assert(cosim_shm_open(&shm, SHM_NAME) == 0);
+    CHECK(cosim_shm_open(&shm, SHM_NAME) == 0);
     int sock = sock_sync_connect(SOCK_PATH);
-    assert(sock >= 0);
+    CHECK(sock >= 0);
     atomic_store(&shm.ctrl->vcs_ready, 1);
 
     dma_mgr_t mgr;
     dma_mgr_init(&mgr, shm.dma_buf, shm.dma_buf_size);
     uint32_t off = dma_mgr_alloc(&mgr, 64);
-    assert(off != DMA_MGR_INVALID);
+    CHECK(off != DMA_MGR_INVALID);
 
     uint8_t *dma_buf = (uint8_t *)shm.dma_buf + off;
     for (int i = 0; i < 64; i++) dma_buf[i] = (uint8_t)(0x80 + i);
@@ -49,7 +49,7 @@ static void vcs_stub(void) {
         .dma_offset = off,
         .timestamp = 0,
     };
-    assert(ring_buf_enqueue(&shm.dma_req_ring, &req) == 0);
+    CHECK(ring_buf_enqueue(&shm.dma_req_ring, &req) == 0);
 
     sleep(1);
     sock_sync_close(sock);
@@ -62,22 +62,22 @@ static void test_dma_write_from_device(void) {
     if (pid == 0) { vcs_stub(); _exit(0); }
 
     bridge_ctx_t *ctx = bridge_init(SHM_NAME, SOCK_PATH);
-    assert(ctx);
-    assert(bridge_connect(ctx) == 0);
+    CHECK(ctx);
+    CHECK(bridge_connect(ctx) == 0);
 
     irq_poller_t *poller = irq_poller_start(&ctx->shm, dma_callback, NULL, &ctx->shm);
-    assert(poller);
+    CHECK(poller);
 
     for (int i = 0; i < 50 && !__atomic_load_n(&dma_received, __ATOMIC_SEQ_CST); i++)
         usleep(50000);
-    assert(__atomic_load_n(&dma_received, __ATOMIC_SEQ_CST));
-    assert(received_req.tag == 7);
-    assert(received_req.direction == DMA_DIR_WRITE);
-    assert(received_req.host_addr == 0x1000);
-    assert(received_req.len == 64);
+    CHECK(__atomic_load_n(&dma_received, __ATOMIC_SEQ_CST));
+    CHECK(received_req.tag == 7);
+    CHECK(received_req.direction == DMA_DIR_WRITE);
+    CHECK(received_req.host_addr == 0x1000);
+    CHECK(received_req.len == 64);
 
     for (int i = 0; i < 64; i++) {
-        assert(received_data[i] == (uint8_t)(0x80 + i));
+        CHECK(received_data[i] == (uint8_t)(0x80 + i));
     }
 
     irq_poller_stop(poller);
@@ -85,7 +85,7 @@ static void test_dma_write_from_device(void) {
 
     int status;
     waitpid(pid, &status, 0);
-    assert(WIFEXITED(status) && WEXITSTATUS(status) == 0);
+    CHECK(WIFEXITED(status) && WEXITSTATUS(status) == 0);
 
     printf("  PASS: test_dma_write_from_device\n");
 }

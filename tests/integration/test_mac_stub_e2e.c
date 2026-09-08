@@ -4,7 +4,7 @@
  * rx callback that pushes received frames into a small in-memory queue.
  * Node A sends three frames via its stub; node B should receive them.
  */
-#include <assert.h>
+#include "test_check.h"
 #include <pthread.h>
 #include <stdio.h>
 #include <string.h>
@@ -46,16 +46,16 @@ int main(void)
     eth_shm_unlink(name);
 
     eth_port_t pa = {0}, pb = {0};
-    assert(eth_port_open(&pa, name, ETH_ROLE_A, 1) == 0);
-    assert(eth_port_open(&pb, name, ETH_ROLE_B, 0) == 0);
+    CHECK(eth_port_open(&pa, name, ETH_ROLE_A, 1) == 0);
+    CHECK(eth_port_open(&pb, name, ETH_ROLE_B, 0) == 0);
 
     rx_queue_t qa = {0}, qb = {0};
     pthread_mutex_init(&qa.mtx, NULL);
     pthread_mutex_init(&qb.mtx, NULL);
 
     mac_stub_t sa = {0}, sb = {0};
-    assert(mac_stub_start(&sa, &pa, rx_cb, &qa) == 0);
-    assert(mac_stub_start(&sb, &pb, rx_cb, &qb) == 0);
+    CHECK(mac_stub_start(&sa, &pa, rx_cb, &qa) == 0);
+    CHECK(mac_stub_start(&sb, &pb, rx_cb, &qb) == 0);
 
     /* Node A sends 3 frames to node B. */
     for (int i = 0; i < 3; i++) {
@@ -70,7 +70,7 @@ int main(void)
                 nanosleep(&ts, NULL);
             }
         }
-        assert(rc == 0);
+        CHECK(rc == 0);
     }
 
     /* Wait up to ~1s for all 3 to arrive at B. */
@@ -78,19 +78,19 @@ int main(void)
         struct timespec ts = {0, 2 * 1000 * 1000};
         nanosleep(&ts, NULL);
     }
-    assert(rx_q_count(&qb) == 3);
+    CHECK(rx_q_count(&qb) == 3);
 
     /* Validate contents, in order. */
     pthread_mutex_lock(&qb.mtx);
     for (int i = 0; i < 3; i++) {
-        assert(qb.frames[i].len == 128);
-        assert(qb.frames[i].data[0] == (uint8_t)(0x10 + i));
-        assert(qb.frames[i].seq == (uint32_t)i);
+        CHECK(qb.frames[i].len == 128);
+        CHECK(qb.frames[i].data[0] == (uint8_t)(0x10 + i));
+        CHECK(qb.frames[i].seq == (uint32_t)i);
     }
     pthread_mutex_unlock(&qb.mtx);
 
     /* B has not sent anything, so qa should be empty. */
-    assert(rx_q_count(&qa) == 0);
+    CHECK(rx_q_count(&qa) == 0);
 
     mac_stub_stop(&sa);
     mac_stub_stop(&sb);

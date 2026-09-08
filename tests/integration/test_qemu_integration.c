@@ -1,3 +1,4 @@
+#include "test_check.h"
 #define _GNU_SOURCE
 /* test_qemu_integration.c — QEMU 侧综合集成测试
  *

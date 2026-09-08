@@ -1,5 +1,5 @@
 /* In-process A↔B frame loopback through eth_port. */
-#include <assert.h>
+#include "test_check.h"
 #include <stdio.h>
 #include <string.h>
 #include <unistd.h>
@@ -13,8 +13,8 @@ int main(void)
 
     eth_port_t pa = {0}, pb = {0};
     /* Link model fields default to 0 (no drop / unlimited / no fc). */
-    assert(eth_port_open(&pa, shm_name, ETH_ROLE_A, 1) == 0);
-    assert(eth_port_open(&pb, shm_name, ETH_ROLE_B, 0) == 0);
+    CHECK(eth_port_open(&pa, shm_name, ETH_ROLE_A, 1) == 0);
+    CHECK(eth_port_open(&pb, shm_name, ETH_ROLE_B, 0) == 0);
 
     const int N = 500;
     int tx = 0, rx = 0;
@@ -32,9 +32,9 @@ int main(void)
         if (eth_port_recv(&pb, &out, 1000000) == 0) {
             rx++;
             eth_port_tx_complete(&pa);
-            assert(out.len == 64);
-            assert(out.seq == (uint32_t)(rx - 1));
-            assert(out.data[0] == (uint8_t)(rx - 1));
+            CHECK(out.len == 64);
+            CHECK(out.seq == (uint32_t)(rx - 1));
+            CHECK(out.data[0] == (uint8_t)(rx - 1));
         }
     }
 
@@ -46,8 +46,8 @@ int main(void)
     }
 
     printf("loopback: tx=%d rx=%d\n", tx, rx);
-    assert(tx == N);
-    assert(rx == N);
+    CHECK(tx == N);
+    CHECK(rx == N);
 
     eth_port_close(&pb);
     eth_port_close(&pa);

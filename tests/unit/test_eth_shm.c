@@ -1,4 +1,4 @@
-#include <assert.h>
+#include "test_check.h"
 #include <stdio.h>
 #include <string.h>
 #include <unistd.h>
@@ -20,14 +20,14 @@ static void test_open_close_unlink(void)
     eth_shm_unlink(name);
 
     eth_shm_t shm_creator = {0};
-    assert(eth_shm_open(&shm_creator, name, 1) == 0);
-    assert(shm_creator.ctrl->magic == ETH_SHM_MAGIC);
-    assert(shm_creator.a_to_b->depth == ETH_FRAME_RING_DEPTH);
+    CHECK(eth_shm_open(&shm_creator, name, 1) == 0);
+    CHECK(shm_creator.ctrl->magic == ETH_SHM_MAGIC);
+    CHECK(shm_creator.a_to_b->depth == ETH_FRAME_RING_DEPTH);
 
     /* attach from another handle */
     eth_shm_t shm_peer = {0};
-    assert(eth_shm_open(&shm_peer, name, 0) == 0);
-    assert(shm_peer.ctrl->magic == ETH_SHM_MAGIC);
+    CHECK(eth_shm_open(&shm_peer, name, 0) == 0);
+    CHECK(shm_peer.ctrl->magic == ETH_SHM_MAGIC);
 
     eth_shm_close(&shm_peer);
     eth_shm_close(&shm_creator);
@@ -41,22 +41,22 @@ static void test_enqueue_dequeue_order(void)
     snprintf(name, sizeof(name), "/cosim-eth-test-%d", (int)getpid());
     eth_shm_unlink(name);
     eth_shm_t shm = {0};
-    assert(eth_shm_open(&shm, name, 1) == 0);
+    CHECK(eth_shm_open(&shm, name, 1) == 0);
 
     eth_frame_ring_t *ring = shm.a_to_b;
     eth_frame_t f;
     for (uint32_t i = 0; i < 10; i++) {
         make_frame(&f, i, 64, (uint8_t)i);
-        assert(eth_shm_enqueue(ring, &f) == 0);
+        CHECK(eth_shm_enqueue(ring, &f) == 0);
     }
     for (uint32_t i = 0; i < 10; i++) {
         eth_frame_t out;
-        assert(eth_shm_dequeue(ring, &out) == 0);
-        assert(out.seq == i);
-        assert(out.len == 64);
-        assert(out.data[0] == (uint8_t)i);
+        CHECK(eth_shm_dequeue(ring, &out) == 0);
+        CHECK(out.seq == i);
+        CHECK(out.len == 64);
+        CHECK(out.data[0] == (uint8_t)i);
     }
-    assert(eth_shm_dequeue(ring, &f) == -1);  /* empty */
+    CHECK(eth_shm_dequeue(ring, &f) == -1);  /* empty */
 
     eth_shm_close(&shm);
     eth_shm_unlink(name);
@@ -69,7 +69,7 @@ static void test_ring_full(void)
     snprintf(name, sizeof(name), "/cosim-eth-test-%d", (int)getpid());
     eth_shm_unlink(name);
     eth_shm_t shm = {0};
-    assert(eth_shm_open(&shm, name, 1) == 0);
+    CHECK(eth_shm_open(&shm, name, 1) == 0);
 
     eth_frame_t f;
     uint32_t pushed = 0;
@@ -79,7 +79,7 @@ static void test_ring_full(void)
         pushed++;
     }
     /* ring capacity = depth - 1 (SPSC convention) */
-    assert(pushed == ETH_FRAME_RING_DEPTH - 1);
+    CHECK(pushed == ETH_FRAME_RING_DEPTH - 1);
 
     eth_shm_close(&shm);
     eth_shm_unlink(name);
@@ -92,12 +92,12 @@ static void test_roles_are_opposite(void)
     snprintf(name, sizeof(name), "/cosim-eth-test-%d", (int)getpid());
     eth_shm_unlink(name);
     eth_shm_t shm = {0};
-    assert(eth_shm_open(&shm, name, 1) == 0);
+    CHECK(eth_shm_open(&shm, name, 1) == 0);
 
-    assert(eth_shm_tx_ring(&shm, ETH_ROLE_A) == shm.a_to_b);
-    assert(eth_shm_rx_ring(&shm, ETH_ROLE_A) == shm.b_to_a);
-    assert(eth_shm_tx_ring(&shm, ETH_ROLE_B) == shm.b_to_a);
-    assert(eth_shm_rx_ring(&shm, ETH_ROLE_B) == shm.a_to_b);
+    CHECK(eth_shm_tx_ring(&shm, ETH_ROLE_A) == shm.a_to_b);
+    CHECK(eth_shm_rx_ring(&shm, ETH_ROLE_A) == shm.b_to_a);
+    CHECK(eth_shm_tx_ring(&shm, ETH_ROLE_B) == shm.b_to_a);
+    CHECK(eth_shm_rx_ring(&shm, ETH_ROLE_B) == shm.a_to_b);
 
     eth_shm_close(&shm);
     eth_shm_unlink(name);
@@ -110,16 +110,16 @@ static void test_ready_flag_and_time(void)
     snprintf(name, sizeof(name), "/cosim-eth-test-%d", (int)getpid());
     eth_shm_unlink(name);
     eth_shm_t shm = {0};
-    assert(eth_shm_open(&shm, name, 1) == 0);
+    CHECK(eth_shm_open(&shm, name, 1) == 0);
 
-    assert(eth_shm_peer_ready(&shm, ETH_ROLE_A) == 0);
+    CHECK(eth_shm_peer_ready(&shm, ETH_ROLE_A) == 0);
     eth_shm_mark_ready(&shm, ETH_ROLE_B);
-    assert(eth_shm_peer_ready(&shm, ETH_ROLE_A) == 1);
+    CHECK(eth_shm_peer_ready(&shm, ETH_ROLE_A) == 1);
 
     eth_shm_advance_time(&shm, ETH_ROLE_A, 12345);
-    assert(eth_shm_peer_time(&shm, ETH_ROLE_B) == 12345);
+    CHECK(eth_shm_peer_time(&shm, ETH_ROLE_B) == 12345);
     eth_shm_advance_time(&shm, ETH_ROLE_B, 67890);
-    assert(eth_shm_peer_time(&shm, ETH_ROLE_A) == 67890);
+    CHECK(eth_shm_peer_time(&shm, ETH_ROLE_A) == 67890);
 
     eth_shm_close(&shm);
     eth_shm_unlink(name);

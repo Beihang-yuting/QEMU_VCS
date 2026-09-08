@@ -1,7 +1,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <assert.h>
+#include "test_check.h"
 #include "ring_buffer.h"
 #include "cosim_types.h"
 
@@ -9,10 +9,10 @@ static void test_init(void) {
     uint8_t buf[1024];
     ring_buf_t rb;
     int ret = ring_buf_init(&rb, buf, sizeof(buf), sizeof(uint32_t));
-    assert(ret == 0);
-    assert(ring_buf_is_empty(&rb));
-    assert(!ring_buf_is_full(&rb));
-    assert(ring_buf_count(&rb) == 0);
+    CHECK(ret == 0);
+    CHECK(ring_buf_is_empty(&rb));
+    CHECK(!ring_buf_is_full(&rb));
+    CHECK(ring_buf_count(&rb) == 0);
     printf("  PASS: test_init\n");
 }
 
@@ -23,15 +23,15 @@ static void test_enqueue_dequeue_single(void) {
 
     uint32_t val_in = 0xDEADBEEF;
     int ret = ring_buf_enqueue(&rb, &val_in);
-    assert(ret == 0);
-    assert(ring_buf_count(&rb) == 1);
-    assert(!ring_buf_is_empty(&rb));
+    CHECK(ret == 0);
+    CHECK(ring_buf_count(&rb) == 1);
+    CHECK(!ring_buf_is_empty(&rb));
 
     uint32_t val_out = 0;
     ret = ring_buf_dequeue(&rb, &val_out);
-    assert(ret == 0);
-    assert(val_out == 0xDEADBEEF);
-    assert(ring_buf_is_empty(&rb));
+    CHECK(ret == 0);
+    CHECK(val_out == 0xDEADBEEF);
+    CHECK(ring_buf_is_empty(&rb));
     printf("  PASS: test_enqueue_dequeue_single\n");
 }
 
@@ -40,30 +40,30 @@ static void test_fill_and_drain(void) {
     ring_buf_t rb;
     ring_buf_init(&rb, buf, sizeof(buf), sizeof(uint32_t));
     uint32_t cap = ring_buf_capacity(&rb);
-    assert(cap > 0);
+    CHECK(cap > 0);
 
     for (uint32_t i = 0; i < cap; i++) {
         uint32_t val = i + 100;
         int ret = ring_buf_enqueue(&rb, &val);
-        assert(ret == 0);
+        CHECK(ret == 0);
     }
-    assert(ring_buf_is_full(&rb));
+    CHECK(ring_buf_is_full(&rb));
 
     uint32_t extra = 999;
     int ret = ring_buf_enqueue(&rb, &extra);
-    assert(ret == -1);
+    CHECK(ret == -1);
 
     for (uint32_t i = 0; i < cap; i++) {
         uint32_t val = 0;
         ret = ring_buf_dequeue(&rb, &val);
-        assert(ret == 0);
-        assert(val == i + 100);
+        CHECK(ret == 0);
+        CHECK(val == i + 100);
     }
-    assert(ring_buf_is_empty(&rb));
+    CHECK(ring_buf_is_empty(&rb));
 
     uint32_t dummy;
     ret = ring_buf_dequeue(&rb, &dummy);
-    assert(ret == -1);
+    CHECK(ret == -1);
 
     printf("  PASS: test_fill_and_drain\n");
 }
@@ -77,12 +77,12 @@ static void test_wrap_around(void) {
     for (int round = 0; round < 5; round++) {
         for (uint32_t i = 0; i < cap; i++) {
             uint32_t val = round * 1000 + i;
-            assert(ring_buf_enqueue(&rb, &val) == 0);
+            CHECK(ring_buf_enqueue(&rb, &val) == 0);
         }
         for (uint32_t i = 0; i < cap; i++) {
             uint32_t val;
-            assert(ring_buf_dequeue(&rb, &val) == 0);
-            assert(val == (uint32_t)(round * 1000 + i));
+            CHECK(ring_buf_dequeue(&rb, &val) == 0);
+            CHECK(val == (uint32_t)(round * 1000 + i));
         }
     }
     printf("  PASS: test_wrap_around\n");
@@ -101,14 +101,14 @@ static void test_tlp_entry_size(void) {
     entry_in.len = 4;
     entry_in.data[0] = 0x42;
 
-    assert(ring_buf_enqueue(&rb, &entry_in) == 0);
+    CHECK(ring_buf_enqueue(&rb, &entry_in) == 0);
 
     tlp_entry_t entry_out;
-    assert(ring_buf_dequeue(&rb, &entry_out) == 0);
-    assert(entry_out.type == TLP_MWR);
-    assert(entry_out.tag == 0x0A);
-    assert(entry_out.addr == 0xFE000010);
-    assert(entry_out.data[0] == 0x42);
+    CHECK(ring_buf_dequeue(&rb, &entry_out) == 0);
+    CHECK(entry_out.type == TLP_MWR);
+    CHECK(entry_out.tag == 0x0A);
+    CHECK(entry_out.addr == 0xFE000010);
+    CHECK(entry_out.data[0] == 0x42);
 
     printf("  PASS: test_tlp_entry_size\n");
 }
