@@ -826,13 +826,19 @@ class pcie_tl_func_manager extends uvm_object;
         return count;
     endfunction
 
-    `ifdef PCIE_COSIM_ENABLE
     //=========================================================================
     // Export topology to C bridge via DPI-C for one initialized RC.
     // A paired 64-bit BAR contributes flags and size only at its low owner;
     // its upper configuration DWORD is not an independently registered BAR.
+    //
+    // 本函数必须无条件定义：cosim_xrc_driver 等调用方支持纯 VIP（非
+    // cosim）运行阶段，调用点不带宏守卫。因此 PCIE_COSIM_ENABLE 只
+    // 门控函数体内的 DPI 导出：未启用 cosim 时本调用是安全空操作。
+    // 若把整个定义包进宏（历史写法），非 cosim 编译会在调用点报
+    // "Could not find member 'export_topology_to_bridge'"。
     //=========================================================================
     function void export_topology_to_bridge(int rc_index);
+`ifdef PCIE_COSIM_ENABLE
         longint unsigned pf_bar_size[6];
         longint unsigned vf_bar_size[6];
 
@@ -856,7 +862,9 @@ class pcie_tl_func_manager extends uvm_object;
                 vf_bar_size[3], vf_bar_size[4], vf_bar_size[5]);
         end
         bridge_vcs_finalize_topology_rc(rc_index, num_pfs, tag_width);
+`else
+        // 非 cosim 构建没有 bridge DPI 实现，导出请求安全忽略。
+`endif
     endfunction
-    `endif
 
 endclass
